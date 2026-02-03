@@ -135,8 +135,8 @@ Returns a URL to the generated image.`,
         },
         model: {
           type: 'string',
-          description: 'Image model. Options: flux-pro (best), flux-dev (fast), sdxl, pony, illustrious',
-          default: 'flux-dev',
+          description: 'Image model. Options: flux-2-pro (best), flux-2-max (fast), lustify-sdxl',
+          default: 'flux-2-max',
         },
         width: {
           type: 'integer',
@@ -244,8 +244,8 @@ Supports: text-to-video, image-to-video, video-to-video`,
         },
         model: {
           type: 'string',
-          description: 'Video model: kling-1.6-pro (best), kling-1.6-standard (faster), minimax-video-01, luma-ray-2',
-          default: 'kling-1.6-standard',
+          description: 'Video model: kling-2.6-pro-text-to-video (best), kling-2.5-turbo-pro-text-to-video (faster). For image-to-video use kling-2.6-pro-image-to-video',
+          default: 'kling-2.6-pro-text-to-video',
         },
         image_url: {
           type: 'string',
@@ -261,12 +261,12 @@ Supports: text-to-video, image-to-video, video-to-video`,
         },
         duration: {
           type: 'string',
-          description: 'Video duration: "5" or "10" seconds',
-          default: '5',
+          description: 'Video duration: "5s" or "10s"',
+          default: '5s',
         },
         aspect_ratio: {
           type: 'string',
-          description: 'Aspect ratio: "16:9", "9:16", "1:1"',
+          description: 'Aspect ratio (required): "16:9", "9:16", "1:1"',
           default: '16:9',
         },
         negative_prompt: {
@@ -314,8 +314,8 @@ Returns a URL to the generated audio file.`,
         },
         model: {
           type: 'string',
-          description: 'TTS model (default: tts-1-hd)',
-          default: 'tts-1-hd',
+          description: 'TTS model (default: tts-kokoro)',
+          default: 'tts-kokoro',
         },
         speed: {
           type: 'number',
@@ -348,8 +348,8 @@ Can transcribe in multiple languages and optionally include timestamps.`,
         },
         model: {
           type: 'string',
-          description: 'Transcription model (default: whisper-large-v3)',
-          default: 'whisper-large-v3',
+          description: 'Transcription model (default: openai/whisper-large-v3)',
+          default: 'openai/whisper-large-v3',
         },
         language: {
           type: 'string',
@@ -513,8 +513,12 @@ async function handleCharacters(args: Record<string, unknown>): Promise<string> 
 }
 
 async function handleImage(args: Record<string, unknown>): Promise<string> {
-  const model = String(args.model || 'flux-dev');
+  const model = String(args.model || 'flux-2-max');
+  const width = Number(args.width || 1024);
+  const height = Number(args.height || 1024);
+  const size = `${width}x${height}`;
   
+  // Use OpenAI-compatible endpoint with size parameter
   const response = await fetch(`${VENICE_API_BASE}/images/generations`, {
     method: 'POST',
     headers: {
@@ -524,8 +528,8 @@ async function handleImage(args: Record<string, unknown>): Promise<string> {
     body: JSON.stringify({
       model,
       prompt: String(args.prompt),
-      width: Number(args.width || 1024),
-      height: Number(args.height || 1024),
+      size,
+      response_format: 'url',
       style_preset: args.style_preset,
       negative_prompt: args.negative_prompt,
       seed: args.seed,
@@ -537,14 +541,14 @@ async function handleImage(args: Record<string, unknown>): Promise<string> {
     throw new Error(`Image generation failed: ${error}`);
   }
   
-  const data = await response.json() as { data: Array<{ url: string }> };
+  const data = await response.json() as { data?: Array<{ url: string }> };
   const imageUrl = data.data?.[0]?.url;
   
   if (!imageUrl) {
     throw new Error('No image URL in response');
   }
   
-  return `Generated image: ${imageUrl}\n\nPrompt: ${args.prompt}\nModel: ${model}\nSize: ${args.width || 1024}x${args.height || 1024}`;
+  return `Generated image (data URL): ${imageUrl.slice(0, 100)}...\n\nPrompt: ${args.prompt}\nModel: ${model}\nSize: ${size}`;
 }
 
 async function handleImageEdit(args: Record<string, unknown>): Promise<string> {
@@ -578,15 +582,30 @@ async function handleImageEdit(args: Record<string, unknown>): Promise<string> {
 }
 
 async function handleBackgroundRemove(args: Record<string, unknown>): Promise<string> {
+  const imageInput = String(args.image);
+  
+  // Determine if input is URL or base64
+  const isUrl = imageInput.startsWith('http://') || imageInput.startsWith('https://');
+  
+  const body: Record<string, string> = {};
+  if (isUrl) {
+    body.image_url = imageInput;
+  } else {
+    // Assume base64, wrap as data URL if needed
+    if (imageInput.startsWith('data:')) {
+      body.image_url = imageInput;
+    } else {
+      body.image_url = `data:image/png;base64,${imageInput}`;
+    }
+  }
+  
   const response = await fetch(`${VENICE_API_BASE}/image/background-remove`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${process.env.VENICE_API_KEY}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      image: String(args.image),
-    }),
+    body: JSON.stringify(body),
   });
   
   if (!response.ok) {
@@ -629,12 +648,16 @@ async function handleUpscale(args: Record<string, unknown>): Promise<string> {
 }
 
 async function handleVideoGenerate(args: Record<string, unknown>): Promise<string> {
-  const model = String(args.model || 'kling-1.6-standard');
+  const model = String(args.model || 'kling-2.6-pro-text-to-video');
+  
+  // Ensure duration has 's' suffix
+  let duration = String(args.duration || '5s');
+  if (!duration.endsWith('s')) duration += 's';
   
   const body: Record<string, unknown> = {
     model,
     prompt: String(args.prompt),
-    duration: String(args.duration || '5'),
+    duration,
     aspect_ratio: String(args.aspect_ratio || '16:9'),
   };
   
@@ -711,7 +734,7 @@ async function handleTTS(args: Record<string, unknown>): Promise<string> {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: String(args.model || 'tts-1-hd'),
+      model: String(args.model || 'tts-kokoro'),
       input: String(args.text),
       voice: String(args.voice || 'alloy'),
       speed: Number(args.speed || 1.0),
@@ -735,30 +758,40 @@ async function handleTTS(args: Record<string, unknown>): Promise<string> {
 }
 
 async function handleTranscribe(args: Record<string, unknown>): Promise<string> {
-  // For transcription, we need to download the audio and send it as form data
-  // For simplicity with URLs, we'll use the JSON API if available, or note the limitation
+  const audioUrl = String(args.audio_url);
+  const model = String(args.model || 'openai/whisper-large-v3');
+  
+  // Download the audio file first
+  const audioResponse = await fetch(audioUrl);
+  if (!audioResponse.ok) {
+    throw new Error(`Failed to download audio from URL: ${audioResponse.statusText}`);
+  }
+  
+  const audioBuffer = await audioResponse.arrayBuffer();
+  const audioBlob = new Blob([audioBuffer]);
+  
+  // Determine filename from URL or use default
+  const urlParts = audioUrl.split('/');
+  const filename = urlParts[urlParts.length - 1]?.split('?')[0] || 'audio.mp3';
+  
+  // Create FormData for multipart upload
+  const formData = new FormData();
+  formData.append('file', audioBlob, filename);
+  formData.append('model', model);
+  if (args.language) formData.append('language', String(args.language));
+  if (args.timestamps) formData.append('timestamps', 'true');
+  if (args.response_format) formData.append('response_format', String(args.response_format));
   
   const response = await fetch(`${VENICE_API_BASE}/audio/transcriptions`, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${process.env.VENICE_API_KEY}`,
-      'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      model: String(args.model || 'whisper-large-v3'),
-      audio_url: String(args.audio_url),
-      language: args.language,
-      timestamps: Boolean(args.timestamps),
-      response_format: String(args.response_format || 'json'),
-    }),
+    body: formData,
   });
   
   if (!response.ok) {
     const error = await response.text();
-    // If JSON body not supported, note that file upload is needed
-    if (error.includes('multipart') || error.includes('file')) {
-      throw new Error('Transcription requires file upload. Please provide the audio as a direct file upload or use Venice API directly with multipart/form-data.');
-    }
     throw new Error(`Transcription failed: ${error}`);
   }
   
