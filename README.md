@@ -15,7 +15,7 @@ This MCP server exposes Venice AI's complete API as tools that AI coding assista
 ### Image
 | Tool | Description |
 |------|-------------|
-| `venice_image` | Image generation (Flux Pro, SDXL, Pony, Illustrious) |
+| `venice_image` | Image generation (Flux 2 Pro, Flux 2 Max, Lustify SDXL) |
 | `venice_image_edit` | AI-powered image editing with text prompts |
 | `venice_background_remove` | Remove backgrounds from images |
 | `venice_upscale` | Upscale images 2x or 4x |
@@ -148,7 +148,7 @@ Generate images from text prompts.
 
 **Parameters:**
 - `prompt` (required) - Image description
-- `model` - Model (default: `flux-dev`)
+- `model` - Model (default: `flux-2-max`). Options: `flux-2-pro`, `flux-2-max`, `lustify-sdxl`
 - `width` / `height` - Dimensions (default: 1024)
 - `style_preset` - Style: photographic, anime, etc.
 - `negative_prompt` - What to avoid
@@ -179,19 +179,18 @@ Start an async video generation job.
 
 **Parameters:**
 - `prompt` (required) - Video description
-- `model` - Video model (default: `kling-1.6-standard`)
+- `model` - Video model (default: `kling-2.6-pro-text-to-video`)
 - `image_url` - Starting image for image-to-video
 - `end_image_url` - Ending image (some models)
 - `video_url` - Source video for video-to-video
-- `duration` - "5" or "10" seconds
-- `aspect_ratio` - "16:9", "9:16", "1:1"
+- `duration` - `5s` or `10s`
+- `aspect_ratio` (required) - `16:9`, `9:16`, `1:1`
 - `negative_prompt` - What to avoid
 
 **Models:**
-- `kling-1.6-pro` — Highest quality
-- `kling-1.6-standard` — Good balance
-- `minimax-video-01` — Fast
-- `luma-ray-2` — Cinematic
+- `kling-2.6-pro-text-to-video` — Text to video
+- `kling-2.6-pro-image-to-video` — Image to video
+- `kling-2.5-turbo-pro-text-to-video` — Faster text to video
 
 ### `venice_video_status`
 Check video generation progress.
@@ -204,6 +203,7 @@ Convert text to speech.
 
 **Parameters:**
 - `text` (required) - Text to speak
+- `model` - TTS model (default: `tts-kokoro`)
 - `voice` - Voice ID (default: `alloy`)
 - `speed` - 0.25-4.0 (default: 1.0)
 - `response_format` - mp3, opus, aac, flac, wav
@@ -213,7 +213,7 @@ Transcribe audio to text.
 
 **Parameters:**
 - `audio_url` (required) - URL of audio file
-- `model` - Model (default: `whisper-large-v3`)
+- `model` - Model (default: `openai/whisper-large-v3`)
 - `language` - Language code (auto-detected if not specified)
 - `timestamps` - Include word timestamps
 - `response_format` - json, text, verbose_json
