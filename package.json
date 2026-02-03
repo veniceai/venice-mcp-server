@@ -1,0 +1,48 @@
+{
+  "name": "@venice-ai/mcp-server",
+  "version": "1.0.0",
+  "description": "Model Context Protocol server for Venice AI APIs — enables Claude Code, Cline, and other AI agents to use Venice's chat, image, audio, and video generation",
+  "main": "dist/index.js",
+  "bin": {
+    "venice-mcp-server": "./dist/index.js"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest"
+  },
+  "keywords": [
+    "venice",
+    "venice-ai",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "ai-agents",
+    "llm",
+    "image-generation",
+    "text-to-speech"
+  ],
+  "author": "Venice AI",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "openai": "^4.0.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "vitest": "^1.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/veniceai/venice-mcp-server"
+  },
+  "homepage": "https://docs.venice.ai"
+}
