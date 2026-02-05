@@ -280,7 +280,7 @@ Supports: text-to-video, image-to-video, video-to-video`,
   {
     name: 'venice_video_status',
     description: `Check the status of a video generation job.
-Use the queue_id returned from venice_video_generate.
+Use the queue_id and model returned from venice_video_generate.
 Returns status (queued, processing, completed, failed) and video URL when ready.`,
     inputSchema: {
       type: 'object',
@@ -289,8 +289,12 @@ Returns status (queued, processing, completed, failed) and video URL when ready.
           type: 'string',
           description: 'The queue_id returned from venice_video_generate',
         },
+        model: {
+          type: 'string',
+          description: 'The model used for video generation (returned from venice_video_generate)',
+        },
       },
-      required: ['queue_id'],
+      required: ['queue_id', 'model'],
     },
   },
 
@@ -398,14 +402,14 @@ Returns a float array representing the semantic meaning of the input.`,
   {
     name: 'venice_models',
     description: `List available Venice AI models.
-Returns models grouped by type: text, image, audio, video, embeddings.
+Returns models grouped by type: text, image, video, audio/tts, embeddings, inpaint.
 Use this to discover which models are available for other Venice tools.`,
     inputSchema: {
       type: 'object',
       properties: {
         type: {
           type: 'string',
-          enum: ['text', 'image', 'audio', 'video', 'embeddings', 'all'],
+          enum: ['text', 'image', 'video', 'audio', 'tts', 'embeddings', 'inpaint', 'all'],
           description: 'Filter by model type (default: all)',
           default: 'all',
         },
@@ -548,7 +552,22 @@ async function handleImage(args: Record<string, unknown>): Promise<string> {
     throw new Error('No image URL in response');
   }
   
-  return `Generated image (data URL): ${imageUrl.slice(0, 100)}...\n\nPrompt: ${args.prompt}\nModel: ${model}\nSize: ${size}`;
+  // Return full URL for use with other tools (image_edit, upscale, background_remove)
+  // For data URLs, include the full base64 so it can be passed to other tools
+  const isDataUrl = imageUrl.startsWith('data:');
+  
+  let output = `# Generated Image\n\n`;
+  output += `**Prompt:** ${args.prompt}\n`;
+  output += `**Model:** ${model}\n`;
+  output += `**Size:** ${size}\n\n`;
+  
+  if (isDataUrl) {
+    output += `**Image (data URL for use with other Venice tools):**\n${imageUrl}`;
+  } else {
+    output += `**Image URL:** ${imageUrl}`;
+  }
+  
+  return output;
 }
 
 async function handleImageEdit(args: Record<string, unknown>): Promise<string> {
@@ -694,6 +713,7 @@ async function handleVideoStatus(args: Record<string, unknown>): Promise<string>
     },
     body: JSON.stringify({
       queue_id: String(args.queue_id),
+      model: String(args.model),
     }),
   });
   
@@ -826,47 +846,66 @@ async function handleEmbeddings(args: Record<string, unknown>): Promise<string> 
 }
 
 async function handleModels(args: Record<string, unknown>): Promise<string> {
-  const response = await venice.models.list();
-  const models = response.data;
-  
   const typeFilter = String(args.type || 'all').toLowerCase();
   
-  // Group by type
-  const grouped: Record<string, string[]> = {
-    text: [],
-    image: [],
-    audio: [],
-    video: [],
-    embeddings: [],
+  // Map filter types to Venice API types
+  const typeMapping: Record<string, string> = {
+    text: 'text',
+    image: 'image',
+    video: 'video',
+    audio: 'tts',
+    tts: 'tts',
+    embeddings: 'embedding',
+    embedding: 'embedding',
+    all: 'all',
   };
   
-  for (const model of models) {
-    const id = model.id;
-    if (id.includes('embed') || id.includes('bge')) {
-      grouped.embeddings.push(id);
-    } else if (id.includes('flux') || id.includes('sdxl') || id.includes('pony') || id.includes('illustrious')) {
-      grouped.image.push(id);
-    } else if (id.includes('tts') || id.includes('whisper') || id.includes('speech')) {
-      grouped.audio.push(id);
-    } else if (id.includes('video') || id.includes('minimax') || id.includes('kling') || id.includes('luma')) {
-      grouped.video.push(id);
-    } else {
-      grouped.text.push(id);
+  const apiType = typeMapping[typeFilter] || 'all';
+  
+  // Fetch models by type from Venice API
+  const fetchModelsByType = async (type: string): Promise<{ id: string; friendly_name?: string }[]> => {
+    const url = type === 'all' 
+      ? `${VENICE_API_BASE}/models`
+      : `${VENICE_API_BASE}/models?type=${type}`;
+    
+    const response = await fetch(url, {
+      headers: {
+        'Authorization': `Bearer ${process.env.VENICE_API_KEY}`,
+      },
+    });
+    
+    if (!response.ok) {
+      return [];
     }
-  }
+    
+    const data = await response.json() as { data?: Array<{ id: string; friendly_name?: string }> };
+    return data.data || [];
+  };
   
   let output = '# Venice AI Models\n\n';
   
-  const types = typeFilter === 'all' 
-    ? ['text', 'image', 'audio', 'video', 'embeddings']
-    : [typeFilter];
-  
-  for (const type of types) {
-    const list = grouped[type] || [];
-    if (list.length > 0) {
-      output += `## ${type.charAt(0).toUpperCase() + type.slice(1)} Models (${list.length})\n`;
-      output += list.map(m => `- ${m}`).join('\n');
+  if (apiType === 'all') {
+    // Fetch all model types
+    const types = ['text', 'image', 'video', 'tts', 'embedding', 'inpaint'];
+    
+    for (const type of types) {
+      const models = await fetchModelsByType(type);
+      if (models.length > 0) {
+        const displayType = type === 'tts' ? 'Audio/TTS' : type.charAt(0).toUpperCase() + type.slice(1);
+        output += `## ${displayType} Models (${models.length})\n`;
+        output += models.map(m => `- ${m.id}${m.friendly_name ? ` (${m.friendly_name})` : ''}`).join('\n');
+        output += '\n\n';
+      }
+    }
+  } else {
+    const models = await fetchModelsByType(apiType);
+    if (models.length > 0) {
+      const displayType = apiType === 'tts' ? 'Audio/TTS' : apiType.charAt(0).toUpperCase() + apiType.slice(1);
+      output += `## ${displayType} Models (${models.length})\n`;
+      output += models.map(m => `- ${m.id}${m.friendly_name ? ` (${m.friendly_name})` : ''}`).join('\n');
       output += '\n\n';
+    } else {
+      output += `No ${apiType} models found.\n`;
     }
   }
   
