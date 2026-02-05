@@ -313,8 +313,8 @@ Returns a URL to the generated audio file.`,
         },
         voice: {
           type: 'string',
-          description: 'Voice ID. Popular options: alloy, echo, fable, onyx, nova, shimmer (default: alloy)',
-          default: 'alloy',
+          description: 'Voice ID. Use prefix + name format. Popular options: af_alloy, af_nova, af_sky, am_echo, am_onyx, bm_fable, bf_emma. Prefixes: af=American Female, am=American Male, bf=British Female, bm=British Male. (default: af_alloy)',
+          default: 'af_alloy',
         },
         model: {
           type: 'string',
@@ -722,25 +722,45 @@ async function handleVideoStatus(args: Record<string, unknown>): Promise<string>
     throw new Error(`Failed to get video status: ${error}`);
   }
   
+  const contentType = response.headers.get('content-type') || '';
+  
+  // If the response is video content, the video is complete
+  if (contentType.includes('video/') || contentType.includes('application/octet-stream')) {
+    const videoBuffer = await response.arrayBuffer();
+    const base64Video = Buffer.from(videoBuffer).toString('base64');
+    const mimeType = contentType.includes('video/') ? contentType.split(';')[0] : 'video/mp4';
+    
+    return `✅ **Video ready!**
+
+**Queue ID:** ${args.queue_id}
+**Size:** ${(videoBuffer.byteLength / 1024 / 1024).toFixed(2)} MB
+
+**Video (data URL):**
+data:${mimeType};base64,${base64Video}`;
+  }
+  
+  // Otherwise parse as JSON status response
   const data = await response.json() as { 
     status: string; 
-    video_url?: string; 
+    average_execution_time?: number;
+    execution_duration?: number;
     error?: string;
-    progress?: number;
   };
   
   let output = `**Status:** ${data.status}\n`;
   
-  if (data.progress !== undefined) {
-    output += `**Progress:** ${data.progress}%\n`;
+  if (data.execution_duration !== undefined && data.average_execution_time !== undefined) {
+    const progress = Math.min(100, Math.round((data.execution_duration / data.average_execution_time) * 100));
+    const remainingMs = Math.max(0, data.average_execution_time - data.execution_duration);
+    const remainingSec = Math.round(remainingMs / 1000);
+    output += `**Progress:** ~${progress}%\n`;
+    output += `**Estimated time remaining:** ~${remainingSec}s\n`;
   }
   
-  if (data.status === 'completed' && data.video_url) {
-    output += `\n✅ **Video ready!**\n${data.video_url}`;
-  } else if (data.status === 'failed') {
-    output += `\n❌ **Generation failed**\n${data.error || 'Unknown error'}`;
-  } else {
+  if (data.status === 'PROCESSING') {
     output += `\nVideo is still processing. Check again in a moment.`;
+  } else if (data.status === 'failed' || data.status === 'FAILED') {
+    output += `\n❌ **Generation failed**\n${data.error || 'Unknown error'}`;
   }
   
   return output;
@@ -756,7 +776,7 @@ async function handleTTS(args: Record<string, unknown>): Promise<string> {
     body: JSON.stringify({
       model: String(args.model || 'tts-kokoro'),
       input: String(args.text),
-      voice: String(args.voice || 'alloy'),
+      voice: String(args.voice || 'af_alloy'),
       speed: Number(args.speed || 1.0),
       response_format: String(args.response_format || 'mp3'),
     }),
@@ -770,11 +790,11 @@ async function handleTTS(args: Record<string, unknown>): Promise<string> {
   const contentType = response.headers.get('content-type');
   
   if (contentType?.includes('audio')) {
-    return `Audio generated successfully.\n\n**Voice:** ${args.voice || 'alloy'}\n**Speed:** ${args.speed || 1.0}x\n**Text:** "${String(args.text).slice(0, 100)}${String(args.text).length > 100 ? '...' : ''}"`;
+    return `Audio generated successfully.\n\n**Voice:** ${args.voice || 'af_alloy'}\n**Speed:** ${args.speed || 1.0}x\n**Text:** "${String(args.text).slice(0, 100)}${String(args.text).length > 100 ? '...' : ''}"`;
   }
   
   const data = await response.json() as { url?: string };
-  return `Generated audio: ${data.url}\n\n**Voice:** ${args.voice || 'alloy'}\n**Text:** "${String(args.text).slice(0, 100)}..."`;
+  return `Generated audio: ${data.url}\n\n**Voice:** ${args.voice || 'af_alloy'}\n**Text:** "${String(args.text).slice(0, 100)}..."`;
 }
 
 async function handleTranscribe(args: Record<string, unknown>): Promise<string> {
