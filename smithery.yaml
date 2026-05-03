@@ -1,0 +1,39 @@
+# Smithery deployment manifest. See https://smithery.ai/docs
+runtime: typescript
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      VENICE_API_KEY:
+        type: string
+        title: Venice API key
+        description: Optional. If unset, server passes 402 challenges back to the client (x402 mode).
+      VENICE_API_BASE_URL:
+        type: string
+        title: API base URL
+        default: https://api.venice.ai
+      VENICE_DEFAULT_CHAT_MODEL:
+        type: string
+        default: venice-uncensored
+      VENICE_DEFAULT_IMAGE_MODEL:
+        type: string
+        default: flux-2-pro
+      VENICE_DISABLE_NSFW:
+        type: string
+        title: Disable NSFW capability advertising
+        description: Set to "1" to remove NSFW notes from tool descriptions.
+  commandFunction: |-
+    (config) => ({
+      command: "node",
+      args: ["./dist/cli.js"],
+      env: {
+        VENICE_API_KEY: config.VENICE_API_KEY ?? "",
+        VENICE_API_BASE_URL: config.VENICE_API_BASE_URL ?? "https://api.venice.ai",
+        VENICE_DEFAULT_CHAT_MODEL: config.VENICE_DEFAULT_CHAT_MODEL ?? "venice-uncensored",
+        VENICE_DEFAULT_IMAGE_MODEL: config.VENICE_DEFAULT_IMAGE_MODEL ?? "flux-2-pro",
+        VENICE_DISABLE_NSFW: config.VENICE_DISABLE_NSFW ?? ""
+      }
+    })
+build:
+  dockerfile: Dockerfile

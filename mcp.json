@@ -1,0 +1,29 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schema/mcp.json",
+  "name": "venice",
+  "displayName": "Venice AI",
+  "description": "Uncensored, private, crypto-native AI inference (LLM, image, video, TTS, ASR, music, characters) by Venice.ai. Pay-per-call via x402, optional API key, no account required.",
+  "homepage": "https://venice.ai",
+  "license": "MIT",
+  "version": "0.1.0",
+  "keywords": ["uncensored", "privacy", "crypto", "x402", "image-generation", "video-generation", "tts", "asr", "music", "characters"],
+  "transports": ["stdio", "streamable-http"],
+  "command": {
+    "stdio": {
+      "command": "npx",
+      "args": ["-y", "@veniceai/mcp-server"],
+      "env": {
+        "VENICE_API_KEY": "${VENICE_API_KEY}"
+      }
+    },
+    "streamable-http": {
+      "url": "https://mcp.venice.ai/mcp"
+    }
+  },
+  "config": {
+    "VENICE_API_KEY": {
+      "description": "Optional Venice API key. When unset, the server passes 402 (x402) challenges through to your MCP host for wallet-based payment.",
+      "required": false
+    }
+  }
+}
