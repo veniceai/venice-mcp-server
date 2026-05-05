@@ -7,7 +7,7 @@
   "license": "MIT",
   "version": "0.1.0",
   "keywords": ["uncensored", "privacy", "crypto", "x402", "image-generation", "video-generation", "tts", "asr", "music", "characters"],
-  "transports": ["stdio", "streamable-http"],
+  "transports": ["stdio"],
   "command": {
     "stdio": {
       "command": "npx",
@@ -15,9 +15,6 @@
       "env": {
         "VENICE_API_KEY": "${VENICE_API_KEY}"
       }
-    },
-    "streamable-http": {
-      "url": "https://mcp.venice.ai/mcp"
     }
   },
   "config": {
