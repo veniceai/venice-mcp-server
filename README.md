@@ -5,6 +5,8 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
+> ⚠️ **Disclaimer:** Community-maintained. Provided as-is, with no warranty or SLA from Venice AI. Use at your own risk.
+
 ## Why
 
 Plug Venice's uncensored chat, image, video, audio, music, and character APIs into **any agent** — with **no account required**. Authenticate via API key OR pay-per-call via **x402 (HTTP 402 Payment Required)** stablecoin micropayments.
