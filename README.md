@@ -39,21 +39,85 @@ npx -y @smithery/cli install venice
 
 ## What you get
 
-| Capability | Tools |
+**31 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+
+### 💬 Chat & embeddings
+
+| Tool | Description |
 |---|---|
-| **Chat** | `venice_chat`, `venice_responses`, `venice_chat_with_character`, `venice_embeddings` |
-| **Image** | `venice_image_generate`, `venice_image_edit`, `venice_image_multi_edit`, `venice_image_upscale`, `venice_image_remove_bg`, `venice_image_styles` |
-| **Video** | `venice_video_generate`, `venice_video_status`, `venice_video_complete`, `venice_video_transcriptions`, `venice_video_quote` |
-| **Audio** | `venice_tts`, `venice_asr`, `venice_voice_clone`, `venice_audio_quote` |
-| **Music** | `venice_music_generate`, `venice_music_status`, `venice_music_complete` |
-| **Web** | `venice_web_search`, `venice_web_scrape`, `venice_text_parser` |
-| **Models / Characters** | `venice_list_models`, `venice_list_characters` |
-| **Crypto** | `venice_crypto_rpc` (Base, Ethereum, Polygon, …) |
-| **x402 helpers** | `venice_x402_balance`, `venice_x402_top_up_info`, `venice_x402_transactions` |
+| `venice_chat` | OpenAI-compatible chat completion against Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored, etc.). |
+| `venice_responses` | OpenAI-compatible Responses API. Single-turn or multi-turn with tool support. |
+| `venice_embeddings` | Compute embeddings for text input (OpenAI-compatible). |
+| `venice_chat_with_character` | Chat with a Venice character by slug. |
 
-Plus **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+### 🎨 Image
 
-Top models available: Flux 2 Pro, Lustify SDXL, Anime WAI, Qwen Image, Sora 2, Veo 3.1, Kling 2.6, Wan 2.6, LTX 2.0, ElevenLabs music, voice cloning, and more.
+| Tool | Description |
+|---|---|
+| `venice_image_generate` | Generate an image. Supports Flux 2 Pro/Max, Lustify SDXL, Anime (WAI), Qwen Image, GPT Image, Nano Banana Pro and others. |
+| `venice_image_edit` | Edit an image with a prompt. Returns base64 PNG. |
+| `venice_image_multi_edit` | Edit multiple images together with a single prompt (multi-image composition / outpainting). |
+| `venice_image_upscale` | Upscale an image (1–4× scale). Returns base64 PNG. |
+| `venice_image_remove_bg` | Remove image background; returns a transparent PNG. |
+| `venice_image_styles` | List image style presets available for `venice_image_generate`. |
+
+### 🎬 Video
+
+| Tool | Description |
+|---|---|
+| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. |
+| `venice_video_status` | Check status of a queued video job. Returns `PROCESSING` or `COMPLETED`. |
+| `venice_video_complete` | Mark a completed video as downloaded; deletes server-side media. |
+| `venice_video_transcriptions` | Transcribe a YouTube video URL. |
+| `venice_video_quote` | Get a price quote for a video generation BEFORE queuing. |
+
+### 🔊 Audio (TTS / ASR)
+
+| Tool | Description |
+|---|---|
+| `venice_tts` | Convert text to speech. Supports cloned voices + emotion tags (`[whispers]`, `[sarcastically]`, etc.). |
+| `venice_asr` | Transcribe audio from a URL. |
+| `venice_voice_clone` | List built-in voices or clone a new voice from a sample audio URL. |
+| `venice_audio_quote` | Get a price quote for music generation BEFORE queuing. |
+
+### 🎵 Music
+
+| Tool | Description |
+|---|---|
+| `venice_music_generate` | Queue music generation. Models: ace-step-15, elevenlabs-music, minimax-music-v2/v25/v26, stable-audio-25, mmaudio-v2, elevenlabs-sound-effects-v2. |
+| `venice_music_status` | Check status of a queued music job. |
+| `venice_music_complete` | Mark a completed music job as downloaded. |
+
+### 🌐 Web augment
+
+| Tool | Description |
+|---|---|
+| `venice_web_search` | Search the web (Firecrawl-backed). Returns ranked results with snippets. |
+| `venice_web_scrape` | Scrape one URL into markdown text. |
+| `venice_text_parser` | Extract text from a document URL (PDF, DOCX, EPUB, PPTX, XLSX, …). |
+
+### 📚 Catalog
+
+| Tool | Description |
+|---|---|
+| `venice_list_models` | List the live model catalog with capabilities and prices. |
+| `venice_list_characters` | List public Venice characters. |
+
+### ⛓️ Crypto
+
+| Tool | Description |
+|---|---|
+| `venice_crypto_rpc` | Proxy a JSON-RPC call to a supported blockchain network (`eth_call`, `eth_blockNumber`, …). Supports Base, Ethereum, Polygon, Arbitrum, Optimism. |
+
+### 💳 x402 wallet helpers
+
+> Optional — only needed if you authenticate with a wallet instead of an API key. See [Advanced: pay with a wallet](#advanced-pay-with-a-wallet-no-account-required).
+
+| Tool | Description |
+|---|---|
+| `venice_x402_balance` | Check the prepaid x402 credit balance for a wallet address. |
+| `venice_x402_top_up_info` | Fetch top-up requirements (network, USDC token address, receiver wallet, minimum amount). |
+| `venice_x402_transactions` | List recent x402 top-up + debit transactions for a wallet. |
 
 ## Configuration
 
@@ -176,12 +240,12 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
                                                  └────────────────────────┘
 ```
 
-## Tool reference
+## Tool reference (endpoints + auth modes)
 
 <details>
-<summary>Click to expand the full tool catalog (31 tools, endpoint mapping)</summary>
+<summary>Click to expand — full mapping of tool → Venice endpoint → auth mode</summary>
 
-### Inference (API key OR x402)
+### Inference (API key OR x402 wallet)
 
 | Tool | Endpoint |
 |---|---|
@@ -224,7 +288,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_list_characters` | `GET /v1/characters` |
 | `venice_chat_with_character` | `POST /v1/chat/completions` (with `character_slug`) |
 
-### x402 wallet helpers
+### x402 wallet helpers (SIWX only)
 
 | Tool | Endpoint |
 |---|---|
