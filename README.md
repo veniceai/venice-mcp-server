@@ -111,7 +111,7 @@ npx -y @smithery/cli install venice
 
 ### 💳 x402 wallet helpers
 
-> Optional — only needed if you authenticate with a wallet instead of an API key. See [Advanced: pay with a wallet](#advanced-pay-with-a-wallet-no-account-required).
+> Optional — only needed if you authenticate with a wallet (x402) instead of an API key. See [Advanced: pay with a wallet (x402)](#advanced-pay-with-a-wallet-x402--no-account-required).
 
 | Tool | Description |
 |---|---|
@@ -131,7 +131,7 @@ npx -y @smithery/cli install venice
 | `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
 | `VENICE_API_BASE_URL` | `https://api.venice.ai` | Override for self-hosted Venice. |
-| `VENICE_SIWX_TOKEN` | _(none)_ | Wallet-mode auth — see [Advanced: pay with a wallet](#advanced-pay-with-a-wallet-no-account-required). |
+| `VENICE_SIWX_TOKEN` | _(none)_ | Wallet-mode auth (x402) — see [Advanced: pay with a wallet (x402)](#advanced-pay-with-a-wallet-x402--no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
 
@@ -146,7 +146,7 @@ Or run from source — see [Development](#development) below.
 
 ---
 
-## Advanced: pay with a wallet (no account required)
+## Advanced: pay with a wallet (x402) — no account required
 
 > Skip this section if you're using `VENICE_API_KEY`. Everything below is optional and only matters if you specifically want to pay with a crypto wallet instead of a Venice account.
 
