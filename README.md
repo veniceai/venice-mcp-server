@@ -21,7 +21,7 @@ Plug Venice's chat, image, video, audio, music, and character models into any ag
     "venice": {
       "command": "npx",
       "args": ["-y", "@veniceai/mcp-server"],
-      "env": { "VENICE_API_KEY": "vk_..." }
+      "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
 }
@@ -74,7 +74,7 @@ Top models available: Flux 2 Pro, Lustify SDXL, Anime WAI, Qwen Image, Sora 2, V
 ## Self-hosting (Streamable HTTP)
 
 ```bash
-docker run -p 3333:3333 -e VENICE_API_KEY=vk_... ghcr.io/veniceai/venice-mcp-server:latest
+docker run -p 3333:3333 -e VENICE_API_KEY=<your-venice-api-key> ghcr.io/veniceai/venice-mcp-server:latest
 # server at http://localhost:3333/mcp
 ```
 
@@ -277,7 +277,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 
 ```bash
 # Comprehensive — all 31 tools × both auth modes, side-by-side report
-VENICE_API_KEY=*** npm run test:e2e:all-tools
+VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 
 ## FAQ

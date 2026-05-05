@@ -4,8 +4,8 @@
       "command": "npx",
       "args": ["-y", "@veniceai/mcp-server"],
       "env": {
-        "VENICE_API_KEY": "vk_replace_me_or_remove_for_x402",
-        "VENICE_DEFAULT_CHAT_MODEL": "venice-uncensored-1.1",
+        "VENICE_API_KEY": "<your-venice-api-key>",
+        "VENICE_DEFAULT_CHAT_MODEL": "venice-uncensored",
         "VENICE_DEFAULT_IMAGE_MODEL": "flux-2-pro"
       }
     }
