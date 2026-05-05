@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "venice": {
+      "command": "npx",
+      "args": ["-y", "@veniceai/mcp-server"],
+      "env": {
+        "VENICE_API_KEY": "<your-venice-api-key>"
+      }
+    }
+  }
+}
