@@ -130,7 +130,7 @@ npx -y @smithery/cli install venice
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |
 | `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
-| `VENICE_API_BASE_URL` | `https://api.venice.ai` | Override for self-hosted Venice. |
+| `VENICE_API_BASE_URL` | `https://api.venice.ai/api` | Override for self-hosted Venice. `https://api.venice.ai` is normalized to this API root. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |

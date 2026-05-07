@@ -12,7 +12,7 @@ startCommand:
       VENICE_API_BASE_URL:
         type: string
         title: API base URL
-        default: https://api.venice.ai
+        default: https://api.venice.ai/api
       VENICE_DEFAULT_CHAT_MODEL:
         type: string
         default: venice-uncensored
@@ -29,7 +29,7 @@ startCommand:
       args: ["./dist/cli.js"],
       env: {
         VENICE_API_KEY: config.VENICE_API_KEY ?? "",
-        VENICE_API_BASE_URL: config.VENICE_API_BASE_URL ?? "https://api.venice.ai",
+        VENICE_API_BASE_URL: config.VENICE_API_BASE_URL ?? "https://api.venice.ai/api",
         VENICE_DEFAULT_CHAT_MODEL: config.VENICE_DEFAULT_CHAT_MODEL ?? "venice-uncensored",
         VENICE_DEFAULT_IMAGE_MODEL: config.VENICE_DEFAULT_IMAGE_MODEL ?? "flux-2-pro",
         VENICE_DISABLE_NSFW: config.VENICE_DISABLE_NSFW ?? ""

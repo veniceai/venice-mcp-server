@@ -22,6 +22,16 @@ describe('loadConfig', () => {
     assert.equal(cfg.baseUrl, 'https://api.example.com')
   })
 
+  it('normalizes the public Venice root to the API base', () => {
+    assert.equal(loadConfig({ VENICE_API_BASE_URL: 'https://api.venice.ai' }).baseUrl, 'https://api.venice.ai/api')
+    assert.equal(loadConfig({ VENICE_API_BASE_URL: 'https://api.venice.ai/' }).baseUrl, 'https://api.venice.ai/api')
+  })
+
+  it('treats blank base url as unset', () => {
+    assert.equal(loadConfig({ VENICE_API_BASE_URL: '' }).baseUrl, 'https://api.venice.ai/api')
+    assert.equal(loadConfig({ VENICE_API_BASE_URL: '   ' }).baseUrl, 'https://api.venice.ai/api')
+  })
+
   it('reads API key + SIWX token independently', () => {
     const cfg = loadConfig({ VENICE_API_KEY: 'vk_abc', VENICE_SIWX_TOKEN: 'siwx_xyz' })
     assert.equal(cfg.apiKey, 'vk_abc')
@@ -36,6 +46,12 @@ describe('loadConfig', () => {
 
   it('parses numeric timeout', () => {
     assert.equal(loadConfig({ VENICE_HTTP_TIMEOUT_MS: '12345' }).timeoutMs, 12345)
+  })
+
+  it('falls back to default timeout for invalid values', () => {
+    assert.equal(loadConfig({ VENICE_HTTP_TIMEOUT_MS: 'nope' }).timeoutMs, 60_000)
+    assert.equal(loadConfig({ VENICE_HTTP_TIMEOUT_MS: '0' }).timeoutMs, 60_000)
+    assert.equal(loadConfig({ VENICE_HTTP_TIMEOUT_MS: '-1' }).timeoutMs, 60_000)
   })
 
   it('overrides default models from env', () => {

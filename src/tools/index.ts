@@ -62,6 +62,30 @@ const fail = (text: string): ToolResult => ({
   isError: true,
 })
 
+async function fetchUploadSource(
+  url: string,
+  opts: { label: string; fallbackContentType: string; fallbackFilename: string; timeoutMs: number },
+): Promise<{ buffer: Buffer; contentType: string; filename: string }> {
+  const ac = new AbortController()
+  const timeout = setTimeout(() => ac.abort(), opts.timeoutMs)
+  try {
+    const res = await fetch(url, { signal: ac.signal })
+    if (!res.ok) throw new Error(`Could not fetch ${opts.label}: HTTP ${res.status}`)
+    return {
+      buffer: Buffer.from(await res.arrayBuffer()),
+      contentType: res.headers.get('content-type') ?? opts.fallbackContentType,
+      filename: url.split('/').pop()?.split('?')[0] || opts.fallbackFilename,
+    }
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') {
+      throw new Error(`Timed out fetching ${opts.label} after ${opts.timeoutMs}ms`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
@@ -300,13 +324,14 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
-          const imgRes = await fetch(args.image_url)
-          if (!imgRes.ok) return fail(`Could not fetch image_url: HTTP ${imgRes.status}`)
-          const buf = Buffer.from(await imgRes.arrayBuffer())
-          const ct = imgRes.headers.get('content-type') ?? 'image/png'
-          const filename = args.image_url.split('/').pop()?.split('?')[0] || 'image.png'
+          const source = await fetchUploadSource(args.image_url, {
+            label: 'image_url',
+            fallbackContentType: 'image/png',
+            fallbackFilename: 'image.png',
+            timeoutMs: cfg.timeoutMs,
+          })
           const form = new FormData()
-          form.set('image', new Blob([buf], { type: ct }), filename)
+          form.set('image', new Blob([source.buffer], { type: source.contentType }), source.filename)
           if (args.scale !== undefined) form.set('scale', String(args.scale))
           if (args.enhance !== undefined) form.set('enhance', String(args.enhance))
           if (args.replication !== undefined) form.set('replication', String(args.replication))
@@ -494,13 +519,14 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
-          const audioRes = await fetch(args.audio_url)
-          if (!audioRes.ok) return fail(`Could not fetch audio_url: HTTP ${audioRes.status}`)
-          const buf = Buffer.from(await audioRes.arrayBuffer())
-          const ct = audioRes.headers.get('content-type') ?? 'audio/wav'
-          const filename = args.audio_url.split('/').pop()?.split('?')[0] || 'audio'
+          const source = await fetchUploadSource(args.audio_url, {
+            label: 'audio_url',
+            fallbackContentType: 'audio/wav',
+            fallbackFilename: 'audio',
+            timeoutMs: cfg.timeoutMs,
+          })
           const form = new FormData()
-          form.set('file', new Blob([buf], { type: ct }), filename)
+          form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
           form.set('model', args.model ?? cfg.defaultAsrModel)
           if (args.language) form.set('language', args.language)
           if (args.response_format) form.set('response_format', args.response_format)
@@ -549,13 +575,14 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           // action === 'create'
           if (!args.sample_url) return fail('sample_url is required for action=create')
-          const audioRes = await fetch(args.sample_url)
-          if (!audioRes.ok) return fail(`Could not fetch sample_url: HTTP ${audioRes.status}`)
-          const buf = Buffer.from(await audioRes.arrayBuffer())
-          const ct = audioRes.headers.get('content-type') ?? 'audio/mpeg'
-          const filename = args.sample_url.split('/').pop()?.split('?')[0] || 'sample'
+          const source = await fetchUploadSource(args.sample_url, {
+            label: 'sample_url',
+            fallbackContentType: 'audio/mpeg',
+            fallbackFilename: 'sample',
+            timeoutMs: cfg.timeoutMs,
+          })
           const form = new FormData()
-          form.set('file', new Blob([buf], { type: ct }), filename)
+          form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
           if (args.model) form.set('model', args.model)
           const resp = await client.postMultipart<unknown>('/v1/audio/voices', form)
           return ok(JSON.stringify(resp, null, 2))
@@ -700,13 +727,14 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
-          const docRes = await fetch(args.url)
-          if (!docRes.ok) return fail(`Could not fetch url: HTTP ${docRes.status}`)
-          const buf = Buffer.from(await docRes.arrayBuffer())
-          const ct = docRes.headers.get('content-type') ?? 'application/pdf'
-          const filename = args.url.split('/').pop()?.split('?')[0] || 'document'
+          const source = await fetchUploadSource(args.url, {
+            label: 'url',
+            fallbackContentType: 'application/pdf',
+            fallbackFilename: 'document',
+            timeoutMs: cfg.timeoutMs,
+          })
           const form = new FormData()
-          form.set('file', new Blob([buf], { type: ct }), filename)
+          form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
           const resp = await client.postMultipart<{ text?: string }>('/v1/augment/text-parser', form)
           return ok(truncate(resp.text ?? JSON.stringify(resp)))
         } catch (err) {
@@ -908,7 +936,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       handler: async ({ wallet_address }) => {
         try {
           const resp = await client.get<unknown>(
-            `/v1/x402/balance/${encodeURIComponent(wallet_address.toLowerCase())}`
+            `/v1/x402/balance/${encodeURIComponent(wallet_address.toLowerCase())}`,
+            undefined,
+            { auth: 'siwx' },
           )
           return ok(JSON.stringify(resp, null, 2), { balance: resp })
         } catch (err) {
@@ -954,7 +984,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         try {
           const qs = limit ? `?limit=${limit}` : ''
           const resp = await client.get<unknown>(
-            `/v1/x402/transactions/${encodeURIComponent(wallet_address.toLowerCase())}${qs}`
+            `/v1/x402/transactions/${encodeURIComponent(wallet_address.toLowerCase())}${qs}`,
+            undefined,
+            { auth: 'siwx' },
           )
           return ok(JSON.stringify(resp, null, 2))
         } catch (err) {

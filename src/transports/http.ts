@@ -53,8 +53,10 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
   // Default to loopback-only for safety. Opt in to all-interfaces via VENICE_MCP_HOST=0.0.0.0
   // (useful for Docker containers and intentional LAN exposure).
   const host = opts.host ?? process.env.VENICE_MCP_HOST ?? '127.0.0.1'
-  await new Promise<void>((resolve) => {
-    app.listen(port, host, () => resolve())
+  await new Promise<void>((resolve, reject) => {
+    const listener = app.listen(port, host)
+    listener.once('listening', () => resolve())
+    listener.once('error', reject)
   })
   // eslint-disable-next-line no-console
   console.error(`[venice-mcp] listening on http://${host}:${port}/mcp`)
