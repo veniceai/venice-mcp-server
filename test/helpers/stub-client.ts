@@ -5,6 +5,7 @@ export interface StubCall {
   path: string
   body?: unknown
   headers?: Record<string, string>
+  auth?: 'default' | 'siwx' | 'none'
   /** Whether this call went through postMultipart (FormData body) instead of JSON. */
   multipart?: boolean
   /** Whether this call went through postBinary (binary response expected). */
@@ -33,8 +34,8 @@ export class StubClient {
     return (defaultResponse(call.path, call.binary) as T) ?? ({} as T)
   }
 
-  get<T>(path: string) {
-    return this.dispatch<T>({ method: 'GET', path })
+  get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
+    return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
   post<T>(path: string, json: unknown) {
     return this.dispatch<T>({ method: 'POST', path, body: json })

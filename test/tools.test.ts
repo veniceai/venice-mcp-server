@@ -418,4 +418,47 @@ describe('tool output shaping', () => {
     assert.equal((r.structuredContent as { count: number; total: number }).total, 3)
     assert.equal((r.structuredContent as { count: number }).count, 1)
   })
+
+  it('x402 wallet helper tools request SIWX auth override', async () => {
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+
+    await tools.find((t) => t.name === 'venice_x402_balance')!.handler({
+      wallet_address: `0x${'a'.repeat(40)}`,
+    } as never)
+    assert.equal(stub.calls.at(-1)?.auth, 'siwx')
+
+    await tools.find((t) => t.name === 'venice_x402_transactions')!.handler({
+      wallet_address: `0x${'b'.repeat(40)}`,
+      limit: 5,
+    } as never)
+    assert.equal(stub.calls.at(-1)?.auth, 'siwx')
+  })
+
+  it('venice_asr reports timeout when fetching audio_url stalls', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = ((_: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) =>
+        new Promise<Response>((_resolve, reject) => {
+          const rejectAbort = () => {
+            const err = new Error('aborted')
+            err.name = 'AbortError'
+            reject(err)
+          }
+          if (init?.signal?.aborted) rejectAbort()
+          else init?.signal?.addEventListener('abort', rejectAbort, { once: true })
+        })) as typeof fetch
+
+      const timeoutCfg = loadConfig({ VENICE_API_KEY: 'test-key', VENICE_HTTP_TIMEOUT_MS: '5' })
+      const tools = buildTools(new StubClient().asClient(), timeoutCfg)
+      const r = await tools.find((t) => t.name === 'venice_asr')!.handler({
+        audio_url: 'https://example.com/slow.wav',
+      } as never)
+
+      assert.equal(r.isError, true)
+      assert.match((r.content[0] as { text: string }).text, /Timed out fetching audio_url after 5ms/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })

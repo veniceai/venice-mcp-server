@@ -9,6 +9,8 @@ export interface RequestInitJSON {
   headers?: Record<string, string>
   /** Override request timeout for this call. */
   timeoutMs?: number
+  /** Override default API-key-first auth behavior for endpoint-specific requirements. */
+  auth?: 'default' | 'siwx' | 'none'
 }
 
 /**
@@ -32,10 +34,16 @@ export class VeniceClient {
       ...(init.headers ?? {}),
     }
     if (init.json !== undefined) headers['Content-Type'] = 'application/json'
-    // API key takes precedence over SIWX when both are set.
-    if (this.cfg.apiKey && !headers.Authorization) {
+    const auth = init.auth ?? 'default'
+    if (auth === 'siwx') {
+      delete headers.Authorization
+      delete headers.authorization
+      if (this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
+        headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+      }
+    } else if (auth === 'default' && this.cfg.apiKey && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    } else if (this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
+    } else if (auth === 'default' && this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
       headers['X-Sign-In-With-X'] = this.cfg.siwxToken
     }
 
@@ -86,8 +94,12 @@ export class VeniceClient {
   }
 
   /** GET request returning JSON. */
-  get<T = unknown>(path: string, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: 'GET', headers })
+  get<T = unknown>(
+    path: string,
+    headers?: Record<string, string>,
+    opts: { auth?: RequestInitJSON['auth']; timeoutMs?: number } = {},
+  ): Promise<T> {
+    return this.request<T>(path, { method: 'GET', headers, ...opts })
   }
 
   /** POST request with JSON body. */

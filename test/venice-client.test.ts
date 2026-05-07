@@ -91,6 +91,19 @@ describe('VeniceClient', () => {
     assert.equal(last.headers['x-sign-in-with-x'], undefined)
   })
 
+  it('can force SIWX auth for endpoints that reject API keys', async () => {
+    const cfg = loadConfig({
+      VENICE_API_BASE_URL: server.url,
+      VENICE_API_KEY: 'vk_abc',
+      VENICE_SIWX_TOKEN: 'siwx_token_xyz',
+    })
+    const c = new VeniceClient(cfg)
+    await c.get('/v1/models', undefined, { auth: 'siwx' })
+    const last = server.calls[server.calls.length - 1]
+    assert.equal(last.headers.authorization, undefined)
+    assert.equal(last.headers['x-sign-in-with-x'], 'siwx_token_xyz')
+  })
+
   it('surfaces 402 as VeniceUpstreamError with isPaymentRequired=true', async () => {
     const cfg = loadConfig({ VENICE_API_BASE_URL: server.url })
     const c = new VeniceClient(cfg)
