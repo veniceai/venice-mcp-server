@@ -20,7 +20,7 @@ Plug Venice's chat, image, video, audio, music, and character models into any ag
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.0"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
@@ -134,13 +134,21 @@ npx -y @smithery/cli install venice
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
+| `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Optional bearer token required by `/mcp` in HTTP mode. Set this before publishing the HTTP port outside a trusted local boundary. |
 
 ## Self-hosting (Streamable HTTP)
 
+`/mcp` is a credential-backed tool execution endpoint: callers can spend the configured Venice API key or x402 balance. If you publish the HTTP port, set `VENICE_MCP_AUTH_TOKEN` or put the service behind an authenticated reverse proxy.
+
 ```bash
-docker run -p 3333:3333 -e VENICE_API_KEY=<your-venice-api-key> ghcr.io/veniceai/venice-mcp-server:latest
+docker run -p 3333:3333 \
+  -e VENICE_API_KEY=<your-venice-api-key> \
+  -e VENICE_MCP_AUTH_TOKEN=<choose-a-long-random-token> \
+  ghcr.io/veniceai/venice-mcp-server:latest
 # server at http://localhost:3333/mcp
 ```
+
+Clients should send `Authorization: Bearer <choose-a-long-random-token>` with HTTP MCP requests. For reproducible production installs, pin the npm package version as shown in the examples instead of using an unversioned `latest` install path.
 
 Or run from source — see [Development](#development) below.
 
@@ -159,7 +167,7 @@ Venice supports authenticating with a **SIWE-signed wallet token** (a.k.a. SIWX)
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.0"],
       "env": { "VENICE_SIWX_TOKEN": "<base64 SIWE payload>" }
     }
   }

@@ -168,7 +168,7 @@ const MAPPINGS: Mapping[] = [
   {
     tool: 'venice_image_upscale',
     // upscale uses multipart upload (fetches URL → uploads bytes)
-    args: { image_url: 'https://placehold.co/256x256/png', scale: 4 },
+    args: { image_url: 'https://93.184.216.34/image.png', scale: 4 },
     expectMethod: 'POST',
     expectPath: '/v1/image/upscale',
   },
@@ -230,8 +230,8 @@ const MAPPINGS: Mapping[] = [
   },
   {
     tool: 'venice_asr',
-    // ASR fetches audio_url and uploads multipart — needs a small public file
-    args: { audio_url: 'https://placehold.co/256x256/png' },
+    // ASR fetches audio_url and uploads multipart.
+    args: { audio_url: 'https://93.184.216.34/audio.wav' },
     expectMethod: 'POST',
     expectPath: '/v1/audio/transcriptions',
   },
@@ -287,9 +287,8 @@ const MAPPINGS: Mapping[] = [
   },
   {
     tool: 'venice_text_parser',
-    // text_parser fetches the URL and uploads as multipart. We can use any URL
-    // that returns 200 — real fetch happens regardless. Use a fixed dummy URL.
-    args: { url: 'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf' },
+    // text_parser fetches the URL and uploads as multipart.
+    args: { url: 'https://93.184.216.34/document.pdf' },
     expectMethod: 'POST',
     expectPath: '/v1/augment/text-parser',
   },
@@ -339,8 +338,25 @@ describe('tools endpoint + method mapping', () => {
       const tools = buildTools(stub.asClient(), cfg)
       const t = tools.find((x) => x.name === m.tool)
       if (!t) throw new Error(`tool missing: ${m.tool}`)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await t.handler(m.args as any)
+      const originalFetch = globalThis.fetch
+      const uploadContentTypes: Record<string, string> = {
+        venice_image_upscale: 'image/png',
+        venice_asr: 'audio/wav',
+        venice_text_parser: 'application/pdf',
+      }
+      try {
+        if (uploadContentTypes[m.tool]) {
+          globalThis.fetch = (async () =>
+            new Response('mock upload bytes', {
+              status: 200,
+              headers: { 'content-type': uploadContentTypes[m.tool] },
+            })) as typeof fetch
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await t.handler(m.args as any)
+      } finally {
+        globalThis.fetch = originalFetch
+      }
       // Some tools (e.g. voice_clone action=list, returns static catalog) make no API call.
       if (m.expectPath === '__no_api_call__') {
         assert.equal(stub.calls.length, 0, `${m.tool} should not hit the API for this args`)
@@ -452,7 +468,7 @@ describe('tool output shaping', () => {
       const timeoutCfg = loadConfig({ VENICE_API_KEY: 'test-key', VENICE_HTTP_TIMEOUT_MS: '5' })
       const tools = buildTools(new StubClient().asClient(), timeoutCfg)
       const r = await tools.find((t) => t.name === 'venice_asr')!.handler({
-        audio_url: 'https://example.com/slow.wav',
+        audio_url: 'https://93.184.216.34/slow.wav',
       } as never)
 
       assert.equal(r.isError, true)

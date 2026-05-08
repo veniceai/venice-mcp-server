@@ -52,14 +52,14 @@ describe('formatToolError', () => {
     assert.match(out, /https:\/\/venice\.ai\/settings\/api/)
   })
 
-  it('falls back to raw JSON body when 402 has unknown shape', () => {
+  it('does not echo raw JSON when 402 has unknown shape', () => {
     const err = new VeniceUpstreamError({ message: 'pay', status: 402, body: { weird: 'thing' } })
     const out = formatToolError(err)
-    assert.match(out, /Raw response/)
-    assert.match(out, /"weird": "thing"/)
+    assert.match(out, /unrecognized payment response/)
+    assert.doesNotMatch(out, /weird/)
   })
 
-  it('formats non-402 upstream errors with status + body', () => {
+  it('formats non-402 upstream errors without echoing the body', () => {
     const err = new VeniceUpstreamError({
       message: '',
       status: 503,
@@ -67,7 +67,7 @@ describe('formatToolError', () => {
     })
     const out = formatToolError(err)
     assert.match(out, /Venice API error 503/)
-    assert.match(out, /upstream-down/)
+    assert.doesNotMatch(out, /upstream-down/)
   })
 
   it('formats native Error objects', () => {

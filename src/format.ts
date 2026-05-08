@@ -80,11 +80,8 @@ function format402(err: VeniceUpstreamError): string {
     return lines.join('\n')
   }
 
-  // Fallback: dump the raw 402 body.
-  lines.push('Raw response from Venice:')
-  lines.push('```json')
-  lines.push(JSON.stringify(err.body, null, 2))
-  lines.push('```')
+  // Avoid reflecting unexpected upstream bodies; they may contain implementation details.
+  lines.push('Payment is required, but Venice returned an unrecognized payment response.')
   return lines.join('\n')
 }
 
@@ -92,8 +89,7 @@ function format402(err: VeniceUpstreamError): string {
 export function formatToolError(err: unknown): string {
   if (err instanceof VeniceUpstreamError) {
     if (err.isPaymentRequired) return format402(err)
-    const bodyStr = typeof err.body === 'string' ? err.body : JSON.stringify(err.body)
-    return `Venice API error ${err.status}: ${bodyStr}`
+    return `Venice API error ${err.status}: upstream request failed.`
   }
   if (err instanceof Error) return `Error: ${err.message}`
   return `Error: ${String(err)}`

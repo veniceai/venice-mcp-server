@@ -26,6 +26,7 @@ import { z } from 'zod'
 import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
+import { fetchUploadSource } from './remote-fetch.js'
 
 type TextContent = { type: 'text'; text: string }
 type ImageContent = { type: 'image'; data: string; mimeType: string }
@@ -61,30 +62,6 @@ const fail = (text: string): ToolResult => ({
   content: [{ type: 'text', text }],
   isError: true,
 })
-
-async function fetchUploadSource(
-  url: string,
-  opts: { label: string; fallbackContentType: string; fallbackFilename: string; timeoutMs: number },
-): Promise<{ buffer: Buffer; contentType: string; filename: string }> {
-  const ac = new AbortController()
-  const timeout = setTimeout(() => ac.abort(), opts.timeoutMs)
-  try {
-    const res = await fetch(url, { signal: ac.signal })
-    if (!res.ok) throw new Error(`Could not fetch ${opts.label}: HTTP ${res.status}`)
-    return {
-      buffer: Buffer.from(await res.arrayBuffer()),
-      contentType: res.headers.get('content-type') ?? opts.fallbackContentType,
-      filename: url.split('/').pop()?.split('?')[0] || opts.fallbackFilename,
-    }
-  } catch (err) {
-    if ((err as Error).name === 'AbortError') {
-      throw new Error(`Timed out fetching ${opts.label} after ${opts.timeoutMs}ms`)
-    }
-    throw err
-  } finally {
-    clearTimeout(timeout)
-  }
-}
 
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
@@ -329,6 +306,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             fallbackContentType: 'image/png',
             fallbackFilename: 'image.png',
             timeoutMs: cfg.timeoutMs,
+            allowedContentTypes: ['image/'],
           })
           const form = new FormData()
           form.set('image', new Blob([source.buffer], { type: source.contentType }), source.filename)
@@ -524,6 +502,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             fallbackContentType: 'audio/wav',
             fallbackFilename: 'audio',
             timeoutMs: cfg.timeoutMs,
+            allowedContentTypes: ['audio/', 'video/'],
           })
           const form = new FormData()
           form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
@@ -580,6 +559,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             fallbackContentType: 'audio/mpeg',
             fallbackFilename: 'sample',
             timeoutMs: cfg.timeoutMs,
+            allowedContentTypes: ['audio/', 'video/'],
           })
           const form = new FormData()
           form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
@@ -732,6 +712,14 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             fallbackContentType: 'application/pdf',
             fallbackFilename: 'document',
             timeoutMs: cfg.timeoutMs,
+            allowedContentTypes: [
+              'application/pdf',
+              'application/msword',
+              'application/vnd.openxmlformats-officedocument.',
+              'application/vnd.ms-',
+              'application/epub+zip',
+              'text/',
+            ],
           })
           const form = new FormData()
           form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
