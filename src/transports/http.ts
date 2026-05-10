@@ -5,6 +5,12 @@ import { randomUUID } from 'node:crypto'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { buildServer } from '../server.js'
 
+export function isAuthorizedBearerHeader(header: string | undefined, expectedToken: string | undefined): boolean {
+  if (!expectedToken) return true
+  if (!header?.startsWith('Bearer ')) return false
+  return header.slice('Bearer '.length) === expectedToken
+}
+
 /**
  * Run the server over Streamable HTTP for hosted deployments
  * (Smithery, internal Cloud Run, etc.). Sessionful.
@@ -19,6 +25,13 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
 
   app.all('/mcp', async (req, res) => {
     try {
+      const authToken = process.env.VENICE_MCP_AUTH_TOKEN
+      if (!isAuthorizedBearerHeader(req.header('authorization'), authToken)) {
+        res.setHeader('WWW-Authenticate', 'Bearer')
+        res.status(401).json({ error: 'unauthorized' })
+        return
+      }
+
       const sessionHeader = req.header('mcp-session-id')
       let transport = sessionHeader ? sessions.get(sessionHeader) : undefined
 
@@ -62,6 +75,6 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
   console.error(`[venice-mcp] listening on http://${host}:${port}/mcp`)
   if (host === '0.0.0.0') {
     // eslint-disable-next-line no-console
-    console.error(`[venice-mcp] WARNING: bound to 0.0.0.0 — server is reachable from any network interface. Ensure this is intentional (e.g. inside a container).`)
+    console.error(`[venice-mcp] WARNING: bound to 0.0.0.0 — server is reachable from any network interface. Use VENICE_MCP_AUTH_TOKEN or a trusted authenticated proxy before exposing it.`)
   }
 }
