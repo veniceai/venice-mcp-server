@@ -48,9 +48,6 @@ jobs:
           node-version: 22
           registry-url: ${{ env.REGISTRY_URL }}
 
-      - name: Use npm with trusted publishing support
-        run: npm install -g npm@latest
-
       - name: Set package version
         id: version
         shell: bash
