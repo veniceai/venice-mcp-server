@@ -11,6 +11,8 @@ Plug Venice's chat, image, video, audio, music, and character models into any ag
 
 ### 1. Get a key from [venice.ai](https://venice.ai)
 
+See the [API key guide](https://docs.venice.ai/guides/getting-started/generating-api-key) for step-by-step instructions.
+
 ### 2. Add this to your MCP host config
 
 **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows), **Cursor** (`~/.cursor/mcp.json`), **LM Studio**, etc:
