@@ -13,10 +13,6 @@ startCommand:
         type: string
         title: Venice SIWX token
         description: Optional base64 SIWE payload for x402 wallet-mode auth. Used when VENICE_API_KEY is unset.
-      VENICE_API_BASE_URL:
-        type: string
-        title: API base URL
-        default: https://api.venice.ai/api
       VENICE_DEFAULT_CHAT_MODEL:
         type: string
         default: venice-uncensored
@@ -34,7 +30,6 @@ startCommand:
       env: {
         VENICE_API_KEY: config.VENICE_API_KEY ?? "",
         VENICE_SIWX_TOKEN: config.VENICE_SIWX_TOKEN ?? "",
-        VENICE_API_BASE_URL: config.VENICE_API_BASE_URL ?? "https://api.venice.ai/api",
         VENICE_DEFAULT_CHAT_MODEL: config.VENICE_DEFAULT_CHAT_MODEL ?? "venice-uncensored",
         VENICE_DEFAULT_IMAGE_MODEL: config.VENICE_DEFAULT_IMAGE_MODEL ?? "flux-2-pro",
         VENICE_DISABLE_NSFW: config.VENICE_DISABLE_NSFW ?? ""

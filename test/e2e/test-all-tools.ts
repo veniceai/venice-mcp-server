@@ -301,7 +301,7 @@ function buildPlan(walletAddr: string): CallSpec[] {
 
 async function runMode(mode: 'apikey' | 'x402', walletAddr: string): Promise<ToolResult[]> {
   const env: Record<string, string> = {
-    VENICE_API_BASE_URL: BASE_URL,
+    VENICE_TEST_BASE_URL: BASE_URL,
     VENICE_LOG_LEVEL: 'error',
   }
   if (mode === 'apikey') {

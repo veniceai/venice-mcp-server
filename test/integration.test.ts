@@ -142,7 +142,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
       {
         env: {
           ...process.env,
-          VENICE_API_BASE_URL: venice.url,
+          VENICE_TEST_BASE_URL: venice.url,
           VENICE_API_KEY: 'vk_integration',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -263,7 +263,7 @@ describe('integration — x402-only mode (no API key)', () => {
     mcp = spawn('node', [path.join(REPO_ROOT, 'dist/cli.js')], {
       env: {
         ...process.env,
-        VENICE_API_BASE_URL: venice.url,
+        VENICE_TEST_BASE_URL: venice.url,
         VENICE_SIWX_TOKEN: 'siwx_integration_token',
         // explicitly NO API key
         VENICE_API_KEY: undefined,
@@ -318,7 +318,7 @@ describe('integration — no auth at all (402 surfaces auth options)', () => {
     mcp = spawn('node', [path.join(REPO_ROOT, 'dist/cli.js')], {
       env: {
         ...process.env,
-        VENICE_API_BASE_URL: venice.url,
+        VENICE_TEST_BASE_URL: venice.url,
         VENICE_API_KEY: undefined,
         VENICE_SIWX_TOKEN: undefined,
       } as unknown as NodeJS.ProcessEnv,
