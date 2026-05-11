@@ -7,14 +7,14 @@
   "homepage": "https://venice.ai",
   "repository": {
     "type": "git",
-    "url": "https://github.com/veniceai/venice-mcp-server"
+    "url": "git+https://github.com/veniceai/venice-mcp-server.git"
   },
   "type": "module",
   "main": "./dist/server.js",
   "module": "./dist/server.js",
   "types": "./dist/server.d.ts",
   "bin": {
-    "venice-mcp": "./dist/cli.js"
+    "venice-mcp": "dist/cli.js"
   },
   "files": [
     "dist",
