@@ -20,6 +20,8 @@ COPY package.json ./
 EXPOSE 3333
 ENV VENICE_MCP_HTTP=1
 # Container needs to bind all interfaces so the host port mapping reaches it.
+# HTTP startup requires VENICE_MCP_AUTH_TOKEN for this non-loopback bind unless
+# VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1 is set behind a trusted proxy.
 ENV VENICE_MCP_HOST=0.0.0.0
 USER node
 CMD ["node", "dist/cli.js", "--http"]

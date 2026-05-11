@@ -52,11 +52,34 @@ export interface Config {
 const DEFAULT_BASE_URL = 'https://api.venice.ai/api'
 const DEFAULT_TIMEOUT_MS = 60_000
 
-function normalizeBaseUrl(value: string | undefined): string {
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase()
+  return normalized === 'localhost' || normalized.endsWith('.localhost') || normalized === '127.0.0.1' || normalized === '::1' || normalized.startsWith('127.')
+}
+
+function normalizeBaseUrl(value: string | undefined, env: NodeJS.ProcessEnv): string {
   const trimmed = value?.trim()
   if (!trimmed) return DEFAULT_BASE_URL
 
-  const withoutTrailingSlash = trimmed.replace(/\/+$/, '')
+  let parsed: URL
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error('VENICE_API_BASE_URL must be an absolute URL')
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error('VENICE_API_BASE_URL must not include credentials')
+  }
+  if (parsed.protocol !== 'https:') {
+    const allowInsecure = env.VENICE_ALLOW_INSECURE_API_BASE_URL === '1'
+    const allowLoopback = parsed.protocol === 'http:' && isLoopbackHostname(parsed.hostname)
+    if (!allowInsecure && !allowLoopback) {
+      throw new Error('VENICE_API_BASE_URL must use https unless it points to loopback or VENICE_ALLOW_INSECURE_API_BASE_URL=1 is set')
+    }
+  }
+
+  const withoutTrailingSlash = parsed.href.replace(/\/+$/, '')
   if (withoutTrailingSlash === 'https://api.venice.ai') return DEFAULT_BASE_URL
   return withoutTrailingSlash
 }
@@ -68,7 +91,7 @@ function parseTimeoutMs(value: string | undefined): number {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
-    baseUrl: normalizeBaseUrl(env.VENICE_API_BASE_URL),
+    baseUrl: normalizeBaseUrl(env.VENICE_API_BASE_URL, env),
     apiKey: env.VENICE_API_KEY,
     siwxToken: env.VENICE_SIWX_TOKEN,
     defaultChatModel: env.VENICE_DEFAULT_CHAT_MODEL ?? 'venice-uncensored',

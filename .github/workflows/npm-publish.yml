@@ -23,7 +23,7 @@ jobs:
 
     steps:
       - name: Check out release target
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.event.release.target_commitish }}
           fetch-depth: 0
@@ -31,10 +31,12 @@ jobs:
       - name: Verify release target branch
         id: target
         shell: bash
+        env:
+          RELEASE_TARGET: ${{ github.event.release.target_commitish }}
         run: |
           set -euo pipefail
 
-          target="${{ github.event.release.target_commitish }}"
+          target="$RELEASE_TARGET"
           if ! git ls-remote --exit-code --heads origin "$target" >/dev/null; then
             echo "::error::Release target '${target}' is not a branch. Refusing to publish because the version bump cannot be committed back safely."
             exit 1
@@ -43,7 +45,7 @@ jobs:
           echo "branch=${target}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           registry-url: ${{ env.REGISTRY_URL }}
@@ -54,10 +56,12 @@ jobs:
       - name: Set package version
         id: version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
 
-          release_tag="${{ github.event.release.tag_name }}"
+          release_tag="$RELEASE_TAG"
           semver_pattern='^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
 
           if [[ "$release_tag" =~ $semver_pattern ]]; then
@@ -99,11 +103,14 @@ jobs:
       - name: Check npm package version
         id: npm_status
         shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.version.outputs.package_name }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
         run: |
           set -euo pipefail
 
-          package_name="${{ steps.version.outputs.package_name }}"
-          package_version="${{ steps.version.outputs.package_version }}"
+          package_name="$PACKAGE_NAME"
+          package_version="$PACKAGE_VERSION"
 
           if npm view "${package_name}@${package_version}" version --registry "$REGISTRY_URL" >/dev/null 2>&1; then
             echo "${package_name}@${package_version} already exists on npm; skipping publish."
@@ -115,10 +122,15 @@ jobs:
 
       - name: Publish to npm
         if: steps.npm_status.outputs.exists != 'true'
-        run: npm publish --provenance --access public --tag "${{ steps.version.outputs.publish_tag }}"
+        env:
+          PUBLISH_TAG: ${{ steps.version.outputs.publish_tag }}
+        run: npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       - name: Commit version bump
         shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          TARGET_BRANCH: ${{ steps.target.outputs.branch }}
         run: |
           set -euo pipefail
 
@@ -127,10 +139,10 @@ jobs:
             exit 0
           fi
 
-          package_version="${{ steps.version.outputs.package_version }}"
+          package_version="$PACKAGE_VERSION"
 
           git add package.json package-lock.json
           git -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
             commit -m "chore: release v${package_version} [skip ci]"
-          git push origin "HEAD:${{ steps.target.outputs.branch }}"
+          git push origin "HEAD:${TARGET_BRANCH}"

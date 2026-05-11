@@ -132,15 +132,19 @@ npx -y @smithery/cli install venice
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |
 | `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
-| `VENICE_API_BASE_URL` | `https://api.venice.ai/api` | Override for self-hosted Venice. `https://api.venice.ai` is normalized to this API root. |
+| `VENICE_API_BASE_URL` | `https://api.venice.ai/api` | Override for self-hosted Venice. `https://api.venice.ai` is normalized to this API root. Non-loopback URLs must use HTTPS unless `VENICE_ALLOW_INSECURE_API_BASE_URL=1` is set. |
+| `VENICE_ALLOW_INSECURE_API_BASE_URL` | `0` | Set to `1` only for deliberate private deployments that need a non-HTTPS upstream URL. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
-| `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Optional bearer token required by `/mcp` in HTTP mode. Set this before publishing the HTTP port outside a trusted local boundary. |
+| `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Bearer token required by `/mcp` whenever HTTP mode binds outside loopback. Use a long random value. |
+| `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `0` | Emergency escape hatch for unauthenticated exposed HTTP mode. Use only behind a trusted authenticated proxy. |
+| `VENICE_MCP_MAX_SESSIONS` | `100` | Maximum active Streamable HTTP sessions. |
+| `VENICE_MCP_SESSION_TTL_MS` | `1800000` | Idle Streamable HTTP session lifetime before cleanup. |
 
 ## Self-hosting (Streamable HTTP)
 
-`/mcp` is a credential-backed tool execution endpoint: callers can spend the configured Venice API key or x402 balance. If you publish the HTTP port, set `VENICE_MCP_AUTH_TOKEN` or put the service behind an authenticated reverse proxy.
+`/mcp` is a credential-backed tool execution endpoint: callers can spend the configured Venice API key or x402 balance. When HTTP mode binds outside loopback, startup fails unless `VENICE_MCP_AUTH_TOKEN` is set, or `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1` is explicitly set behind a trusted authenticated proxy.
 
 ```bash
 docker run -p 3333:3333 \
@@ -150,7 +154,7 @@ docker run -p 3333:3333 \
 # server at http://localhost:3333/mcp
 ```
 
-Clients should send `Authorization: Bearer <choose-a-long-random-token>` with HTTP MCP requests. For reproducible production installs, pin the npm package version as shown in the examples instead of using an unversioned `latest` install path.
+Clients should send `Authorization: Bearer <choose-a-long-random-token>` with HTTP MCP requests. HTTP clients should create new sessions without an `mcp-session-id` header and then reuse the server-issued session ID; unknown or malformed caller-provided session IDs are rejected. For reproducible production installs, pin the npm package version as shown in the examples instead of using an unversioned `latest` install path.
 
 Or run from source — see [Development](#development) below.
 
