@@ -152,8 +152,18 @@ async function requestPinnedAddress(url: URL, address: string, signal: AbortSign
     method: 'GET',
     headers: { Host: url.host },
     signal,
-    lookup: ((_hostname, _options, callback) => {
-      callback(null, address, family)
+    lookup: ((_hostname, options, callback) => {
+      // Node ≥22 passes { all: true } to custom lookup functions; the callback
+      // then expects an array of { address, family } objects rather than the
+      // legacy (address, family) positional form.
+      if ((options as { all?: boolean }).all) {
+        ;(callback as unknown as (err: null, addrs: Array<{ address: string; family: number }>) => void)(
+          null,
+          [{ address, family }],
+        )
+      } else {
+        callback(null, address, family)
+      }
     }) as RequestOptions['lookup'],
   }
   if (url.protocol === 'https:') options.servername = url.hostname
