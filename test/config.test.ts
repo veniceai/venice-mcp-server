@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { loadConfig, VENICE_API_BASE_URL } from '../src/config.js'
+import { loadConfig } from '../src/config.js'
 
 describe('loadConfig', () => {
   it('uses sensible defaults when env is empty', () => {
@@ -18,8 +18,7 @@ describe('loadConfig', () => {
   })
 
   it('baseUrl is always the Venice API root', () => {
-    assert.equal(loadConfig({}).baseUrl, VENICE_API_BASE_URL)
-    assert.equal(VENICE_API_BASE_URL, 'https://api.venice.ai/api')
+    assert.equal(loadConfig({}).baseUrl, 'https://api.venice.ai/api')
   })
 
   it('reads API key + SIWX token independently', () => {

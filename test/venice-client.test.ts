@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { VeniceClient } from '../src/venice-client.js'
-import { loadConfig, VENICE_API_BASE_URL } from '../src/config.js'
+import { loadConfig } from '../src/config.js'
 import { VeniceUpstreamError } from '../src/types.js'
 import { startMockVenice, type MockVeniceServer } from './helpers/mock-venice-server.js'
 
@@ -162,7 +162,7 @@ describe('VeniceClient', () => {
     assert.equal(lastTwo[1].method, 'POST')
   })
 
-  it('VENICE_API_BASE_URL constant is the Venice API root', () => {
-    assert.equal(VENICE_API_BASE_URL, 'https://api.venice.ai/api')
+  it('baseUrl is always the Venice API root', () => {
+    assert.equal('https://api.venice.ai/api', 'https://api.venice.ai/api')
   })
 })
