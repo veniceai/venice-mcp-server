@@ -71,7 +71,7 @@ async function phaseEmpty() {
   log(`SIWX token length: ${siwxToken.length} chars (base64)`)
 
   const mcp = spawnMcp({
-    VENICE_API_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
+    VENICE_TEST_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
     VENICE_SIWX_TOKEN: siwxToken,
     VENICE_LOG_LEVEL: 'error',
   })
@@ -124,7 +124,7 @@ async function phaseBalance() {
   // Venice credit balance via MCP
   const siwxToken = await buildSiwxHeader(wallet)
   const mcp = spawnMcp({
-    VENICE_API_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
+    VENICE_TEST_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
     VENICE_SIWX_TOKEN: siwxToken,
     VENICE_LOG_LEVEL: 'error',
   })
@@ -177,7 +177,7 @@ async function phaseFunded() {
   const siwxToken = await buildSiwxHeader(wallet)
 
   const mcp = spawnMcp({
-    VENICE_API_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
+    VENICE_TEST_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
     VENICE_SIWX_TOKEN: siwxToken,
     VENICE_LOG_LEVEL: 'error',
   })

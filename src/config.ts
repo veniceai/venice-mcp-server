@@ -59,7 +59,8 @@ function parseTimeoutMs(value: string | undefined): number {
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
-    baseUrl: VENICE_API_BASE_URL,
+    // VENICE_TEST_BASE_URL is an internal test-only escape hatch — never documented publicly.
+    baseUrl: env.VENICE_TEST_BASE_URL?.trim() || VENICE_API_BASE_URL,
     apiKey: env.VENICE_API_KEY,
     siwxToken: env.VENICE_SIWX_TOKEN,
     defaultChatModel: env.VENICE_DEFAULT_CHAT_MODEL ?? 'venice-uncensored',
