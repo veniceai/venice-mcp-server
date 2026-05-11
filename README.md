@@ -377,6 +377,21 @@ No email, phone, or KYC if you go the SIWX path. The wallet ↔ credit account m
 **DIEM staking?**
 If your wallet is linked to a Venice user with DIEM staked, calls consume from the staking balance instead of USDC credits — no top-up needed.
 
+**Getting 402 errors even though I have an API key?**
+The most common cause is that `VENICE_API_KEY` isn't being forwarded to the MCP server process. Most MCP hosts (Claude Desktop, Cursor, Codex, etc.) only pass environment variables that are **explicitly listed** in the `"env"` block of your MCP config — system-level env vars are not automatically inherited. Make sure your config looks like this:
+```json
+{
+  "mcpServers": {
+    "venice": {
+      "command": "npx",
+      "args": ["-y", "@veniceai/mcp-server@0.1.0-alpha"],
+      "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
+    }
+  }
+}
+```
+If the key is missing or blank, the server falls back to x402 mode and returns a 402 payment challenge.
+
 ---
 
 ## Disclaimer
