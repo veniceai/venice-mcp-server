@@ -362,11 +362,6 @@ No. The simple path is `VENICE_API_KEY` + a normal Venice account. x402 is an *o
 **Where does the wallet's private key live?**
 Not in this server. You sign the SIWE message + USDC top-up authorizations in your own wallet (MetaMask, Coinbase Wallet, viem-script, etc.). The server only sees the resulting SIWX token and never sees a private key.
 
-**Can my agent self-rate-limit?**
-Pass `X-Venice-Max-Cost: 0.05` (USDC) on requests via your client; Venice will 402 with a `cost_cap_exceeded` reason before running expensive jobs.
-
-**What's the Venice receiver wallet?**
-`0x2670B922ef37C7Df47158725C0CC407b5382293F` on Base mainnet. Top-ups are USDC. (Check the live `topUpInstructions` in the 402 response — this is the source of truth.)
 
 **Minimum top-up?**
 $5 USD (anti-dust). Minimum balance to call inference is $0.10. Default suggested top-up is $10.
