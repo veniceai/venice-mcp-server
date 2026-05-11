@@ -1,6 +1,6 @@
 {
   "name": "@veniceai/mcp-server",
-  "version": "0.2.0-alpha",
+  "version": "0.1.1-alpha",
   "description": "Model Context Protocol server for Venice.ai — uncensored, private, crypto-native AI inference for Claude, ChatGPT, Cursor and any MCP host. Community-maintained. Provided as-is, with no warranty or SLA from Venice AI. Use at your own risk.",
   "license": "MIT",
   "author": "Venice AI",

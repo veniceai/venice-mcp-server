@@ -2,7 +2,7 @@
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.2.0-alpha"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.1-alpha"],
       "env": {
         "VENICE_API_KEY": "<your-venice-api-key>",
         "VENICE_SIWX_TOKEN": "<optional-base64-siwe-payload>"

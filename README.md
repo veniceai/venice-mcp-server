@@ -22,7 +22,7 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.2.0-alpha"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.1-alpha"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
@@ -169,7 +169,7 @@ Venice supports authenticating with a **SIWE-signed wallet token** (a.k.a. SIWX)
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.2.0-alpha"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.1-alpha"],
       "env": { "VENICE_SIWX_TOKEN": "<base64 SIWE payload>" }
     }
   }
@@ -379,7 +379,7 @@ The most common cause is that `VENICE_API_KEY` isn't being forwarded to the MCP 
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.2.0-alpha"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.1-alpha"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
