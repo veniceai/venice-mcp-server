@@ -49,7 +49,7 @@ export interface Config {
   serverVersion: string
 }
 
-export const VENICE_API_BASE_URL = 'https://api.venice.ai/api'
+const VENICE_API_BASE_URL = 'https://api.venice.ai/api'
 const DEFAULT_TIMEOUT_MS = 60_000
 
 function parseTimeoutMs(value: string | undefined): number {
