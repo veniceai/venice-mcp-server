@@ -28,6 +28,33 @@ import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
+/**
+ * Sniff the MIME type of a base64-encoded image from its magic bytes.
+ * Falls back to 'image/png' if the format is unrecognised.
+ */
+function detectBase64ImageMime(b64: string): string {
+  const header = b64.slice(0, 16)
+  const bytes = Buffer.from(header, 'base64')
+  // WebP: RIFF????WEBP
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50) {
+    return 'image/webp'
+  }
+  // PNG: \x89PNG
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return 'image/png'
+  }
+  // JPEG: \xFF\xD8
+  if (bytes[0] === 0xff && bytes[1] === 0xd8) {
+    return 'image/jpeg'
+  }
+  // GIF: GIF8
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38) {
+    return 'image/gif'
+  }
+  return 'image/png'
+}
+
 type TextContent = { type: 'text'; text: string }
 type ImageContent = { type: 'image'; data: string; mimeType: string }
 type AudioContent = { type: 'audio'; data: string; mimeType: string }
@@ -199,8 +226,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           })
           // Default Venice response: { id, images: [<base64>] }
           if (resp.images && resp.images.length > 0 && typeof resp.images[0] === 'string') {
+            const mimeType = detectBase64ImageMime(resp.images[0])
             return {
-              content: [{ type: 'image', data: resp.images[0], mimeType: 'image/png' }],
+              content: [{ type: 'image', data: resp.images[0], mimeType }],
               structuredContent: { id: resp.id, count: resp.images.length },
             }
           }
@@ -216,7 +244,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             }
           }
           if (first?.b64_json) {
-            return { content: [{ type: 'image', data: first.b64_json, mimeType: 'image/png' }] }
+            const mimeType = detectBase64ImageMime(first.b64_json)
+            return { content: [{ type: 'image', data: first.b64_json, mimeType }] }
           }
           return fail('Venice returned no usable image payload.')
         } catch (err) {
