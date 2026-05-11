@@ -32,6 +32,32 @@ describe('loadConfig', () => {
     assert.equal(loadConfig({ VENICE_API_BASE_URL: '   ' }).baseUrl, 'https://api.venice.ai/api')
   })
 
+  it('rejects public non-HTTPS base urls by default', () => {
+    assert.throws(
+      () => loadConfig({ VENICE_API_BASE_URL: 'http://api.example.com/api' }),
+      /must use https/,
+    )
+  })
+
+  it('allows loopback or explicitly opted-in insecure base urls', () => {
+    assert.equal(loadConfig({ VENICE_API_BASE_URL: 'http://127.0.0.1:1234/api/' }).baseUrl, 'http://127.0.0.1:1234/api')
+    assert.equal(loadConfig({ VENICE_API_BASE_URL: 'http://localhost:1234/api' }).baseUrl, 'http://localhost:1234/api')
+    assert.equal(
+      loadConfig({
+        VENICE_API_BASE_URL: 'http://api.example.com/api',
+        VENICE_ALLOW_INSECURE_API_BASE_URL: '1',
+      }).baseUrl,
+      'http://api.example.com/api',
+    )
+  })
+
+  it('rejects base urls with embedded credentials', () => {
+    assert.throws(
+      () => loadConfig({ VENICE_API_BASE_URL: 'https://user:pass@api.example.com/api' }),
+      /must not include credentials/,
+    )
+  })
+
   it('reads API key + SIWX token independently', () => {
     const cfg = loadConfig({ VENICE_API_KEY: 'vk_abc', VENICE_SIWX_TOKEN: 'siwx_xyz' })
     assert.equal(cfg.apiKey, 'vk_abc')
