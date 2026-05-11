@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { VeniceClient } from '../src/venice-client.js'
-import { loadConfig } from '../src/config.js'
+import { loadConfig, VENICE_API_BASE_URL } from '../src/config.js'
 import { VeniceUpstreamError } from '../src/types.js'
 import { startMockVenice, type MockVeniceServer } from './helpers/mock-venice-server.js'
 
@@ -53,29 +53,30 @@ describe('VeniceClient', () => {
     if (server) await server.close()
   })
 
+  function makeCfg(overrides: { apiKey?: string; siwxToken?: string; timeoutMs?: number } = {}) {
+    return {
+      ...loadConfig({}),
+      baseUrl: server.url,
+      ...overrides,
+    }
+  }
+
   it('forwards Authorization Bearer when API key set', async () => {
-    const cfg = loadConfig({ VENICE_API_BASE_URL: server.url, VENICE_API_KEY: 'vk_abc' })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc' }))
     const r = await c.post<{ ok: boolean; key: string }>('/v1/needs-key', {})
     assert.equal(r.ok, true)
     assert.equal(r.key, 'Bearer vk_abc')
   })
 
   it('forwards X-Sign-In-With-X when only SIWX token set', async () => {
-    const cfg = loadConfig({ VENICE_API_BASE_URL: server.url, VENICE_SIWX_TOKEN: 'siwx_token_xyz' })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg({ siwxToken: 'siwx_token_xyz' }))
     const r = await c.post<{ ok: boolean; siwx: string }>('/v1/needs-siwx', {})
     assert.equal(r.ok, true)
     assert.equal(r.siwx, 'siwx_token_xyz')
   })
 
   it('prefers API key over SIWX when both are set (does not send SIWX)', async () => {
-    const cfg = loadConfig({
-      VENICE_API_BASE_URL: server.url,
-      VENICE_API_KEY: 'vk_abc',
-      VENICE_SIWX_TOKEN: 'siwx_token_xyz',
-    })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
     // /v1/needs-siwx returns 401 if SIWX header is absent.
     await assert.rejects(
       () => c.post('/v1/needs-siwx', {}),
@@ -92,12 +93,7 @@ describe('VeniceClient', () => {
   })
 
   it('can force SIWX auth for endpoints that reject API keys', async () => {
-    const cfg = loadConfig({
-      VENICE_API_BASE_URL: server.url,
-      VENICE_API_KEY: 'vk_abc',
-      VENICE_SIWX_TOKEN: 'siwx_token_xyz',
-    })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
     await c.get('/v1/models', undefined, { auth: 'siwx' })
     const last = server.calls[server.calls.length - 1]
     assert.equal(last.headers.authorization, undefined)
@@ -105,8 +101,7 @@ describe('VeniceClient', () => {
   })
 
   it('surfaces 402 as VeniceUpstreamError with isPaymentRequired=true', async () => {
-    const cfg = loadConfig({ VENICE_API_BASE_URL: server.url })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg())
     await assert.rejects(
       () => c.post('/v1/insufficient', {}),
       (err: unknown) => {
@@ -122,8 +117,7 @@ describe('VeniceClient', () => {
   })
 
   it('surfaces 5xx as VeniceUpstreamError with body parsed', async () => {
-    const cfg = loadConfig({ VENICE_API_BASE_URL: server.url })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg())
     await assert.rejects(
       () => c.post('/v1/server-error', {}),
       (err: unknown) => {
@@ -136,25 +130,19 @@ describe('VeniceClient', () => {
   })
 
   it('parses JSON responses transparently', async () => {
-    const cfg = loadConfig({ VENICE_API_BASE_URL: server.url })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg())
     const r = await c.get<{ data: Array<{ id: string }> }>('/v1/models')
     assert.equal(r.data[0].id, 'a')
   })
 
   it('returns text body when content-type is not JSON', async () => {
-    const cfg = loadConfig({ VENICE_API_BASE_URL: server.url })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg())
     const r = await c.post<string>('/v1/text-only', {})
     assert.equal(r, 'plain text')
   })
 
   it('aborts on timeout and surfaces a 504 VeniceUpstreamError', async () => {
-    const cfg = loadConfig({
-      VENICE_API_BASE_URL: server.url,
-      VENICE_HTTP_TIMEOUT_MS: '50',
-    })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg({ timeoutMs: 50 }))
     await assert.rejects(
       () => c.post('/v1/slow', {}),
       (err: unknown) => {
@@ -166,12 +154,15 @@ describe('VeniceClient', () => {
   })
 
   it('uses GET when no body and POST when body is set, by default', async () => {
-    const cfg = loadConfig({ VENICE_API_BASE_URL: server.url })
-    const c = new VeniceClient(cfg)
+    const c = new VeniceClient(makeCfg())
     await c.get('/v1/models')
     await c.post('/v1/chat/completions', { messages: [] })
     const lastTwo = server.calls.slice(-2)
     assert.equal(lastTwo[0].method, 'GET')
     assert.equal(lastTwo[1].method, 'POST')
+  })
+
+  it('VENICE_API_BASE_URL constant is the Venice API root', () => {
+    assert.equal(VENICE_API_BASE_URL, 'https://api.venice.ai/api')
   })
 })
