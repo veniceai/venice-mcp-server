@@ -123,6 +123,11 @@ jobs:
         env:
           PUBLISH_TAG: ${{ steps.version.outputs.publish_tag }}
         # TODO: add --provenance back once the repo is made public (provenance requires a public repo)
+        # TODO GA release checklist:
+        #   1. Update README npx install lines to use the final version (currently hardcoded to 0.1.1-alpha)
+        #   2. npm dist-tag add @veniceai/mcp-server@<final-version> latest  (currently 'latest' points to stale 0.1.0-alpha)
+        #   3. Restore --provenance flag (requires public repo)
+        #   4. Make GitHub repo public before publishing final version
         run: npm publish --access public --tag "$PUBLISH_TAG"
 
       - name: Commit version bump
