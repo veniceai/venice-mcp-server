@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+.DS_Store
+*.tsbuildinfo
+
+# E2E test wallet — contains live Base mainnet private key. NEVER commit.
+.e2e-wallet.json
+test/e2e/.e2e-wallet.json
+
+# E2E test output — regenerated on every run.
+test/e2e/last-report.json

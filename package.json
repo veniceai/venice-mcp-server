@@ -1,0 +1,74 @@
+{
+  "name": "@veniceai/mcp-server",
+  "version": "0.1.1-alpha",
+  "description": "Model Context Protocol server for Venice.ai — uncensored, private, crypto-native AI inference for Claude, ChatGPT, Cursor and any MCP host. Community-maintained. Provided as-is, with no warranty or SLA from Venice AI. Use at your own risk.",
+  "license": "MIT",
+  "author": "Venice AI",
+  "homepage": "https://venice.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/veniceai/venice-mcp-server.git"
+  },
+  "type": "module",
+  "main": "./dist/server.js",
+  "module": "./dist/server.js",
+  "types": "./dist/server.d.ts",
+  "bin": {
+    "venice-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "smithery.yaml",
+    "mcp.json"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/cli.js",
+    "dev": "tsc -p tsconfig.json --watch",
+    "start": "node dist/cli.js",
+    "start:http": "node dist/cli.js --http",
+    "test": "tsx --test test/*.test.ts",
+    "test:unit": "tsx --test test/config.test.ts test/format.test.ts test/venice-client.test.ts test/tools.test.ts",
+    "test:integration": "tsx --test test/integration.test.ts",
+    "test:e2e": "npm run build && tsx test/e2e/run.ts",
+    "test:e2e:create": "VENICE_E2E_PHASE=create npm run test:e2e",
+    "test:e2e:empty": "VENICE_E2E_PHASE=empty npm run test:e2e",
+    "test:e2e:topup": "VENICE_E2E_PHASE=topup npm run test:e2e",
+    "test:e2e:funded": "VENICE_E2E_PHASE=funded npm run test:e2e",
+    "test:e2e:balance": "VENICE_E2E_PHASE=balance npm run test:e2e",
+    "test:e2e:safe": "VENICE_E2E_PHASE=full npm run test:e2e",
+    "test:e2e:all-tools": "npm run build && tsx test/e2e/test-all-tools.ts",
+    "test:e2e:all-tools:apikey": "npm run build && tsx test/e2e/test-all-tools.ts apikey",
+    "test:e2e:all-tools:x402": "npm run build && tsx test/e2e/test-all-tools.ts x402",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "venice",
+    "ai",
+    "uncensored",
+    "x402",
+    "llm",
+    "image-generation",
+    "claude",
+    "cursor"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "express": "^4.21.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "viem": "^2.48.8"
+  }
+}

@@ -1,0 +1,147 @@
+name: Publish to npm
+
+on:
+  release:
+    types:
+      - published
+
+concurrency:
+  group: npm-publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish package
+    runs-on: ubuntu-latest
+
+    env:
+      REGISTRY_URL: https://registry.npmjs.org
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Check out release target
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.release.target_commitish }}
+          fetch-depth: 0
+
+      - name: Verify release target branch
+        id: target
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ github.event.release.target_commitish }}
+        run: |
+          set -euo pipefail
+
+          target="$RELEASE_TARGET"
+          if ! git ls-remote --exit-code --heads origin "$target" >/dev/null; then
+            echo "::error::Release target '${target}' is not a branch. Refusing to publish because the version bump cannot be committed back safely."
+            exit 1
+          fi
+
+          echo "branch=${target}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          registry-url: ${{ env.REGISTRY_URL }}
+
+      - name: Set package version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          release_tag="$RELEASE_TAG"
+          semver_pattern='^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+
+          if [[ "$release_tag" =~ $semver_pattern ]]; then
+            package_version="${release_tag#v}"
+            npm version "$package_version" --no-git-tag-version --allow-same-version
+            version_source="release tag"
+          else
+            package_version="$(npm version patch --no-git-tag-version)"
+            package_version="${package_version#v}"
+            version_source="patch bump"
+          fi
+
+          package_name="$(node -p "require('./package.json').name")"
+          publish_tag="latest"
+          if [[ "$package_version" == *-* ]]; then
+            prerelease="${package_version#*-}"
+            prerelease="${prerelease%%+*}"
+            publish_tag="${prerelease%%.*}"
+
+            if [[ "$publish_tag" =~ ^v?[0-9] ]]; then
+              publish_tag="next"
+            fi
+          fi
+
+          echo "Using ${package_name}@${package_version} from ${version_source} with npm dist-tag '${publish_tag}'."
+          echo "package_name=${package_name}" >> "$GITHUB_OUTPUT"
+          echo "package_version=${package_version}" >> "$GITHUB_OUTPUT"
+          echo "publish_tag=${publish_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build package
+        run: npm run build
+
+      - name: Run tests
+        run: npm test
+
+      - name: Check npm package version
+        id: npm_status
+        shell: bash
+        env:
+          PACKAGE_NAME: ${{ steps.version.outputs.package_name }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+        run: |
+          set -euo pipefail
+
+          package_name="$PACKAGE_NAME"
+          package_version="$PACKAGE_VERSION"
+
+          if npm view "${package_name}@${package_version}" version --registry "$REGISTRY_URL" >/dev/null 2>&1; then
+            echo "${package_name}@${package_version} already exists on npm; skipping publish."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "${package_name}@${package_version} is not published yet."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.npm_status.outputs.exists != 'true'
+        env:
+          PUBLISH_TAG: ${{ steps.version.outputs.publish_tag }}
+        # TODO: add --provenance back once the repo is made public (provenance requires a public repo)
+        run: npm publish --access public --tag "$PUBLISH_TAG"
+
+      - name: Commit version bump
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          TARGET_BRANCH: ${{ steps.target.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- package.json package-lock.json; then
+            echo "No version changes to commit."
+            exit 0
+          fi
+
+          package_version="$PACKAGE_VERSION"
+
+          git add package.json package-lock.json
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "chore: release v${package_version} [skip ci]"
+          git push origin "HEAD:${TARGET_BRANCH}"
