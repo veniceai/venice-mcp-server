@@ -69,6 +69,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     timeoutMs: parseTimeoutMs(env.VENICE_HTTP_TIMEOUT_MS),
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     serverName: '@veniceai/mcp-server',
-    serverVersion: '0.1.0',
+    serverVersion: '0.1.2-alpha',
   }
 }

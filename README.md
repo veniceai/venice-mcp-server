@@ -22,7 +22,7 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.1.1-alpha"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.2-alpha"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
@@ -67,7 +67,7 @@ npx -y @smithery/cli install venice
 
 | Tool | Description |
 |---|---|
-| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. |
+| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, and reference image inputs depending on model. |
 | `venice_video_status` | Check status of a queued video job. Returns `PROCESSING` or `COMPLETED`. |
 | `venice_video_complete` | Mark a completed video as downloaded; deletes server-side media. |
 | `venice_video_transcriptions` | Transcribe a YouTube video URL. |
@@ -171,7 +171,7 @@ Venice supports authenticating with a **SIWE-signed wallet token** (a.k.a. SIWX)
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.1.1-alpha"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.2-alpha"],
       "env": { "VENICE_SIWX_TOKEN": "<base64 SIWE payload>" }
     }
   }
@@ -381,7 +381,7 @@ The most common cause is that `VENICE_API_KEY` isn't being forwarded to the MCP 
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.1.1-alpha"],
+      "args": ["-y", "@veniceai/mcp-server@0.1.2-alpha"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }

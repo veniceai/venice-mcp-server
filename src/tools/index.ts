@@ -380,14 +380,22 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_generate',
       title: 'Venice Video Queue',
-      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a string enum like '4s' / '6s' / '8s' (model-specific, see model card).`,
+      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a string enum like '4s' / '6s' / '8s' (model-specific, see model card).`,
       inputSchema: {
-        prompt: z.string().min(1).max(4000),
+        prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
         duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See GET /v1/models/:id/card.'),
-        aspect_ratio: z.enum(['16:9', '9:16', '1:1']).optional(),
+        aspect_ratio: z.enum(['16:9', '9:16', '1:1', '2:3', '3:2', '3:4', '4:3', '21:9']).optional(),
         seed: z.number().int().optional(),
-        image_url: z.string().url().optional().describe('Required for *-image-to-video models; starting frame URL or data URL.'),
+        image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
+        end_image_url: z.string().url().optional().describe('For models that support end frames or transitions. URL or data URL.'),
+        video_url: z.string().url().optional().describe('For video-to-video models (e.g. seedance-2-0-r2v): input video. URL or data URL. Supported: MP4, MOV, WebM.'),
+        audio_url: z.string().url().optional().describe('For models that support audio input: background music. URL or data URL. Supported: WAV, MP3. Max 30s, 15MB.'),
+        reference_image_urls: z.array(z.string().url()).max(9).optional().describe('For models with reference image support: up to 9 images for character/style consistency. Each a URL or data URL.'),
+        negative_prompt: z.string().max(4096).optional().describe('Negative prompt (what to avoid). Supported by Seedance and other models.'),
+        resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see model card.'),
+        upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple.'),
+        audio: z.boolean().optional().describe('Enable or disable audio generation for models that support it. Defaults to true.'),
       },
       handler: async (args) => {
         try {
