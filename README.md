@@ -1,6 +1,6 @@
 # @veniceai/mcp-server
 
-> Model Context Protocol server for **Venice.ai** — uncensored, private AI for any MCP host (Claude Desktop, Cursor, ChatGPT, LM Studio, Continue, LibreChat, Open WebUI, AnythingLLM, Jan, Le Chat, Smithery).
+> Model Context Protocol server for **Venice.ai** — uncensored, private AI for any MCP host (Claude Desktop, Cursor, ChatGPT, LM Studio, Continue, LibreChat, Open WebUI, AnythingLLM, Jan, Le Chat).
 
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -33,11 +33,6 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
 
 That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 25 more Venice tools.
 
-### Smithery (one-line install)
-
-```bash
-npx -y @smithery/cli install venice
-```
 
 ## What you get
 
