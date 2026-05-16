@@ -26,7 +26,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@veniceai/mcp-server"
+        "@veniceai/mcp-server@0.2.0"
       ],
       "env": {
         "VENICE_API_KEY": "${VENICE_API_KEY}",
