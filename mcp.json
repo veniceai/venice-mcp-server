@@ -5,13 +5,29 @@
   "description": "Uncensored, private, crypto-native AI inference (LLM, image, video, TTS, ASR, music, characters) by Venice.ai. Pay-per-call via x402, optional API key, no account required. Community-maintained, provided as-is, no SLA — use at your own risk.",
   "homepage": "https://venice.ai",
   "license": "MIT",
-  "version": "0.1.1-alpha",
-  "keywords": ["uncensored", "privacy", "crypto", "x402", "image-generation", "video-generation", "tts", "asr", "music", "characters"],
-  "transports": ["stdio"],
+  "version": "0.2.0",
+  "keywords": [
+    "uncensored",
+    "privacy",
+    "crypto",
+    "x402",
+    "image-generation",
+    "video-generation",
+    "tts",
+    "asr",
+    "music",
+    "characters"
+  ],
+  "transports": [
+    "stdio"
+  ],
   "command": {
     "stdio": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.1.0"],
+      "args": [
+        "-y",
+        "@veniceai/mcp-server@0.2.0"
+      ],
       "env": {
         "VENICE_API_KEY": "${VENICE_API_KEY}",
         "VENICE_SIWX_TOKEN": "${VENICE_SIWX_TOKEN}"
