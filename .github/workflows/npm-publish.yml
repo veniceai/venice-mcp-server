@@ -122,8 +122,7 @@ jobs:
         if: steps.npm_status.outputs.exists != 'true'
         env:
           PUBLISH_TAG: ${{ steps.version.outputs.publish_tag }}
-        # TODO: add --provenance back once the repo is made public (provenance requires a public repo)
-        run: npm publish --access public --tag "$PUBLISH_TAG"
+        run: npm publish --access public --tag "$PUBLISH_TAG" --provenance
 
       - name: Commit version bump
         shell: bash
