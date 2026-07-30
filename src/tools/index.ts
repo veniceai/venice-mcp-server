@@ -95,31 +95,40 @@ const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 w
 const NO_AUTH = ' No authentication required.'
 
 /**
- * Venice-specific extensions to the OpenAI chat/responses body. Accepted by
- * both `/chat/completions` and `/responses`.
+ * Venice-specific extensions to the OpenAI body. `/responses` accepts a
+ * narrower set than `/chat/completions` and silently strips the rest, so the
+ * two endpoints get separate schemas rather than one shared superset.
  */
+const sharedVeniceParameters = {
+  enable_web_search: z
+    .enum(['auto', 'on', 'off'])
+    .optional()
+    .describe('Web search. "on" forces it, "auto" leaves it to the model, "off" (default) disables it.'),
+  enable_web_citations: z
+    .boolean()
+    .optional()
+    .describe('Ask the model to cite web sources with ^1^ style superscripts. Only applies when web search ran.'),
+  enable_web_scraping: z
+    .boolean()
+    .optional()
+    .describe('Scrape URLs found in the latest user message and feed the contents to the model.'),
+  include_venice_system_prompt: z
+    .boolean()
+    .optional()
+    .describe('Keep Venice\'s default system prompt alongside your own. Defaults to true; set false for full control of behaviour.'),
+  character_slug: z
+    .string()
+    .optional()
+    .describe('Public ID of a Venice character to answer in. Discoverable via venice_list_characters.'),
+}
+
 const veniceParametersSchema = z
   .object({
-    enable_web_search: z
-      .enum(['auto', 'on', 'off'])
-      .optional()
-      .describe('Web search. "on" forces it, "auto" leaves it to the model, "off" (default) disables it.'),
-    enable_web_citations: z
-      .boolean()
-      .optional()
-      .describe('Ask the model to cite web sources with ^1^ style superscripts. Only applies when web search ran.'),
-    enable_web_scraping: z
-      .boolean()
-      .optional()
-      .describe('Scrape URLs found in the latest user message and feed the contents to the model.'),
+    ...sharedVeniceParameters,
     enable_x_search: z
       .boolean()
       .optional()
       .describe('Native xAI web + X/Twitter search, on supported models such as Grok. Runs server-side instead of Venice search.'),
-    include_venice_system_prompt: z
-      .boolean()
-      .optional()
-      .describe('Keep Venice\'s default system prompt alongside your own. Defaults to true; set false for full control of behaviour.'),
     strip_thinking_response: z
       .boolean()
       .optional()
@@ -128,13 +137,14 @@ const veniceParametersSchema = z
       .boolean()
       .optional()
       .describe('Turn reasoning off entirely on supported models, and strip the <think></think> blocks.'),
-    character_slug: z
-      .string()
-      .optional()
-      .describe('Public ID of a Venice character to answer in. Discoverable via venice_list_characters.'),
   })
   .optional()
   .describe('Venice-only options: web search, citations, system prompt control, reasoning control, characters.')
+
+const responsesVeniceParametersSchema = z
+  .object(sharedVeniceParameters)
+  .optional()
+  .describe('Venice-only options supported by /responses: web search, citations, scraping, system prompt control, characters.')
 
 export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
@@ -199,7 +209,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         model: z.string().optional(),
         max_output_tokens: z.number().int().positive().max(32_000).optional(),
         temperature: z.number().min(0).max(2).optional(),
-        venice_parameters: veniceParametersSchema,
+        venice_parameters: responsesVeniceParametersSchema,
       },
       handler: async (args) => {
         try {

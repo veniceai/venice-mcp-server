@@ -35,7 +35,7 @@ const res = await fetch('https://api.venice.ai/api/v1/chat/completions', {
     'X-Sign-In-With-X': token,
   },
   body: JSON.stringify({
-    model: 'venice-uncensored',
+    model: 'venice-uncensored-1-2',
     messages: [{ role: 'user', content: 'hi' }],
     max_tokens: 4,
   }),

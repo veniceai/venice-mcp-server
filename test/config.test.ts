@@ -8,7 +8,7 @@ describe('loadConfig', () => {
     assert.equal(cfg.baseUrl, 'https://api.venice.ai/api')
     assert.equal(cfg.apiKey, undefined)
     assert.equal(cfg.siwxToken, undefined)
-    assert.equal(cfg.defaultChatModel, 'venice-uncensored')
+    assert.equal(cfg.defaultChatModel, 'venice-uncensored-1-2')
     assert.equal(cfg.defaultImageModel, 'flux-2-pro')
     assert.equal(cfg.defaultTtsModel, 'tts-kokoro')
     assert.equal(cfg.defaultAsrModel, 'openai/whisper-large-v3')

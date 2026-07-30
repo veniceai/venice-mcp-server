@@ -84,7 +84,7 @@ async function phaseEmpty() {
     log('calling venice_chat with cheap prompt...')
     const result = await mcp.callTool('venice_chat', {
       messages: [{ role: 'user', content: 'Say "ok" and nothing else.' }],
-      model: 'venice-uncensored',
+      model: 'venice-uncensored-1-2',
       max_tokens: 8,
     })
     log('response received:')
@@ -187,7 +187,7 @@ async function phaseFunded() {
     log('calling venice_chat...')
     const result = await mcp.callTool('venice_chat', {
       messages: [{ role: 'user', content: 'Say exactly: hello from x402' }],
-      model: 'venice-uncensored',
+      model: 'venice-uncensored-1-2',
       max_tokens: 24,
       temperature: 0,
     })

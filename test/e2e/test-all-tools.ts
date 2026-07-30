@@ -87,7 +87,7 @@ function buildPlan(walletAddr: string): CallSpec[] {
       name: 'venice_chat',
       args: {
         messages: [{ role: 'user', content: 'Reply with the single word: ok' }],
-        model: 'venice-uncensored',
+        model: 'venice-uncensored-1-2',
         max_tokens: 8,
         temperature: 0,
       },
@@ -100,7 +100,7 @@ function buildPlan(walletAddr: string): CallSpec[] {
     },
     {
       name: 'venice_responses',
-      args: { input: 'Reply with: ok', model: 'venice-uncensored', max_output_tokens: 8 },
+      args: { input: 'Reply with: ok', model: 'venice-uncensored-1-2', max_output_tokens: 8 },
       validate: r => {
         if (r?.isError) return `error: ${String(r?.content?.[0]?.text).slice(0, 200)}`
         return r?.content?.[0]?.text ? null : 'no text'
