@@ -6,7 +6,7 @@
       "env": {
         "VENICE_API_KEY": "<your-venice-api-key>",
         "VENICE_SIWX_TOKEN": "<optional-base64-siwe-payload>",
-        "VENICE_DEFAULT_CHAT_MODEL": "venice-uncensored",
+        "VENICE_DEFAULT_CHAT_MODEL": "kimi-k3",
         "VENICE_DEFAULT_IMAGE_MODEL": "flux-2-pro"
       }
     }

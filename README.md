@@ -121,7 +121,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | Env var | Default | Notes |
 |---|---|---|
 | `VENICE_API_KEY` | _(none)_ | Your Venice API key. The simplest setup. |
-| `VENICE_DEFAULT_CHAT_MODEL` | `venice-uncensored-1-2` | |
+| `VENICE_DEFAULT_CHAT_MODEL` | `kimi-k3` | |
 | `VENICE_DEFAULT_IMAGE_MODEL` | `flux-2-pro` | |
 | `VENICE_DEFAULT_TTS_MODEL` | `tts-kokoro` | |
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |
