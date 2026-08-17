@@ -10,7 +10,7 @@ export interface RequestInitJSON {
   /** Override request timeout for this call. */
   timeoutMs?: number
   /** Override default API-key-first auth behavior for endpoint-specific requirements. */
-  auth?: 'default' | 'siwx' | 'none'
+  auth?: 'default' | 'apiKey' | 'siwx' | 'none'
 }
 
 /**
@@ -35,7 +35,26 @@ export class VeniceClient {
     }
     if (init.json !== undefined) headers['Content-Type'] = 'application/json'
     const auth = init.auth ?? 'default'
-    if (auth === 'siwx') {
+    if (auth === 'apiKey') {
+      for (const key of Object.keys(headers)) {
+        if (
+          [
+            'authorization',
+            'sign-in-with-x',
+            'x-sign-in-with-x',
+            'payment-signature',
+            'x-402-payment',
+            'x-payment',
+          ].includes(key.toLowerCase())
+        ) {
+          delete headers[key]
+        }
+      }
+      if (!this.cfg.apiKey) {
+        throw new Error('VENICE_API_KEY is required for this API-key-only endpoint.')
+      }
+      headers.Authorization = `Bearer ${this.cfg.apiKey}`
+    } else if (auth === 'siwx') {
       delete headers.Authorization
       delete headers.authorization
       if (this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
@@ -103,8 +122,13 @@ export class VeniceClient {
   }
 
   /** POST request with JSON body. */
-  post<T = unknown>(path: string, json: unknown, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: 'POST', json, headers })
+  post<T = unknown>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs'> = {},
+  ): Promise<T> {
+    return this.request<T>(path, { method: 'POST', json, headers, ...opts })
   }
 
   /**

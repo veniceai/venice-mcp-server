@@ -100,6 +100,32 @@ describe('VeniceClient', () => {
     assert.equal(last.headers['x-sign-in-with-x'], 'siwx_token_xyz')
   })
 
+  it('can suppress configured auth on demand', async () => {
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
+    await c.post('/v1/chat/completions', {}, undefined, { auth: 'none' })
+    const last = server.calls[server.calls.length - 1]
+    assert.equal(last.headers.authorization, undefined)
+    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+  })
+
+  it('forces Bearer-only auth for API-key-only endpoints', async () => {
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
+    await c.get('/v1/models', undefined, { auth: 'apiKey' })
+    const last = server.calls[server.calls.length - 1]
+    assert.equal(last.headers.authorization, 'Bearer vk_abc')
+    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+  })
+
+  it('fails API-key-only auth locally without contacting upstream', async () => {
+    const c = new VeniceClient(makeCfg({ siwxToken: 'siwx_token_xyz' }))
+    const callsBefore = server.calls.length
+    await assert.rejects(
+      () => c.get('/v1/models', undefined, { auth: 'apiKey' }),
+      /VENICE_API_KEY is required for this API-key-only endpoint/,
+    )
+    assert.equal(server.calls.length, callsBefore)
+  })
+
   it('surfaces 402 as VeniceUpstreamError with isPaymentRequired=true', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(

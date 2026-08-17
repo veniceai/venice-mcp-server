@@ -641,3 +641,29 @@ describe('tool output shaping', () => {
     }
   })
 })
+
+describe('x402 top-up discovery auth', () => {
+  it('posts an empty unauthenticated body so a configured API key is not forwarded', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
+    await tool.handler({ wallet_address: `0x${'a'.repeat(40)}` } as never)
+    const call = stub.calls.at(-1)
+    assert.equal(call?.path, '/v1/x402/top-up')
+    assert.deepEqual(call?.body, {})
+    assert.equal(call?.auth, 'none')
+  })
+})
+
+describe('character discovery auth', () => {
+  it('forces API-key auth on character reads', async () => {
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((item) => item.name === 'venice_list_characters')!.handler({} as never)
+    await tools.find((item) => item.name === 'venice_get_character')!.handler({ slug: 'alice' } as never)
+    await tools.find((item) => item.name === 'venice_character_reviews')!.handler({ slug: 'alice' } as never)
+    assert.deepEqual(
+      stub.calls.map((call) => call.auth),
+      ['apiKey', 'apiKey', 'apiKey'],
+    )
+  })
+})
