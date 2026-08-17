@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **31 tools across all modalities, one config block.**
+Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **33 tools across all modalities, one config block.**
 
 ## Quick start
 
@@ -36,14 +36,14 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**31 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**33 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
 
 ### 💬 Chat & embeddings
 
 | Tool | Description |
 |---|---|
-| `venice_chat` | OpenAI-compatible chat completion against Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored, etc.). Supports `venice_parameters` for web search, citations, characters, and system prompt or reasoning control. |
-| `venice_responses` | OpenAI-compatible Responses API. Single-turn or multi-turn with tool support. Supports `venice_parameters`. |
+| `venice_chat` | Chat completions with documented text/image/audio/video/file blocks, structured response formats, function tools, prompt caching, reasoning controls, and `venice_parameters.enable_e2ee`. |
+| `venice_responses` | Alpha, stateless Responses API for text models. Supports text/image input and reasoning controls. E2EE models are not supported, and this tool does not expose unreliable tool fields. |
 | `venice_embeddings` | Compute embeddings for text input (OpenAI-compatible). |
 | `venice_chat_with_character` | Chat with a Venice character by slug. |
 
@@ -99,6 +99,33 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 |---|---|
 | `venice_list_models` | List the live model catalog with capabilities and prices. |
 | `venice_list_characters` | List public Venice characters. |
+
+### 🔐 TEE attestation
+
+| Tool | Description |
+|---|---|
+| `venice_tee_attestation` | Fetch Intel TDX attestation evidence, optional NVIDIA evidence, and the model signing key using a caller-generated 32-byte nonce. |
+| `venice_tee_signature` | Fetch the enclave response-signature payload for a chat completion request ID. |
+
+Both routes are currently live without authentication. They only apply to text models advertising `supportsTeeAttestation`; check `supportsE2EE` separately before attempting E2EE. `/responses` rejects E2EE-capable models.
+
+These tools expose evidence; they do not verify it. Full E2EE requires the caller to:
+
+1. Generate a fresh 32-byte nonce and independently verify the returned nonce and hardware evidence.
+2. Verify the attested signing/encryption key binding and that debug mode is disabled.
+3. Encrypt request messages and pass the three required keys through `venice_chat.e2ee_headers`; the server forwards them as `X-Venice-TEE-Client-Pub-Key`, `X-Venice-TEE-Model-Pub-Key`, and `X-Venice-TEE-Signing-Algo`.
+4. Decrypt the encrypted response and cryptographically verify its signature against the verified attestation.
+
+Venice requires E2EE chat completions to stream. Plaintext `venice_chat` calls continue to send `stream: false` and return the normal completion text. When `enable_e2ee: true` and a complete validated `e2ee_headers` bundle are both present, the tool sends `stream: true`, requests `text/event-stream`, and returns:
+
+- `content[0].text`: the complete upstream SSE text after validating an exact `text/event-stream` media type and a terminal `data: [DONE]` event, without parsing, truncation, newline normalization, ciphertext extraction, or removal of SSE framing.
+- `structuredContent`: `{ transport: "sse", media_type: "text/event-stream", encrypted: true, byte_length, framing }`.
+
+The request timeout remains active until the entire stream body has been consumed. A stalled body becomes a 504, while truncated/erroring bodies, lookalike content types, and streams missing the terminal `[DONE]` event are rejected rather than returned as complete. JSON error responses—including structured 402 payment diagnostics—are parsed before these successful-stream checks.
+
+The E2EE result is encrypted transport data, not a plaintext completion. `enable_e2ee: true` without all three headers is rejected before an API call; providing TEE E2EE headers without `enable_e2ee: true` is also rejected.
+
+Setting `venice_parameters.enable_e2ee: true` without the caller-side cryptographic operations above does **not** create a trustworthy end-to-end encrypted session.
 
 ### ⛓️ Crypto
 
@@ -231,7 +258,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 31 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 33 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -287,6 +314,8 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_image_styles` | `GET /v1/image/styles` |
 | `venice_audio_quote` | `POST /v1/audio/quote` |
 | `venice_video_quote` | `POST /v1/video/quote` |
+| `venice_tee_attestation` | `GET /v1/tee/attestation?model=:model&nonce=:64_hex_chars` |
+| `venice_tee_signature` | `GET /v1/tee/signature?model=:model&request_id=:completion_id` |
 
 ### Characters (API key only)
 
@@ -324,7 +353,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # 31 tool registry + endpoint+method+body mappings
+├── tools.test.ts              # 33 tool registry + endpoint+method+body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub
@@ -347,7 +376,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 31 tools × both auth modes, side-by-side report
+# Comprehensive — all 33 tools × both auth modes, side-by-side report
 VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 
@@ -364,7 +393,7 @@ Not in this server. You sign the SIWE message + USDC top-up authorizations in yo
 $5 USD (anti-dust). Minimum balance to call inference is $0.10. Default suggested top-up is $10.
 
 **Privacy guarantees?**
-No email, phone, or KYC if you go the SIWX path. The wallet ↔ credit account mapping is the only identity link. The MCP server itself does not log prompts or responses. Combine with `X-Venice-TEE-Required: 1` (passed through by your client) to also run inference inside Intel TDX + NVIDIA NRAS confidential compute.
+No email, phone, or KYC is required on the SIWX path. For hardware-verifiable privacy, choose a text model whose catalog capabilities advertise TEE/E2EE support and perform the full caller-side attestation, encryption/decryption, and signature-verification flow described above. This MCP server does not implement that cryptographic handshake and must not be treated as providing E2EE merely because it forwards `enable_e2ee`.
 
 **DIEM staking?**
 If your wallet is linked to a Venice user with DIEM staked, calls consume from the staking balance instead of USDC credits — no top-up needed.
