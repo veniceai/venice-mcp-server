@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * COMPREHENSIVE end-to-end test of all 31 MCP tools against live Venice API.
+ * COMPREHENSIVE end-to-end test of all 33 MCP tools against live Venice API.
  *
  * Runs the same test plan twice — once with API key auth, once with x402 SIWX wallet auth —
  * and produces a side-by-side report showing which tools work in which mode.
@@ -67,6 +67,16 @@ function buildPlan(walletAddr: string): CallSpec[] {
       validate: r => (r?.structuredContent?.count > 0 ? null : 'expected count > 0'),
     },
     {
+      name: 'venice_model_traits',
+      args: { type: 'text' },
+      validate: r => (Object.keys(r?.structuredContent?.data ?? {}).length > 0 ? null : 'expected trait mappings'),
+    },
+    {
+      name: 'venice_model_compatibility_mapping',
+      args: { type: 'text' },
+      validate: r => (Object.keys(r?.structuredContent?.data ?? {}).length > 0 ? null : 'expected compatibility mappings'),
+    },
+    {
       name: 'venice_image_styles',
       args: {},
       validate: r => (typeof r?.content?.[0]?.text === 'string' ? null : 'no text content'),
@@ -118,7 +128,7 @@ function buildPlan(walletAddr: string): CallSpec[] {
     // ============ AUGMENT (search / scrape / parse) ============
     {
       name: 'venice_web_search',
-      args: { query: 'venice ai uncensored llm', limit: 3 },
+      args: { query: 'venice ai uncensored llm', limit: 3, search_provider: 'brave' },
       validate: r => (r?.isError ? `error: ${String(r?.content?.[0]?.text).slice(0, 200)}` : null),
     },
     {
@@ -418,7 +428,7 @@ function summary(mode: string, results: ToolResult[]) {
 async function main() {
   const arg = process.argv[2] || 'both'
   const wallet = loadOrCreateWallet()
-  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 31 tools × auth modes ═══${COLORS.reset}`)
+  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 33 tools × auth modes ═══${COLORS.reset}`)
   console.log(`Venice base:   ${BASE_URL}`)
   console.log(`Test wallet:   ${wallet.address}\n`)
 

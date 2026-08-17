@@ -26,7 +26,7 @@ import { z } from 'zod'
 import type { VeniceClient } from '../venice-client.js'
 import { VeniceResponseTooLargeError } from '../venice-client.js'
 import type { Config } from '../config.js'
-import { VeniceUpstreamError } from '../types.js'
+import { shapeTtsVoiceCatalog, VeniceUpstreamError, type ModelCatalogResponse } from '../types.js'
 import { formatToolError, truncate } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
@@ -128,6 +128,32 @@ function needsConsentDetails(err: unknown): NeedsConsentBody | undefined {
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
+
+const MODEL_TYPES = [
+  'text',
+  'image',
+  'video',
+  'music',
+  'embedding',
+  'asr',
+  'tts',
+  'upscale',
+  'inpaint',
+  'code',
+  'all',
+] as const
+
+const MODEL_METADATA_TYPES = [
+  'asr',
+  'embedding',
+  'image',
+  'music',
+  'text',
+  'tts',
+  'upscale',
+  'inpaint',
+  'video',
+] as const
 
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
@@ -768,13 +794,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_tts',
       title: 'Venice TTS (Speech)',
-      description: `Convert text to speech. Supports cloned voices + emotion tags ([whispers], [sarcastically], etc.).${X402_OK}`,
+      description: `Convert text to speech. Supports cloned voices + emotion tags ([whispers], [sarcastically], etc.). When streaming=true, Venice streams upstream but this MCP tool buffers and returns one complete audio result; it does not emit incremental MCP chunks.${X402_OK}`,
       inputSchema: {
         input: z.string().min(1).max(4096).describe('Text to convert to speech (max 4096 chars).'),
         voice: z.string().optional().describe('Voice id; see venice://voices.'),
         model: z.string().optional(),
         speed: z.number().min(0.25).max(4).optional(),
         response_format: z.enum(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']).optional(),
+        temperature: z.number().min(0).max(2).optional().describe('Sampling temperature. Only supported by some TTS models; unsupported models ignore it.'),
+        streaming: z.boolean().optional().describe('Forward Venice\'s streaming flag. The MCP result is still buffered into one complete audio response, not delivered incrementally.'),
       },
       handler: async (args) => {
         try {
@@ -799,7 +827,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         audio_url: z.string().url(),
         model: z.string().optional(),
         language: z.string().optional(),
-        response_format: z.enum(['json', 'text', 'srt', 'verbose_json', 'vtt']).optional(),
+        response_format: z.enum(['json', 'text']).optional(),
+        timestamps: z.boolean().optional().describe('Include word and character timestamps in JSON responses. Defaults to false.'),
       },
       handler: async (args) => {
         try {
@@ -815,11 +844,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           form.set('model', args.model ?? cfg.defaultAsrModel)
           if (args.language) form.set('language', args.language)
           if (args.response_format) form.set('response_format', args.response_format)
-          const resp = await client.postMultipart<{ text?: string; transcription?: string }>(
+          if (args.timestamps !== undefined) form.set('timestamps', String(args.timestamps))
+          const resp = await client.postMultipart<
+            string | { text?: string; transcription?: string; duration?: number; timestamps?: unknown }
+          >(
             '/v1/audio/transcriptions',
             form,
           )
-          return ok(truncate(resp.text ?? resp.transcription ?? JSON.stringify(resp)))
+          if (typeof resp === 'string') return ok(truncate(resp))
+          return ok(JSON.stringify(resp, null, 2), resp)
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -829,37 +862,22 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_voice_clone',
       title: 'Venice Voice Clone / List',
-      description: `Manage TTS voices. Action 'list' returns the static catalog of built-in voices grouped by TTS model (Venice does not expose a list endpoint). Action 'create' clones a voice from a sample audio URL via multipart upload to /v1/audio/voices. ${X402_OK}`,
+      description: `Discover or clone TTS voices. Action 'list' reads live per-model voice metadata from auth-free GET /v1/models?type=tts. Action 'create' requires both sample_url and model, then uploads the sample to POST /v1/audio/voices.${X402_OK}`,
       inputSchema: {
-        action: z.enum(['list', 'create']).describe('list = show built-in voices, create = clone from sample_url'),
-        sample_url: z.string().url().optional().describe('Audio sample URL for action=create. WAV/MP3/M4A.'),
-        model: z.string().optional().describe('Voice cloning model. Required for action=create. Examples: tts-chatterbox-hd, tts-minimax-speech-02-hd.'),
+        action: z.enum(['list', 'create']).describe('list = fetch live TTS model voice metadata; create requires sample_url and model'),
+        sample_url: z.string().url().optional().describe('Required for action=create. Audio sample URL (WAV/MP3/M4A).'),
+        model: z.string().min(1).optional().describe('Required for action=create. Discover current voice_cloning capabilities with action=list.'),
       },
       handler: async (args) => {
         try {
           if (args.action === 'list') {
-            // Static reference — Venice doesn't expose GET /v1/audio/voices.
-            // Voice IDs come from each TTS model's hardcoded list. Group by model
-            // for clarity. Cloned voices use the `vv_<id>` handle returned by
-            // POST /v1/audio/voices.
-            const voices = {
-              note: 'Venice does not expose a list endpoint. These are the built-in voices available across TTS models. Cloned voices come back as `vv_<id>` from action=create.',
-              kokoro: {
-                description: 'Default model "tts-kokoro" — fast, multilingual, 70+ voices',
-                examples: ['af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky', 'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck'],
-              },
-              orpheus: {
-                description: 'Model "tts-orpheus" — expressive, supports emotion tags',
-                voices: ['leah', 'jess', 'mia', 'zoe', 'leo', 'dan', 'zac', 'tara'],
-              },
-              other_models: ['tts-qwen3-0-6b', 'tts-qwen3-1-7b', 'tts-xai-v1', 'tts-inworld-1-5-max', 'tts-chatterbox-hd', 'tts-elevenlabs-turbo-v2-5', 'tts-minimax-speech-02-hd', 'tts-gemini-3-1-flash'],
-              voice_cloning_supported: ['tts-chatterbox-hd', 'tts-minimax-speech-02-hd'],
-              docs: 'https://docs.venice.ai/api-reference/api-spec/tts',
-            }
-            return ok(JSON.stringify(voices, null, 2))
+            const resp = await client.get<ModelCatalogResponse>('/v1/models?type=tts')
+            const voices = shapeTtsVoiceCatalog(resp)
+            return ok(JSON.stringify(voices, null, 2), voices)
           }
           // action === 'create'
           if (!args.sample_url) return fail('sample_url is required for action=create')
+          if (!args.model) return fail('model is required for action=create')
           const source = await fetchUploadSource(args.sample_url, {
             label: 'sample_url',
             fallbackContentType: 'audio/mpeg',
@@ -869,7 +887,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           })
           const form = new FormData()
           form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
-          if (args.model) form.set('model', args.model)
+          form.set('model', args.model)
           const resp = await client.postMultipart<unknown>('/v1/audio/voices', form)
           return ok(JSON.stringify(resp, null, 2))
         } catch (err) {
@@ -976,10 +994,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_web_search',
       title: 'Venice Web Search',
-      description: `Search the web (Firecrawl-backed). Returns ranked results with snippets.${X402_OK}`,
+      description: `Search the web with Brave Search (default, Zero Data Retention) or Google Search (proxied and anonymized by Venice). Returns structured results with titles, URLs, snippets, and dates.${X402_OK}`,
       inputSchema: {
         query: z.string().min(1).max(500),
         limit: z.number().int().min(1).max(20).optional(),
+        search_provider: z.enum(['brave', 'google']).optional().describe('brave (default) uses Zero Data Retention; google is proxied/anonymized by Venice.'),
       },
       handler: async (args) => {
         try {
@@ -1080,20 +1099,59 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice List Models',
       description: `List the live model catalog with capabilities and prices.${NO_AUTH}`,
       inputSchema: {
-        type: z.enum(['text', 'image', 'video', 'audio', 'music', 'embedding', 'all']).optional(),
+        type: z.enum(MODEL_TYPES).optional(),
       },
       handler: async ({ type }) => {
         try {
-          const path = type && type !== 'all'
+          const path = type
             ? `/v1/models?type=${encodeURIComponent(type)}`
             : '/v1/models'
-          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>(path)
-          const all = resp.data ?? resp.models ?? []
-          return ok(JSON.stringify(all, null, 2), {
-            count: all.length,
-            total: all.length,
-            requested_type: type && type !== 'all' ? type : undefined,
+          const resp = await client.get<ModelCatalogResponse>(path)
+          const models = resp.data ?? resp.models ?? []
+          return ok(JSON.stringify(models, null, 2), {
+            count: models.length,
+            requested_type: type,
           })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_model_traits',
+      title: 'Venice Model Traits',
+      description: `Return the live trait-name to model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
+      inputSchema: {
+        type: z.enum(MODEL_METADATA_TYPES).optional(),
+      },
+      handler: async ({ type }) => {
+        try {
+          const path = type
+            ? `/v1/models/traits?type=${encodeURIComponent(type)}`
+            : '/v1/models/traits'
+          const resp = await client.get<Record<string, unknown>>(path)
+          return ok(JSON.stringify(resp, null, 2), resp)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_model_compatibility_mapping',
+      title: 'Venice Model Compatibility Mapping',
+      description: `Return the live compatible model-name to Venice model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
+      inputSchema: {
+        type: z.enum(MODEL_METADATA_TYPES).optional(),
+      },
+      handler: async ({ type }) => {
+        try {
+          const path = type
+            ? `/v1/models/compatibility_mapping?type=${encodeURIComponent(type)}`
+            : '/v1/models/compatibility_mapping'
+          const resp = await client.get<Record<string, unknown>>(path)
+          return ok(JSON.stringify(resp, null, 2), resp)
         } catch (err) {
           return fail(formatToolError(err))
         }
