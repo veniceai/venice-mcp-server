@@ -5,7 +5,7 @@ export interface StubCall {
   path: string
   body?: unknown
   headers?: Record<string, string>
-  auth?: 'default' | 'siwx' | 'none'
+  auth?: 'default' | 'apiKey' | 'siwx' | 'none'
   /** Whether this call went through postMultipart (FormData body) instead of JSON. */
   multipart?: boolean
   /** Whether this call went through postBinary (binary response expected). */
@@ -34,11 +34,30 @@ export class StubClient {
     return (defaultResponse(call.path, call.binary) as T) ?? ({} as T)
   }
 
-  get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
-    return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
+  async get<T>(
+    path: string,
+    headers?: Record<string, string>,
+    opts: {
+      auth?: StubCall['auth']
+      onResponse?: (metadata: { status: number; headers: Record<string, string> }) => void
+    } = {},
+  ) {
+    const result = await this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
+    opts.onResponse?.({
+      status: 200,
+      headers: path.startsWith('/v1/billing/usage-history')
+        ? { 'x-next-cursor': 'stub-next-cursor' }
+        : {},
+    })
+    return result
   }
-  post<T>(path: string, json: unknown) {
-    return this.dispatch<T>({ method: 'POST', path, body: json })
+  post<T>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: { auth?: StubCall['auth'] } = {},
+  ) {
+    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
   }
   /**
    * Stub for postBinary. Tool calls expecting binary back get a synthetic
@@ -124,6 +143,16 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
       ],
     }
   if (path.startsWith('/v1/characters')) return { data: [{ slug: 'sample', name: 'Sample' }] }
+  if (path.startsWith('/v1/billing/balance'))
+    return { canConsume: true, consumptionCurrency: 'USD', balances: { usd: 10, diem: null }, diemEpochAllocation: 0 }
+  if (path.startsWith('/v1/billing/usage-analytics'))
+    return { lookback: '7d', byDate: [], byModel: [], byModelDaily: [], topModels: [], byKey: [], byKeyDaily: [], topKeyNames: [] }
+  if (path.startsWith('/v1/billing/usage-history')) return { data: [], nextCursor: 'stub-next-cursor' }
+  if (path === '/v1/api_keys') return { object: 'list', data: [] }
+  if (path === '/v1/api_keys/rate_limits') return { data: { accessPermitted: true, rateLimits: [] } }
+  if (path === '/v1/api_keys/rate_limits/log') return { object: 'list', data: [] }
+  if (path === '/v1/api_keys/generate_web3_key') return { success: true, data: { token: 'stub-challenge' } }
+  if (path.startsWith('/v1/api_keys/')) return { data: { id: path.split('/').at(-1), last6Chars: 'abc123' } }
   if (path.startsWith('/v1/x402/balance')) return { walletAddress: '0x', balanceUsd: 5.42, currency: 'USDC' }
   if (path.startsWith('/v1/x402/transactions')) return { transactions: [] }
   return {}

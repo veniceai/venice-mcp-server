@@ -88,8 +88,14 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
         for (const [k, v] of Object.entries(r.__headers ?? {})) {
           res.setHeader(k, v)
         }
-        res.setHeader('content-type', 'application/json')
-        res.end(JSON.stringify(r.__body ?? {}))
+        if (!res.hasHeader('content-type')) res.setHeader('content-type', 'application/json')
+        const responseBody = r.__body ?? {}
+        const contentType = String(res.getHeader('content-type') ?? '')
+        res.end(
+          typeof responseBody === 'string' && !contentType.includes('application/json')
+            ? responseBody
+            : JSON.stringify(responseBody),
+        )
         return
       }
 

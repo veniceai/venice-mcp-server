@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
@@ -18,12 +19,17 @@ function setup() {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented set (31 tools)', () => {
+  it('registers exactly the documented set (40 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
       'venice_asr',
       'venice_audio_quote',
+      'venice_api_key_rate_limit_logs',
+      'venice_api_key_rate_limits',
+      'venice_billing_balance',
+      'venice_billing_usage_analytics',
+      'venice_billing_usage_history',
       'venice_chat',
       'venice_chat_with_character',
       'venice_crypto_rpc',
@@ -34,6 +40,8 @@ describe('tools registry', () => {
       'venice_image_remove_bg',
       'venice_image_styles',
       'venice_image_upscale',
+      'venice_get_api_key',
+      'venice_list_api_keys',
       'venice_list_characters',
       'venice_list_models',
       'venice_music_complete',
@@ -50,12 +58,14 @@ describe('tools registry', () => {
       'venice_voice_clone',
       'venice_web_scrape',
       'venice_web_search',
+      'venice_web3_key_challenge',
+      'venice_web3_key_mint',
       'venice_x402_balance',
       'venice_x402_top_up_info',
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 31)
+    assert.equal(tools.length, 40)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -103,6 +113,41 @@ describe('tools registry', () => {
     assert.match(get('venice_list_characters').description, /API key required/i)
     // chat_with_character notes the discovery limitation
     assert.match(get('venice_chat_with_character').description, /API[- ]key/i)
+  })
+
+  it('billing and operator API-key tools call out API-key-only requirements', () => {
+    const { get } = setup()
+    for (const name of [
+      'venice_billing_balance',
+      'venice_billing_usage_analytics',
+      'venice_billing_usage_history',
+      'venice_list_api_keys',
+      'venice_get_api_key',
+      'venice_api_key_rate_limits',
+      'venice_api_key_rate_limit_logs',
+    ]) {
+      assert.match(get(name).description, /API key required/i, `${name} auth description`)
+    }
+  })
+
+  it('all API_KEY_ONLY discovery and read tools force explicit API-key auth', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['venice_list_characters', { limit: 3 }],
+      ['venice_billing_balance', {}],
+      ['venice_billing_usage_analytics', { lookback: '7d' }],
+      ['venice_billing_usage_history', { page_size: 10 }],
+      ['venice_list_api_keys', {}],
+      ['venice_get_api_key', { id: 'key-1' }],
+      ['venice_api_key_rate_limits', {}],
+      ['venice_api_key_rate_limit_logs', {}],
+    ]
+    for (const [name, args] of cases) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === name)!
+      await tool.handler(args as never)
+      assert.equal(stub.calls.length, 1, `${name} request count`)
+      assert.equal(stub.calls[0].auth, 'apiKey', `${name} auth mode`)
+    }
   })
 })
 
@@ -316,12 +361,83 @@ const MAPPINGS: Mapping[] = [
     expectBodyContains: { venice_parameters: { character_slug: 'alice' } },
   },
 
+  // billing
+  { tool: 'venice_billing_balance', args: {}, expectMethod: 'GET', expectPath: '/v1/billing/balance' },
+  {
+    tool: 'venice_billing_usage_analytics',
+    args: { start_date: '2026-08-01', end_date: '2026-08-10' },
+    expectMethod: 'GET',
+    expectPath: '/v1/billing/usage-analytics?startDate=2026-08-01&endDate=2026-08-10',
+  },
+  {
+    tool: 'venice_billing_usage_history',
+    args: {
+      currency: 'DIEM',
+      start_timestamp: '2026-08-01T00:00:00.000Z',
+      page_size: 100,
+    },
+    expectMethod: 'GET',
+    expectPath: '/v1/billing/usage-history?currency=DIEM&startTimestamp=2026-08-01T00%3A00%3A00.000Z&pageSize=100',
+  },
+
+  // API keys
+  { tool: 'venice_list_api_keys', args: {}, expectMethod: 'GET', expectPath: '/v1/api_keys' },
+  {
+    tool: 'venice_get_api_key',
+    args: { id: 'key/id' },
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/key%2Fid',
+  },
+  {
+    tool: 'venice_api_key_rate_limits',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/rate_limits',
+  },
+  {
+    tool: 'venice_api_key_rate_limit_logs',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/rate_limits/log',
+  },
+  {
+    tool: 'venice_web3_key_challenge',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/generate_web3_key',
+  },
+  {
+    tool: 'venice_web3_key_mint',
+    args: {
+      address: `0x${'a'.repeat(40)}`,
+      signature: '0xsigned',
+      token: 'challenge',
+      api_key_type: 'INFERENCE',
+      consumption_limit: { usd: 50, diem: 10 },
+      limit_period: 'MONTH',
+    },
+    expectMethod: 'POST',
+    expectPath: '/v1/api_keys/generate_web3_key',
+    expectBodyContains: {
+      apiKeyType: 'INFERENCE',
+      consumptionLimit: { usd: 50, diem: 10 },
+      limitPeriod: 'MONTH',
+    },
+  },
+
   // x402 helpers
   {
     tool: 'venice_x402_balance',
     args: { wallet_address: '0x' + 'a'.repeat(40) },
     expectMethod: 'GET',
     expectPath: `/v1/x402/balance/0x${'a'.repeat(40)}`,
+  },
+  {
+    tool: 'venice_x402_top_up_info',
+    args: { wallet_address: 'So11111111111111111111111111111111111111112' },
+    expectMethod: 'POST',
+    expectPath: '/v1/x402/top-up',
+    expectBodyContains: {},
   },
   {
     tool: 'venice_x402_transactions',
@@ -449,6 +565,111 @@ describe('tool output shaping', () => {
       limit: 5,
     } as never)
     assert.equal(stub.calls.at(-1)?.auth, 'siwx')
+  })
+
+  it('accepts EVM and Solana addresses on all x402 helpers and preserves Solana case', async () => {
+    const { get } = setup()
+    const evm = `0x${'A'.repeat(40)}`
+    const solana = 'So11111111111111111111111111111111111111112'
+    for (const name of [
+      'venice_x402_balance',
+      'venice_x402_top_up_info',
+      'venice_x402_transactions',
+    ]) {
+      const schema = z.object(get(name).inputSchema)
+      assert.equal(schema.safeParse({ wallet_address: evm }).success, true, `${name} EVM`)
+      assert.equal(schema.safeParse({ wallet_address: solana }).success, true, `${name} Solana`)
+      assert.equal(schema.safeParse({ wallet_address: 'not-a-wallet' }).success, false, `${name} invalid`)
+    }
+
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_x402_balance')!
+    await tool.handler({ wallet_address: solana } as never)
+    assert.equal(stub.calls.at(-1)?.path, `/v1/x402/balance/${solana}`)
+  })
+
+  it('uses cursor-only continuation and exposes JSON and CSV next cursors', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+
+    const invalid = await history.handler({ cursor: 'cursor_1', currency: 'USD' } as never)
+    assert.equal(invalid.isError, true)
+    assert.equal(stub.calls.length, 0)
+
+    const json = await history.handler({ cursor: 'cursor_1' } as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=cursor_1')
+    assert.equal(json.structuredContent?.nextCursor, 'stub-next-cursor')
+
+    const csvStub = new StubClient({
+      '/v1/billing/usage-history': () => 'timestamp,amount\n2026-08-01T00:00:00.000Z,-0.1',
+    })
+    const csvTool = buildTools(csvStub.asClient(), cfg).find(
+      (tool) => tool.name === 'venice_billing_usage_history',
+    )!
+    const csv = await csvTool.handler({ format: 'csv', page_size: 50 } as never)
+    assert.equal(csvStub.calls.at(-1)?.headers?.Accept, 'text/csv')
+    assert.equal(csv.structuredContent?.nextCursor, 'csv:stub-next-cursor')
+    assert.match((csv.content[0] as { text: string }).text, /timestamp,amount/)
+
+    const continued = await csvTool.handler({ cursor: csv.structuredContent?.nextCursor as string } as never)
+    assert.equal(csvStub.calls.at(-1)?.headers?.Accept, 'text/csv')
+    assert.equal(csvStub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=stub-next-cursor')
+    assert.equal(continued.structuredContent?.format, 'csv')
+  })
+
+  it('validates analytics filter combinations before making a request', async () => {
+    const { get, stub } = setup()
+    const analytics = get('venice_billing_usage_analytics')
+    assert.equal(
+      (await analytics.handler({ lookback: '7d', start_date: '2026-08-01', end_date: '2026-08-02' } as never)).isError,
+      true,
+    )
+    assert.equal((await analytics.handler({ lookback: '91d' } as never)).isError, true)
+    assert.equal((await analytics.handler({ start_date: '2026-08-01' } as never)).isError, true)
+    assert.equal(stub.calls.length, 0)
+  })
+
+  it('uses unauthenticated Web3 challenge/mint calls without accepting a private-key field', async () => {
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) =>
+        method === 'POST'
+          ? { success: true, data: { apiKey: 'vk_new_secret', id: 'key-1' } }
+          : { success: true, data: { token: 'challenge-token' } },
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const challenge = tools.find((tool) => tool.name === 'venice_web3_key_challenge')!
+    const mint = tools.find((tool) => tool.name === 'venice_web3_key_mint')!
+    assert.equal('private_key' in mint.inputSchema, false)
+    assert.equal('privateKey' in mint.inputSchema, false)
+
+    await challenge.handler({} as never)
+    assert.equal(stub.calls.at(-1)?.auth, 'none')
+
+    const result = await mint.handler({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      api_key_type: 'INFERENCE',
+    } as never)
+    assert.equal(stub.calls.at(-1)?.auth, 'none')
+    assert.match((result.content[0] as { text: string }).text, /vk_new_secret/)
+    assert.equal(result.structuredContent, undefined)
+  })
+
+  it('redacts unexpected secret fields from operator API-key reads', async () => {
+    const secret = 'vk_should_not_escape'
+    const stub = new StubClient({
+      '/v1/api_keys': () => ({
+        object: 'list',
+        data: [{ id: 'key-1', last6Chars: 'escape', apiKey: secret, token: 'token-secret' }],
+      }),
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_list_api_keys')!
+    const result = await tool.handler({} as never)
+    const text = (result.content[0] as { text: string }).text
+    assert.doesNotMatch(text, new RegExp(secret))
+    assert.doesNotMatch(text, /token-secret/)
+    assert.match(text, /\[REDACTED\]/)
   })
 
   it('venice_asr reports timeout when fetching audio_url stalls', async () => {

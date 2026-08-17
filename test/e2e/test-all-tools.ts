@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * COMPREHENSIVE end-to-end test of all 31 MCP tools against live Venice API.
+ * COMPREHENSIVE end-to-end plan covering all 40 MCP tools against live Venice API.
  *
  * Runs the same test plan twice — once with API key auth, once with x402 SIWX wallet auth —
  * and produces a side-by-side report showing which tools work in which mode.
@@ -278,6 +278,55 @@ function buildPlan(walletAddr: string): CallSpec[] {
       validate: () => null,
     },
 
+    // ============ BILLING / API KEYS — registered but not called by default ============
+    // These reads expose real account data. Run focused checks only with explicit
+    // operator approval; the normal comprehensive harness records a safe skip.
+    {
+      name: 'venice_billing_balance',
+      args: {},
+      skipReason: 'safe default: would expose real account balance data',
+    },
+    {
+      name: 'venice_billing_usage_analytics',
+      args: { lookback: '7d' },
+      skipReason: 'safe default: would expose real account usage data',
+    },
+    {
+      name: 'venice_billing_usage_history',
+      args: { page_size: 10 },
+      skipReason: 'safe default: would expose real account usage history',
+    },
+    {
+      name: 'venice_list_api_keys',
+      args: {},
+      skipReason: 'safe default: would expose real API-key metadata',
+    },
+    {
+      name: 'venice_get_api_key',
+      args: { id: '__requires_operator_selected_id__' },
+      skipReason: 'requires operator-selected key ID and exposes account metadata',
+    },
+    {
+      name: 'venice_api_key_rate_limits',
+      args: {},
+      skipReason: 'safe default: would expose real key balances and limits',
+    },
+    {
+      name: 'venice_api_key_rate_limit_logs',
+      args: {},
+      skipReason: 'safe default: would expose real account rate-limit events',
+    },
+    {
+      name: 'venice_web3_key_challenge',
+      args: {},
+      skipReason: 'safe default: challenge token must not be printed in reports',
+    },
+    {
+      name: 'venice_web3_key_mint',
+      args: {},
+      skipReason: 'never mint keys from the general live test harness',
+    },
+
     // ============ x402 wallet helpers — SIWX-ONLY (will 402 on API key mode) ============
     {
       name: 'venice_x402_balance',
@@ -418,7 +467,7 @@ function summary(mode: string, results: ToolResult[]) {
 async function main() {
   const arg = process.argv[2] || 'both'
   const wallet = loadOrCreateWallet()
-  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 31 tools × auth modes ═══${COLORS.reset}`)
+  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 40 tools × auth modes ═══${COLORS.reset}`)
   console.log(`Venice base:   ${BASE_URL}`)
   console.log(`Test wallet:   ${wallet.address}\n`)
 
