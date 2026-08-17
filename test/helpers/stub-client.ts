@@ -39,8 +39,8 @@ export class StubClient {
   get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
     return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
-  post<T>(path: string, json: unknown, headers?: Record<string, string>) {
-    return this.dispatch<T>({ method: 'POST', path, body: json, headers })
+  post<T>(path: string, json: unknown, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
+    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
   }
   postEventStream(path: string, json: unknown, headers?: Record<string, string>) {
     return this.dispatch<string>({ method: 'POST', path, body: json, headers, eventStream: true })
