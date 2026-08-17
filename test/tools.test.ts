@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
@@ -18,7 +19,7 @@ function setup() {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented set (31 tools)', () => {
+  it('registers exactly the documented set (34 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
@@ -26,6 +27,8 @@ describe('tools registry', () => {
       'venice_audio_quote',
       'venice_chat',
       'venice_chat_with_character',
+      'venice_character_reviews',
+      'venice_crypto_networks',
       'venice_crypto_rpc',
       'venice_embeddings',
       'venice_image_edit',
@@ -34,6 +37,7 @@ describe('tools registry', () => {
       'venice_image_remove_bg',
       'venice_image_styles',
       'venice_image_upscale',
+      'venice_get_character',
       'venice_list_characters',
       'venice_list_models',
       'venice_music_complete',
@@ -55,7 +59,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 31)
+    assert.equal(tools.length, 34)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -100,9 +104,18 @@ describe('tools registry', () => {
 
   it('characters tools call out API-key-only requirement', () => {
     const { get } = setup()
-    assert.match(get('venice_list_characters').description, /API key required/i)
+    for (const name of ['venice_list_characters', 'venice_get_character', 'venice_character_reviews']) {
+      assert.match(get(name).description, /API key required/i, `${name} should require an API key`)
+      assert.match(get(name).description, /does not accept x402/i, `${name} should reject x402 discovery`)
+    }
     // chat_with_character notes the discovery limitation
     assert.match(get('venice_chat_with_character').description, /API[- ]key/i)
+  })
+
+  it('crypto network discovery is explicitly auth-free', () => {
+    const { get } = setup()
+    assert.match(get('venice_crypto_networks').description, /No authentication required/i)
+    assert.doesNotMatch(get('venice_crypto_rpc').description, /Networks include/i)
   })
 })
 
@@ -295,18 +308,54 @@ const MAPPINGS: Mapping[] = [
 
   // crypto rpc
   {
+    tool: 'venice_crypto_networks',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/crypto/rpc/networks',
+  },
+  {
     tool: 'venice_crypto_rpc',
-    args: { network: 'base', rpc_method: 'eth_blockNumber' },
+    args: { network: 'base-mainnet', rpc_method: 'eth_blockNumber' },
     expectMethod: 'POST',
-    expectPath: '/v1/crypto/rpc/base',
-    expectBodyContains: { jsonrpc: '2.0', method: 'eth_blockNumber' },
+    expectPath: '/v1/crypto/rpc/base-mainnet',
+    expectBodyContains: { jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 },
   },
 
   // catalog
   { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models' },
 
   // characters
-  { tool: 'venice_list_characters', args: {}, expectMethod: 'GET', expectPath: '/v1/characters' },
+  {
+    tool: 'venice_list_characters',
+    args: {
+      search: 'guide',
+      tag: 'legacy',
+      tags: ['helpful', 'productivity'],
+      categories: ['roleplay', 'philosophy'],
+      isAdult: false,
+      isPro: true,
+      isWebEnabled: false,
+      modelId: ['model/a', 'model-b'],
+      sortBy: 'highestRating',
+      sortOrder: 'asc',
+      limit: 100,
+      offset: 20,
+    },
+    expectMethod: 'GET',
+    expectPath: '/v1/characters?search=guide&tag=legacy&tags=helpful&tags=productivity&categories=roleplay&categories=philosophy&isAdult=false&isPro=true&isWebEnabled=false&modelId=model%2Fa&modelId=model-b&sortBy=highestRating&sortOrder=asc&limit=100&offset=20',
+  },
+  {
+    tool: 'venice_get_character',
+    args: { slug: 'alan watts/teacher' },
+    expectMethod: 'GET',
+    expectPath: '/v1/characters/alan%20watts%2Fteacher',
+  },
+  {
+    tool: 'venice_character_reviews',
+    args: { slug: 'alan-watts', page: 2, pageSize: 50 },
+    expectMethod: 'GET',
+    expectPath: '/v1/characters/alan-watts/reviews?page=2&pageSize=50',
+  },
   {
     tool: 'venice_chat_with_character',
     args: { character_slug: 'alice', messages: [{ role: 'user', content: 'hi' }] },
@@ -378,6 +427,120 @@ describe('tools endpoint + method mapping', () => {
 })
 
 describe('tool output shaping', () => {
+  it('venice_crypto_networks disables auth and returns structured network data', async () => {
+    const stub = new StubClient({
+      '/v1/crypto/rpc/networks': () => ({ networks: ['base-mainnet', 'ethereum-mainnet'] }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_crypto_networks')!.handler({} as never)
+
+    assert.equal(stub.calls.at(-1)?.auth, 'none')
+    assert.deepEqual(r.structuredContent, {
+      networks: ['base-mainnet', 'ethereum-mainnet'],
+      count: 2,
+    })
+  })
+
+  it('venice_crypto_rpc forwards a single request object unchanged', async () => {
+    const { stub, get } = setup()
+    const request = { jsonrpc: '2.0', method: 'eth_getBalance', params: ['0xabc', 'latest'], id: 'balance-1' }
+    await get('venice_crypto_rpc').handler({ network: 'ethereum-mainnet', request } as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, request)
+  })
+
+  it('venice_crypto_rpc forwards a batch request unchanged', async () => {
+    const { stub, get } = setup()
+    const request = [
+      { jsonrpc: '2.0', method: 'eth_chainId', params: [], id: 1 },
+      { jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 2 },
+    ]
+    await get('venice_crypto_rpc').handler({ network: 'ethereum-mainnet', request } as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, request)
+  })
+
+  it('venice_crypto_rpc validates batch size and request objects', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_crypto_rpc').inputSchema)
+    const valid = { jsonrpc: '2.0' as const, method: 'eth_chainId', params: [], id: 1 }
+
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        request: { jsonrpc: '2.0', method: 'eth_chainId', params: [] },
+      }).success,
+      true,
+      'single requests may omit id',
+    )
+    assert.equal(schema.safeParse({ network: 'ethereum-mainnet', request: [valid] }).success, true)
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        request: [{ ...valid, id: 'chain-id' }],
+      }).success,
+      true,
+      'batch IDs may be strings',
+    )
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        request: [{ jsonrpc: '2.0', method: 'eth_chainId', params: [] }],
+      }).success,
+      false,
+      'every batch item requires an id',
+    )
+    assert.equal(schema.safeParse({ network: 'ethereum-mainnet', request: [] }).success, false)
+    assert.equal(
+      schema.safeParse({ network: 'ethereum-mainnet', request: Array.from({ length: 100 }, () => valid) }).success,
+      true,
+    )
+    assert.equal(
+      schema.safeParse({ network: 'ethereum-mainnet', request: Array.from({ length: 101 }, () => valid) }).success,
+      false,
+    )
+    assert.equal(
+      schema.safeParse({ network: 'ethereum-mainnet', request: [{ jsonrpc: '1.0', method: 'eth_chainId' }] }).success,
+      false,
+    )
+    assert.equal(
+      schema.safeParse({ network: 'ethereum-mainnet', request: [{ jsonrpc: '2.0', method: '' }] }).success,
+      false,
+    )
+  })
+
+  it('venice_crypto_rpc rejects ambiguous or missing request forms without calling upstream', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_crypto_rpc')
+
+    const both = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: { method: 'eth_chainId' },
+      rpc_method: 'eth_blockNumber',
+    } as never)
+    assert.equal(both.isError, true)
+
+    const neither = await tool.handler({ network: 'ethereum-mainnet' } as never)
+    assert.equal(neither.isError, true)
+    assert.equal(stub.calls.length, 0)
+  })
+
+  it('character discovery rejects SIWX-only configuration locally without upstream calls', async () => {
+    const stub = new StubClient()
+    const siwxOnlyCfg = loadConfig({ VENICE_SIWX_TOKEN: 'siwx-test-token' })
+    const tools = buildTools(stub.asClient(), siwxOnlyCfg)
+    const calls = [
+      { name: 'venice_list_characters', args: {} },
+      { name: 'venice_get_character', args: { slug: 'alan-watts' } },
+      { name: 'venice_character_reviews', args: { slug: 'alan-watts', page: 1, pageSize: 20 } },
+    ]
+
+    for (const call of calls) {
+      const result = await tools.find((tool) => tool.name === call.name)!.handler(call.args as never)
+      assert.equal(result.isError, true, `${call.name} should return a local error`)
+      assert.match((result.content[0] as { text: string }).text, /VENICE_API_KEY is required/)
+    }
+    assert.equal(stub.calls.length, 0)
+  })
+
   it('venice_image_generate returns base64 image content + structuredContent.id', async () => {
     const { get } = setup()
     const r = await get('venice_image_generate').handler({ prompt: 'a cat' } as never)

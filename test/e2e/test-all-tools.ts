@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * COMPREHENSIVE end-to-end test of all 31 MCP tools against live Venice API.
+ * COMPREHENSIVE end-to-end test of all 34 MCP tools against live Venice API.
  *
  * Runs the same test plan twice — once with API key auth, once with x402 SIWX wallet auth —
  * and produces a side-by-side report showing which tools work in which mode.
@@ -135,6 +135,11 @@ function buildPlan(walletAddr: string): CallSpec[] {
 
     // ============ CRYPTO RPC ============
     {
+      name: 'venice_crypto_networks',
+      args: {},
+      validate: r => (r?.isError ? `error: ${String(r?.content?.[0]?.text).slice(0, 200)}` : null),
+    },
+    {
       name: 'venice_crypto_rpc',
       args: { network: 'base-mainnet', rpc_method: 'eth_blockNumber', rpc_params: [] },
       validate: r => (r?.isError ? `error: ${String(r?.content?.[0]?.text).slice(0, 200)}` : null),
@@ -262,8 +267,27 @@ function buildPlan(walletAddr: string): CallSpec[] {
 
     {
       name: 'venice_list_characters',
-      args: { limit: 3 },
+      args: {
+        categories: ['roleplay'],
+        isAdult: false,
+        isPro: false,
+        sortBy: 'highestRating',
+        sortOrder: 'desc',
+        limit: 3,
+      },
       expectIn: { apikey: true, x402: false }, // characters endpoint is API-key only
+      validate: r => (r?.isError ? `error: ${String(r?.content?.[0]?.text).slice(0, 200)}` : null),
+    },
+    {
+      name: 'venice_get_character',
+      args: { slug: 'alan-watts' },
+      expectIn: { apikey: true, x402: false },
+      validate: r => (r?.isError ? `error: ${String(r?.content?.[0]?.text).slice(0, 200)}` : null),
+    },
+    {
+      name: 'venice_character_reviews',
+      args: { slug: 'alan-watts', page: 1, pageSize: 3 },
+      expectIn: { apikey: true, x402: false },
       validate: r => (r?.isError ? `error: ${String(r?.content?.[0]?.text).slice(0, 200)}` : null),
     },
     {
@@ -418,7 +442,7 @@ function summary(mode: string, results: ToolResult[]) {
 async function main() {
   const arg = process.argv[2] || 'both'
   const wallet = loadOrCreateWallet()
-  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 31 tools × auth modes ═══${COLORS.reset}`)
+  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 34 tools × auth modes ═══${COLORS.reset}`)
   console.log(`Venice base:   ${BASE_URL}`)
   console.log(`Test wallet:   ${wallet.address}\n`)
 
