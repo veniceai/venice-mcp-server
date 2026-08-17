@@ -649,11 +649,32 @@ describe('tool output shaping', () => {
       address: `0x${'a'.repeat(40)}`,
       signature: 'signed-value',
       token: 'challenge-token',
-      api_key_type: 'INFERENCE',
+      consumption_limit: { usd: 25 },
     } as never)
     assert.equal(stub.calls.at(-1)?.auth, 'none')
+    assert.equal((stub.calls.at(-1)?.body as { apiKeyType?: string }).apiKeyType, 'INFERENCE')
     assert.match((result.content[0] as { text: string }).text, /vk_new_secret/)
     assert.equal(result.structuredContent, undefined)
+
+    const schema = z.object(mint.inputSchema)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      api_key_type: 'ADMIN',
+      consumption_limit: { usd: 25 },
+    }).success, false)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+    }).success, false)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      consumption_limit: { usd: 0, diem: null },
+    }).success, false)
   })
 
   it('redacts unexpected secret fields from operator API-key reads', async () => {

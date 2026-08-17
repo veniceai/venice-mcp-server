@@ -125,9 +125,9 @@ Usage-history continuation calls must send `cursor` without the original filters
 | `venice_api_key_rate_limits` | Get current balances, access status, tier, and model limits. API key only. |
 | `venice_api_key_rate_limit_logs` | Get the last 50 exceeded rate-limit events. API key only; experimental upstream. |
 | `venice_web3_key_challenge` | Get the unauthenticated 15-minute Web3 mint challenge. |
-| `venice_web3_key_mint` | Submit a caller-signed EVM challenge and receive the one-time API-key secret. |
+| `venice_web3_key_mint` | Submit a caller-signed EVM challenge and receive a one-time INFERENCE API-key secret. ADMIN minting is rejected; a positive consumption limit is required. |
 
-Web3 minting currently requires an EVM wallet with staked VVV on Base. Signing stays in the caller's wallet: this server accepts an address, signature, and challenge token, but never a private key. Minted secrets are returned only to the MCP caller and are not written to server logs. Create/update/delete key mutations are intentionally not exposed.
+Web3 minting currently requires an EVM wallet with staked VVV on Base. Signing stays in the caller's wallet: this server accepts an address, signature, and challenge token, but never a private key. MCP minting is limited to `INFERENCE` keys with a required positive `consumption_limit`, because the wallet signature covers only the challenge token. Minted secrets are returned only to the MCP caller and are not written to server logs. Create/update/delete key mutations are intentionally not exposed.
 
 The API-key list/get/rate-limit reads also require `VENICE_API_KEY`; they never forward `SIGN-IN-WITH-X`.
 

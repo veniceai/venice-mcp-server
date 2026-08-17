@@ -1299,12 +1299,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_web3_key_mint',
       title: 'Venice Web3 API Key Mint',
-      description: `Submit an externally signed Web3 challenge to mint an API key for an EVM wallet with staked VVV on Base. Never provide a private key; only address, signed challenge, and original token are accepted. The returned apiKey is shown once—store it securely.${NO_AUTH}`,
+      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit is required because the wallet signature covers only the challenge token. Never provide a private key. The returned apiKey is shown once—store it securely.${NO_AUTH}`,
       inputSchema: {
         address: evmAddressSchema,
         signature: z.string().min(1).max(4096).describe('Signature created by the caller wallet over the raw challenge token.'),
         token: z.string().min(1).max(8192).describe('Unmodified token returned by venice_web3_key_challenge.'),
-        api_key_type: z.enum(['INFERENCE', 'ADMIN']),
+        api_key_type: z
+          .literal('INFERENCE')
+          .optional()
+          .describe('Only INFERENCE keys can be minted through MCP. ADMIN is rejected.'),
         description: z.string().max(500).optional(),
         expires_at: z
           .union([dateSchema, utcTimestampSchema])
@@ -1316,7 +1319,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             diem: z.number().min(0).max(9_999_999_999).nullable().optional(),
             vcu: z.number().min(0).max(9_999_999_999).nullable().optional(),
           })
-          .optional(),
+          .refine(
+            (limit) => [limit.usd, limit.diem, limit.vcu].some((value) => typeof value === 'number' && value > 0),
+            'At least one positive consumption limit (usd, diem, or vcu) is required.',
+          )
+          .describe('Required spend cap. The challenge signature does not bind key type or limits.'),
         limit_period: z.enum(['EPOCH', 'MONTH', 'LIFETIME']).optional(),
       },
       handler: async (args) => {
@@ -1327,7 +1334,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               address: args.address,
               signature: args.signature,
               token: args.token,
-              apiKeyType: args.api_key_type,
+              apiKeyType: 'INFERENCE',
               description: args.description,
               expiresAt: args.expires_at,
               consumptionLimit: args.consumption_limit,
