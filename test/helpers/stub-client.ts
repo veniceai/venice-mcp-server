@@ -118,7 +118,7 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
   if (path.startsWith('/v1/models'))
     return {
       data: [
-        { id: 'venice-uncensored', type: 'text' },
+        { id: 'deepseek-v4-flash-0731', type: 'text' },
         { id: 'flux-2-pro', type: 'image' },
         { id: 'veo3.1-fast-text-to-video', type: 'video' },
       ],

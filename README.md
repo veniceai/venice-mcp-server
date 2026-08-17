@@ -42,8 +42,8 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_chat` | OpenAI-compatible chat completion against Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored, etc.). |
-| `venice_responses` | OpenAI-compatible Responses API. Single-turn or multi-turn with tool support. |
+| `venice_chat` | OpenAI-compatible chat completion against Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored, etc.). Supports `venice_parameters` for web search, citations, characters, and system prompt or reasoning control. |
+| `venice_responses` | OpenAI-compatible Responses API. Single-turn or multi-turn with tool support. Supports `venice_parameters`. |
 | `venice_embeddings` | Compute embeddings for text input (OpenAI-compatible). |
 | `venice_chat_with_character` | Chat with a Venice character by slug. |
 
@@ -54,7 +54,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `venice_image_generate` | Generate an image. Supports Flux 2 Pro/Max, Lustify SDXL, Anime (WAI), Qwen Image, GPT Image, Nano Banana Pro and others. |
 | `venice_image_edit` | Edit an image with a prompt. Returns base64 PNG. |
 | `venice_image_multi_edit` | Edit multiple images together with a single prompt (multi-image composition / outpainting). |
-| `venice_image_upscale` | Upscale an image (1–4× scale). Returns base64 PNG. |
+| `venice_image_upscale` | Upscale an image (2–4× scale, with a `creativity` control). Returns base64 PNG. |
 | `venice_image_remove_bg` | Remove image background; returns a transparent PNG. |
 | `venice_image_styles` | List image style presets available for `venice_image_generate`. |
 
@@ -121,7 +121,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | Env var | Default | Notes |
 |---|---|---|
 | `VENICE_API_KEY` | _(none)_ | Your Venice API key. The simplest setup. |
-| `VENICE_DEFAULT_CHAT_MODEL` | `venice-uncensored` | |
+| `VENICE_DEFAULT_CHAT_MODEL` | `deepseek-v4-flash-0731` | |
 | `VENICE_DEFAULT_IMAGE_MODEL` | `flux-2-pro` | |
 | `VENICE_DEFAULT_TTS_MODEL` | `tts-kokoro` | |
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |

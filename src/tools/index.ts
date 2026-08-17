@@ -94,6 +94,58 @@ const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API k
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
 
+/**
+ * Venice-specific extensions to the OpenAI body. `/responses` accepts a
+ * narrower set than `/chat/completions` and silently strips the rest, so the
+ * two endpoints get separate schemas rather than one shared superset.
+ */
+const sharedVeniceParameters = {
+  enable_web_search: z
+    .enum(['auto', 'on', 'off'])
+    .optional()
+    .describe('Web search. "on" forces it, "auto" leaves it to the model, "off" (default) disables it.'),
+  enable_web_citations: z
+    .boolean()
+    .optional()
+    .describe('Ask the model to cite web sources with ^1^ style superscripts. Only applies when web search ran.'),
+  enable_web_scraping: z
+    .boolean()
+    .optional()
+    .describe('Scrape URLs found in the latest user message and feed the contents to the model.'),
+  include_venice_system_prompt: z
+    .boolean()
+    .optional()
+    .describe('Keep Venice\'s default system prompt alongside your own. Defaults to true; set false for full control of behaviour.'),
+  character_slug: z
+    .string()
+    .optional()
+    .describe('Public ID of a Venice character to answer in. Discoverable via venice_list_characters.'),
+}
+
+const veniceParametersSchema = z
+  .object({
+    ...sharedVeniceParameters,
+    enable_x_search: z
+      .boolean()
+      .optional()
+      .describe('Native xAI web + X/Twitter search, on supported models such as Grok. Runs server-side instead of Venice search.'),
+    strip_thinking_response: z
+      .boolean()
+      .optional()
+      .describe('Remove <think></think> blocks from the response of a reasoning model.'),
+    disable_thinking: z
+      .boolean()
+      .optional()
+      .describe('Turn reasoning off entirely on supported models, and strip the <think></think> blocks.'),
+  })
+  .optional()
+  .describe('Venice-only options: web search, citations, system prompt control, reasoning control, characters.')
+
+const responsesVeniceParametersSchema = z
+  .object(sharedVeniceParameters)
+  .optional()
+  .describe('Venice-only options supported by /responses: web search, citations, scraping, system prompt control, characters.')
+
 export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
 
@@ -105,7 +157,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored 1.1, etc.).${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored 1.1, etc.). Use venice_parameters for live web search with citations, character personas, and system prompt or reasoning control.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(z.object({ role: z.enum(['system', 'user', 'assistant']), content: z.string() }))
@@ -116,6 +168,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         max_tokens: z.number().int().positive().max(32_000).optional(),
         top_p: z.number().min(0).max(1).optional(),
         stop: z.array(z.string()).max(8).optional(),
+        verbosity: z.enum(['low', 'medium', 'high', 'auto']).optional().describe('How much text the model returns.'),
+        venice_parameters: veniceParametersSchema,
       },
       handler: async (args) => {
         try {
@@ -129,6 +183,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             max_tokens: args.max_tokens,
             top_p: args.top_p,
             stop: args.stop,
+            verbosity: args.verbosity,
+            venice_parameters: args.venice_parameters,
             stream: false,
           })
           const text = resp.choices?.[0]?.message?.content ?? ''
@@ -153,6 +209,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         model: z.string().optional(),
         max_output_tokens: z.number().int().positive().max(32_000).optional(),
         temperature: z.number().min(0).max(2).optional(),
+        venice_parameters: responsesVeniceParametersSchema,
       },
       handler: async (args) => {
         try {
@@ -262,7 +319,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         image_url: z.string().url().describe('URL of the image to edit (will be passed through to the edit endpoint).'),
         prompt: z.string().min(1).max(32_000),
         model: z.string().optional().describe('Edit model id; defaults to firered-image-edit.'),
-        aspect_ratio: z.enum(['1:1', '16:9', '9:16', '4:3', '3:4', '21:9', '9:21']).optional(),
+        aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "1:1", "16:9", "9:16", "4:5". Supported values vary by model; the API validates.'),
         safe_mode: z.boolean().optional(),
       },
       handler: async (args) => {
@@ -294,7 +351,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         image_urls: z.array(z.string().url()).min(1).max(8),
         prompt: z.string().min(1).max(32_000),
         model: z.string().optional(),
-        aspect_ratio: z.enum(['1:1', '16:9', '9:16', '4:3', '3:4', '21:9', '9:21']).optional(),
+        aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "1:1", "16:9", "9:16", "4:5". Supported values vary by model; the API validates.'),
       },
       handler: async (args) => {
         try {
@@ -321,12 +378,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_image_upscale',
       title: 'Venice Image Upscale',
-      description: `Upscale an image (1-4× scale). Endpoint requires base64 image; this tool fetches the URL and uploads it. Returns base64 PNG.${X402_OK}`,
+      description: `Upscale an image (2-4× scale). Endpoint requires base64 image; this tool fetches the URL and uploads it. Returns base64 PNG.${X402_OK}`,
       inputSchema: {
         image_url: z.string().url(),
-        scale: z.number().min(1).max(4).optional().describe('Upscale factor 1-4. 1 = enhance only.'),
-        enhance: z.boolean().optional(),
-        replication: z.number().min(0).max(1).optional(),
+        scale: z.number().min(2).max(4).optional().describe('Upscale factor, 2 to 4. Defaults to 2. Large inputs are scaled down automatically to stay under the 4096x4096 output cap.'),
+        creativity: z
+          .number()
+          .min(0)
+          .max(0.02)
+          .optional()
+          .describe('How much detail and texture the upscaler invents, 0 to 0.02. Defaults to 0.01. Higher stays further from the source.'),
       },
       handler: async (args) => {
         try {
@@ -340,8 +401,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const form = new FormData()
           form.set('image', new Blob([source.buffer], { type: source.contentType }), source.filename)
           if (args.scale !== undefined) form.set('scale', String(args.scale))
-          if (args.enhance !== undefined) form.set('enhance', String(args.enhance))
-          if (args.replication !== undefined) form.set('replication', String(args.replication))
+          if (args.creativity !== undefined) form.set('creativity', String(args.creativity))
           const { buffer, contentType } = await client.postBinary('/v1/image/upscale', { form })
           return {
             content: [{ type: 'image', data: buffer.toString('base64'), mimeType: contentType }],
@@ -385,7 +445,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
         duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See GET /v1/models/:id/card.'),
-        aspect_ratio: z.enum(['16:9', '9:16', '1:1', '2:3', '3:2', '3:4', '4:3', '21:9']).optional(),
+        aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see GET /v1/models/:id/card.'),
         seed: z.number().int().optional(),
         image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
         end_image_url: z.string().url().optional().describe('For models that support end frames or transitions. URL or data URL.'),
