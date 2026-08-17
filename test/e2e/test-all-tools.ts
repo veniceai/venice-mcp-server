@@ -87,7 +87,7 @@ function buildPlan(walletAddr: string): CallSpec[] {
       name: 'venice_chat',
       args: {
         messages: [{ role: 'user', content: 'Reply with the single word: ok' }],
-        model: 'kimi-k3',
+        model: 'deepseek-v4-flash-0731',
         max_tokens: 8,
         temperature: 0,
       },
@@ -100,7 +100,7 @@ function buildPlan(walletAddr: string): CallSpec[] {
     },
     {
       name: 'venice_responses',
-      args: { input: 'Reply with: ok', model: 'kimi-k3', max_output_tokens: 8 },
+      args: { input: 'Reply with: ok', model: 'deepseek-v4-flash-0731', max_output_tokens: 8 },
       validate: r => {
         if (r?.isError) return `error: ${String(r?.content?.[0]?.text).slice(0, 200)}`
         return r?.content?.[0]?.text ? null : 'no text'

@@ -81,7 +81,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
 
   before(async () => {
     venice = await startMockVenice([
-      { match: 'GET /v1/models', reply: { data: [{ id: 'kimi-k3', type: 'text' }] } },
+      { match: 'GET /v1/models', reply: { data: [{ id: 'deepseek-v4-flash-0731', type: 'text' }] } },
       {
         match: 'POST /v1/chat/completions',
         reply: ({ headers, body }) => ({
@@ -206,7 +206,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(r.error, undefined)
     const text = (r.result as { content: Array<{ text: string }> }).content[0].text
     assert.match(text, /auth=Bearer vk_integration/)
-    assert.match(text, /model=kimi-k3/)
+    assert.match(text, /model=deepseek-v4-flash-0731/)
   })
 
   it('venice_image_generate returns base64 image content', async () => {
@@ -229,7 +229,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     const r = (await rpc.request('resources/read', { uri: 'venice://models' })) as RpcResult
     assert.equal(r.error, undefined)
     const text = (r.result as { contents: Array<{ text: string }> }).contents[0].text
-    assert.match(text, /kimi-k3/)
+    assert.match(text, /deepseek-v4-flash-0731/)
   })
 })
 

@@ -35,7 +35,7 @@ const res = await fetch('https://api.venice.ai/api/v1/chat/completions', {
     'X-Sign-In-With-X': token,
   },
   body: JSON.stringify({
-    model: 'kimi-k3',
+    model: 'deepseek-v4-flash-0731',
     messages: [{ role: 'user', content: 'hi' }],
     max_tokens: 4,
   }),

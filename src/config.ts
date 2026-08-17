@@ -62,7 +62,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     baseUrl: env.VENICE_TEST_BASE_URL?.trim() || 'https://api.venice.ai/api',
     apiKey: env.VENICE_API_KEY,
     siwxToken: env.VENICE_SIWX_TOKEN,
-    defaultChatModel: env.VENICE_DEFAULT_CHAT_MODEL ?? 'kimi-k3',
+    defaultChatModel: env.VENICE_DEFAULT_CHAT_MODEL ?? 'deepseek-v4-flash-0731',
     defaultImageModel: env.VENICE_DEFAULT_IMAGE_MODEL ?? 'flux-2-pro',
     defaultTtsModel: env.VENICE_DEFAULT_TTS_MODEL ?? 'tts-kokoro',
     defaultAsrModel: env.VENICE_DEFAULT_ASR_MODEL ?? 'openai/whisper-large-v3',
