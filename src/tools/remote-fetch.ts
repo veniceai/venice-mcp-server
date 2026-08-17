@@ -87,7 +87,7 @@ async function resolveValidRemoteAddresses(url: URL, lookupAddresses: LookupAddr
     throw new Error(`Refusing to fetch URL with unsupported scheme: ${url.protocol}`)
   }
 
-  const hostname = url.hostname.toLowerCase()
+  const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '')
   if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
     throw new Error(`Refusing to fetch local hostname: ${url.hostname}`)
   }
@@ -335,9 +335,9 @@ function isBlockedIpv4(address: string): boolean {
 }
 
 function isBlockedIpv6(address: string): boolean {
-  const normalized = address.toLowerCase()
-  const mappedIpv4 = normalized.match(/(?:::ffff:)?(\d+\.\d+\.\d+\.\d+)$/)?.[1]
-  if (mappedIpv4 && isBlockedIpv4(mappedIpv4)) return true
+  const normalized = address.toLowerCase().split('%')[0]
+  const embeddedIpv4 = ipv4FromMappedOrEmbedded(normalized)
+  if (embeddedIpv4 && isBlockedIpv4(embeddedIpv4)) return true
 
   return (
     normalized === '::' ||
@@ -350,4 +350,48 @@ function isBlockedIpv6(address: string): boolean {
     normalized.startsWith('feb') ||
     normalized.startsWith('ff')
   )
+}
+
+/** Decode IPv4-mapped, IPv4-compatible, and NAT64-embedded addresses, including hex form. */
+function ipv4FromMappedOrEmbedded(address: string): string | undefined {
+  const dotted = address.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1]
+  if (dotted) return dotted
+
+  const groups = expandIpv6Groups(address)
+  if (!groups) return undefined
+
+  const isMapped =
+    groups[0] === 0 &&
+    groups[1] === 0 &&
+    groups[2] === 0 &&
+    groups[3] === 0 &&
+    groups[4] === 0 &&
+    groups[5] === 0xffff
+  const isNat64 =
+    groups[0] === 0x64 &&
+    groups[1] === 0xff9b &&
+    groups[2] === 0 &&
+    groups[3] === 0 &&
+    groups[4] === 0 &&
+    groups[5] === 0
+  if (!isMapped && !isNat64) return undefined
+  return `${(groups[6] >> 8) & 0xff}.${groups[6] & 0xff}.${(groups[7] >> 8) & 0xff}.${groups[7] & 0xff}`
+}
+
+function expandIpv6Groups(address: string): number[] | undefined {
+  if (address.includes('.')) return undefined
+  const [head, tail] = address.split('::')
+  const parse = (part: string | undefined) =>
+    part ? part.split(':').filter(Boolean).map((group) => Number.parseInt(group, 16)) : []
+  if (tail === undefined) {
+    const groups = parse(head)
+    return groups.length === 8 && groups.every(Number.isInteger) ? groups : undefined
+  }
+  const left = parse(head)
+  const right = parse(tail)
+  const missing = 8 - left.length - right.length
+  if (missing < 0 || left.some((n) => !Number.isInteger(n)) || right.some((n) => !Number.isInteger(n))) {
+    return undefined
+  }
+  return [...left, ...Array<number>(missing).fill(0), ...right]
 }

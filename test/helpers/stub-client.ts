@@ -37,8 +37,8 @@ export class StubClient {
   get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
     return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
-  post<T>(path: string, json: unknown) {
-    return this.dispatch<T>({ method: 'POST', path, body: json })
+  post<T>(path: string, json: unknown, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
+    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
   }
   async postWithMetadata<T>(path: string, json: unknown) {
     const output = await this.dispatch<T | {
