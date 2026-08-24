@@ -27,7 +27,7 @@ import type { VeniceClient } from '../venice-client.js'
 import { VeniceResponseTooLargeError } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { shapeTtsVoiceCatalog, VeniceUpstreamError, type ModelCatalogResponse } from '../types.js'
-import { formatToolError, truncate } from '../format.js'
+import { ASR_TIMESTAMP_DEFAULT_LIMIT, ASR_TIMESTAMP_MAX_LIMIT, boundAsrResult, formatToolError, truncate } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -829,6 +829,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         language: z.string().optional(),
         response_format: z.enum(['json', 'text']).optional(),
         timestamps: z.boolean().optional().describe('Include word and character timestamps in JSON responses. Defaults to false.'),
+        timestamp_offset: z.number().int().min(0).optional().describe('Start index into each timestamp array (word/segment/char). Defaults to 0.'),
+        timestamp_limit: z.number().int().min(1).max(ASR_TIMESTAMP_MAX_LIMIT).optional().describe(`Max entries returned per timestamp array. Defaults to ${ASR_TIMESTAMP_DEFAULT_LIMIT}.`),
       },
       handler: async (args) => {
         try {
@@ -852,7 +854,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             form,
           )
           if (typeof resp === 'string') return ok(truncate(resp))
-          return ok(JSON.stringify(resp, null, 2), resp)
+          const { text, structured } = boundAsrResult(
+            resp,
+            args.timestamp_offset ?? 0,
+            args.timestamp_limit ?? ASR_TIMESTAMP_DEFAULT_LIMIT,
+          )
+          return ok(truncate(text), structured)
         } catch (err) {
           return fail(formatToolError(err))
         }

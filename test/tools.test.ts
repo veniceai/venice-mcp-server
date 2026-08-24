@@ -754,7 +754,58 @@ describe('tool output shaping', () => {
       assert.deepEqual((r.structuredContent as { timestamps: unknown }).timestamps, {
         word: [{ word: 'hello', start: 0, end: 1.5 }],
       })
+      assert.equal((r.content[0] as { text: string }).text, 'hello')
       assert.equal(tool.inputSchema.response_format.safeParse('srt').success, false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr pages timestamp arrays instead of returning the full payload twice', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })) as typeof fetch
+      const words = Array.from({ length: 250 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({
+          text: 'long transcript',
+          timestamps: { word: words },
+        }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        timestamps: true,
+      } as never)
+      const structured = r.structuredContent as {
+        timestamps: { word: unknown[] }
+        timestamp_total: { word: number }
+        timestamps_truncated: boolean
+        timestamp_limit: number
+      }
+      assert.equal(structured.timestamps.word.length, 200)
+      assert.deepEqual(structured.timestamps.word[0], words[0])
+      assert.equal(structured.timestamp_total.word, 250)
+      assert.equal(structured.timestamps_truncated, true)
+      assert.equal(structured.timestamp_limit, 200)
+      const text = (r.content[0] as { text: string }).text
+      assert.equal(text, 'long transcript')
+      assert.doesNotMatch(text, /w249/)
+
+      const page = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        timestamps: true,
+        timestamp_offset: 200,
+        timestamp_limit: 50,
+      } as never)
+      const paged = page.structuredContent as { timestamps: { word: unknown[] }; timestamp_offset: number }
+      assert.equal(paged.timestamps.word.length, 50)
+      assert.deepEqual(paged.timestamps.word[0], words[200])
+      assert.equal(paged.timestamp_offset, 200)
     } finally {
       globalThis.fetch = originalFetch
     }
