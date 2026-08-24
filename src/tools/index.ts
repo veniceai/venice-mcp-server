@@ -369,6 +369,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             const veniceParameters = {
               ...args.venice_parameters,
               include_venice_system_prompt: false,
+              enable_web_search: 'off' as const,
             }
             const body = {
               model,

@@ -68,6 +68,21 @@ describe('E2EE contract helpers', () => {
       }),
       undefined,
     )
+    assert.match(
+      validateE2eeChatRequest({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: ciphertext }],
+        venice_parameters: { character_slug: 'alice' },
+      }) ?? '',
+      /character/,
+    )
+    assert.match(
+      validateE2eeChatRequest({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'assistant', content: null, reasoning_content: 'plaintext chain of thought' }],
+      }) ?? '',
+      /reasoning_content/,
+    )
   })
 
   it('rejects SSE content that is not valid ciphertext', () => {
@@ -78,6 +93,21 @@ describe('E2EE contract helpers', () => {
     assert.equal(
       validateE2eeSseContent([`{"choices":[{"delta":{"content":"${ciphertext}"}}]}`, '[DONE]']),
       undefined,
+    )
+    assert.match(
+      validateE2eeSseContent([`{"choices":[{"delta":{"content":["hello"]}}]}`, '[DONE]']) ?? '',
+      /plaintext or invalid ciphertext/,
+    )
+    assert.match(
+      validateE2eeSseContent([
+        `{"choices":[{"delta":{"content":"${ciphertext}","reasoning_content":"secret thoughts"}}]}`,
+        '[DONE]',
+      ]) ?? '',
+      /plaintext or invalid ciphertext/,
+    )
+    assert.match(
+      validateE2eeSseContent(['this is plaintext leaked', '[DONE]']) ?? '',
+      /non-JSON data event/,
     )
   })
 })

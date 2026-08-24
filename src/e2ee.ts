@@ -52,6 +52,9 @@ export function validateE2eeChatRequest(args: {
     if (venice.include_venice_system_prompt === true) {
       return 'E2EE cannot include the Venice system prompt; encrypt any system instructions client-side.'
     }
+    if (venice.character_slug !== undefined) {
+      return 'E2EE does not support character injection; encrypt any persona instructions client-side.'
+    }
   }
 
   if (!Array.isArray(args.messages)) {
@@ -71,10 +74,18 @@ export function validateE2eeSseContent(dataEvents: readonly string[]): string | 
     try {
       parsed = JSON.parse(data)
     } catch {
+      if (data.trim() !== '') {
+        return 'E2EE response contained a non-JSON data event; refusing to label the result encrypted.'
+      }
       continue
     }
-    if (!parsed || typeof parsed !== 'object') continue
+    if (!parsed || typeof parsed !== 'object') {
+      return 'E2EE response contained plaintext or invalid ciphertext; refusing to label the result encrypted.'
+    }
     const contents = collectMessageContents(parsed as Record<string, unknown>)
+    if (contents === undefined) {
+      return 'E2EE response contained plaintext or invalid ciphertext; refusing to label the result encrypted.'
+    }
     for (const content of contents) {
       if (content === '') continue
       if (!isValidEncryptedHex(content)) {
@@ -102,16 +113,26 @@ function validateE2eeMessage(message: unknown): string | undefined {
     }
   }
 
-  if (role === 'assistant' && record.content != null && record.content !== '') {
-    if (typeof record.content !== 'string' || !isValidEncryptedHex(record.content)) {
-      return 'E2EE assistant history must be encrypted hex ciphertext when content is present.'
+  if (role === 'assistant') {
+    if (record.content != null && record.content !== '') {
+      if (typeof record.content !== 'string' || !isValidEncryptedHex(record.content)) {
+        return 'E2EE assistant history must be encrypted hex ciphertext when content is present.'
+      }
+    }
+    if (record.reasoning_content != null && record.reasoning_content !== '') {
+      if (typeof record.reasoning_content !== 'string' || !isValidEncryptedHex(record.reasoning_content)) {
+        return 'E2EE assistant history cannot include plaintext reasoning_content.'
+      }
+    }
+    if (record.reasoning_details !== undefined) {
+      return 'E2EE does not support reasoning_details; they are not encrypted ciphertext.'
     }
   }
 
   return undefined
 }
 
-function collectMessageContents(payload: Record<string, unknown>): string[] {
+function collectMessageContents(payload: Record<string, unknown>): string[] | undefined {
   const choices = payload.choices
   if (!Array.isArray(choices)) return []
   const contents: string[] = []
@@ -120,8 +141,15 @@ function collectMessageContents(payload: Record<string, unknown>): string[] {
     const record = choice as Record<string, unknown>
     for (const container of [record.delta, record.message]) {
       if (!container || typeof container !== 'object') continue
-      const content = (container as Record<string, unknown>).content
-      if (typeof content === 'string') contents.push(content)
+      const fields = container as Record<string, unknown>
+      if (fields.content !== undefined && fields.content !== null && typeof fields.content !== 'string') {
+        return undefined
+      }
+      if (typeof fields.content === 'string') contents.push(fields.content)
+      if (fields.reasoning_content !== undefined && fields.reasoning_content !== null && fields.reasoning_content !== '') {
+        if (typeof fields.reasoning_content !== 'string') return undefined
+        contents.push(fields.reasoning_content)
+      }
     }
   }
   return contents

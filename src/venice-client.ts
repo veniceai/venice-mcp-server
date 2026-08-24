@@ -337,8 +337,10 @@ function firstSseErrorEnvelope(dataEvents: readonly string[]): unknown | undefin
     if (data === '[DONE]') continue
     try {
       const parsed = JSON.parse(data) as unknown
-      if (parsed && typeof parsed === 'object' && 'error' in parsed && (parsed as { error?: unknown }).error != null) {
-        return parsed
+      if (parsed && typeof parsed === 'object') {
+        const record = parsed as { error?: unknown; type?: unknown }
+        if (record.error != null) return parsed
+        if (typeof record.type === 'string' && record.type.endsWith('_error')) return parsed
       }
     } catch {
       // Non-JSON data events are left for the caller; they are not error envelopes.

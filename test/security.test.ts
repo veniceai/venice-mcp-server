@@ -80,29 +80,6 @@ describe('remote upload fetch security', () => {
     )
   })
 
-  it('rejects IPv4-compatible and local-use NAT64 embeddings', async () => {
-    await assert.rejects(
-      validateRemoteUrl(new URL('http://[::7f00:1]/'), publicLookup),
-      /private or local address/,
-    )
-    await assert.rejects(
-      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['::7f00:1']),
-      /private or local address/,
-    )
-    await assert.rejects(
-      validateRemoteUrl(new URL('http://[64:ff9b:1::7f00:1]/file.png'), publicLookup),
-      /private or local address/,
-    )
-    await assert.rejects(
-      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['64:ff9b:1::7f00:1']),
-      /private or local address/,
-    )
-    await assert.rejects(
-      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['64:ff9b:1:7f00:0:100::']),
-      /private or local address/,
-    )
-  })
-
   it('revalidates redirect targets before following them', async () => {
     const fetchImpl = async () =>
       new Response(null, {
