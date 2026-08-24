@@ -2,7 +2,9 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
+import { resetWeb3MintAttemptStore } from '../src/tools/web3-key-mint.js'
 import { loadConfig } from '../src/config.js'
+import { VeniceUpstreamError } from '../src/types.js'
 import { StubClient } from './helpers/stub-client.js'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
@@ -123,10 +125,12 @@ describe('tools registry', () => {
       'venice_billing_usage_history',
       'venice_list_api_keys',
       'venice_get_api_key',
-      'venice_api_key_rate_limits',
-      'venice_api_key_rate_limit_logs',
     ]) {
+      assert.match(get(name).description, /ADMIN API key required/i, `${name} admin description`)
+    }
+    for (const name of ['venice_api_key_rate_limits', 'venice_api_key_rate_limit_logs']) {
       assert.match(get(name).description, /API key required/i, `${name} auth description`)
+      assert.doesNotMatch(get(name).description, /ADMIN API key required/i, `${name} allows inference keys`)
     }
   })
 
@@ -460,6 +464,7 @@ describe('tools endpoint + method mapping', () => {
         venice_asr: 'audio/wav',
         venice_text_parser: 'application/pdf',
       }
+      resetWeb3MintAttemptStore()
       try {
         if (uploadContentTypes[m.tool]) {
           globalThis.fetch = (async () =>
@@ -645,6 +650,7 @@ describe('tool output shaping', () => {
     await challenge.handler({} as never)
     assert.equal(stub.calls.at(-1)?.auth, 'none')
 
+    resetWeb3MintAttemptStore()
     const result = await mint.handler({
       address: `0x${'a'.repeat(40)}`,
       signature: 'signed-value',
@@ -653,6 +659,7 @@ describe('tool output shaping', () => {
     } as never)
     assert.equal(stub.calls.at(-1)?.auth, 'none')
     assert.equal((stub.calls.at(-1)?.body as { apiKeyType?: string }).apiKeyType, 'INFERENCE')
+    assert.equal((stub.calls.at(-1)?.body as { limitPeriod?: string }).limitPeriod, 'LIFETIME')
     assert.match((result.content[0] as { text: string }).text, /vk_new_secret/)
     assert.equal(result.structuredContent, undefined)
 
@@ -675,6 +682,127 @@ describe('tool output shaping', () => {
       token: 'challenge-token',
       consumption_limit: { usd: 0, diem: null },
     }).success, false)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      description: 'x'.repeat(64),
+      consumption_limit: { usd: 25 },
+    }).success, true)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      description: 'x'.repeat(65),
+      consumption_limit: { usd: 25 },
+    }).success, false)
+  })
+
+  it('replays a successful web3 mint for the same challenge token without creating another key', async () => {
+    resetWeb3MintAttemptStore()
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) =>
+        method === 'POST' ? { success: true, data: { apiKey: 'vk_replay_secret', id: 'key-replay' } } : {},
+    })
+    const mint = buildTools(stub.asClient(), cfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const args = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'replay-token',
+      consumption_limit: { usd: 25 },
+    } as never
+
+    const first = await mint.handler(args)
+    const second = await mint.handler(args)
+    assert.equal(stub.calls.filter((call) => call.method === 'POST').length, 1)
+    assert.match((first.content[0] as { text: string }).text, /vk_replay_secret/)
+    assert.match((second.content[0] as { text: string }).text, /vk_replay_secret/)
+  })
+
+  it('refuses to retry a web3 mint after an unknown outcome', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        throw new VeniceUpstreamError({
+          message: 'timeout',
+          status: 504,
+          body: { error: 'timeout' },
+        })
+      },
+    })
+    const mint = buildTools(stub.asClient(), cfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const args = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'unknown-token',
+      consumption_limit: { usd: 25 },
+    } as never
+
+    const first = await mint.handler(args)
+    const second = await mint.handler(args)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, true)
+    assert.equal(posts, 1)
+    assert.match((first.content[0] as { text: string }).text, /Mint outcome is unknown/)
+    assert.match((second.content[0] as { text: string }).text, /Do not retry/)
+    assert.match((second.content[0] as { text: string }).text, /venice_list_api_keys/)
+  })
+
+  it('allows a corrected web3 mint after a definitive 4xx', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        if (posts === 1) {
+          throw new VeniceUpstreamError({
+            message: 'bad token',
+            status: 400,
+            body: { error: 'invalid token' },
+          })
+        }
+        return { success: true, data: { apiKey: 'vk_after_400', id: 'key-400' } }
+      },
+    })
+    const mint = buildTools(stub.asClient(), cfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const args = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'retryable-token',
+      consumption_limit: { usd: 25 },
+      expires_at: '2026-08-01T12:00:00.123456Z',
+    } as never
+
+    const first = await mint.handler(args)
+    const second = await mint.handler(args)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, undefined)
+    assert.equal(posts, 2)
+    assert.equal((stub.calls.at(-1)?.body as { expiresAt?: string }).expiresAt, '2026-08-01T12:00:00.123Z')
+    assert.match((second.content[0] as { text: string }).text, /vk_after_400/)
+  })
+
+  it('accepts high-precision RFC3339 timestamps on usage-history filters', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+    const schema = z.object(history.inputSchema)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.123456Z' }).success, true)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.1Z' }).success, true)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.123456789Z' }).success, true)
+
+    const result = await history.handler({
+      start_timestamp: '2026-08-01T00:00:00.123456Z',
+      end_timestamp: '2026-08-02T00:00:00.1Z',
+    } as never)
+    assert.equal(result.isError, undefined)
+    assert.equal(
+      stub.calls.at(-1)?.path,
+      '/v1/billing/usage-history?startTimestamp=2026-08-01T00%3A00%3A00.123456Z&endTimestamp=2026-08-02T00%3A00%3A00.1Z',
+    )
   })
 
   it('redacts unexpected secret fields from operator API-key reads', async () => {

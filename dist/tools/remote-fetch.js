@@ -1,19 +1,23 @@
 import { lookup } from 'node:dns/promises';
+import http from 'node:http';
+import https from 'node:https';
 import { isIP } from 'node:net';
+import { Readable } from 'node:stream';
 const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
+const DEFAULT_FETCH = fetch;
 export async function fetchUploadSource(url, opts) {
     const ac = new AbortController();
     const timeout = setTimeout(() => ac.abort(), opts.timeoutMs);
     const fetchImpl = opts.fetchImpl ?? fetch;
+    const useInjectedFetch = opts.fetchImpl !== undefined || fetchImpl !== DEFAULT_FETCH;
     const lookupAddresses = opts.lookupAddresses ?? lookupHostname;
     const maxBytes = opts.maxBytes ?? DEFAULT_MAX_UPLOAD_BYTES;
     try {
         let currentUrl = new URL(url);
         let res;
         for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
-            await validateRemoteUrl(currentUrl, lookupAddresses);
-            res = await fetchImpl(currentUrl, { signal: ac.signal, redirect: 'manual' });
+            res = await fetchRemoteUrl(currentUrl, ac.signal, lookupAddresses, useInjectedFetch ? fetchImpl : undefined, opts.pinnedFetchImpl);
             if (!isRedirect(res.status))
                 break;
             const location = res.headers.get('location');
@@ -28,10 +32,12 @@ export async function fetchUploadSource(url, opts) {
             throw new Error(`Could not fetch ${opts.label}: too many redirects`);
         if (!res.ok)
             throw new Error(`Could not fetch ${opts.label}: HTTP ${res.status}`);
-        const contentType = res.headers.get('content-type') ?? opts.fallbackContentType;
-        assertAllowedContentType(contentType, opts.allowedContentTypes, opts.label);
+        const headerContentType = res.headers.get('content-type');
+        const contentType = headerContentType ?? opts.fallbackContentType;
+        const buffer = await readBoundedBuffer(res, maxBytes, opts.label);
+        assertAllowedContentType(contentType, opts.allowedContentTypes, opts.label, buffer, headerContentType === null);
         return {
-            buffer: await readBoundedBuffer(res, maxBytes, opts.label),
+            buffer,
             contentType,
             filename: filenameFromUrl(currentUrl, opts.fallbackFilename),
         };
@@ -47,10 +53,13 @@ export async function fetchUploadSource(url, opts) {
     }
 }
 export async function validateRemoteUrl(url, lookupAddresses = lookupHostname) {
+    await resolveValidRemoteAddresses(url, lookupAddresses);
+}
+async function resolveValidRemoteAddresses(url, lookupAddresses = lookupHostname) {
     if (url.protocol !== 'http:' && url.protocol !== 'https:') {
         throw new Error(`Refusing to fetch URL with unsupported scheme: ${url.protocol}`);
     }
-    const hostname = url.hostname.toLowerCase();
+    const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
     if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
         throw new Error(`Refusing to fetch local hostname: ${url.hostname}`);
     }
@@ -62,6 +71,79 @@ export async function validateRemoteUrl(url, lookupAddresses = lookupHostname) {
             throw new Error(`Refusing to fetch private or local address: ${address}`);
         }
     }
+    return addresses;
+}
+async function fetchRemoteUrl(url, signal, lookupAddresses, injectedFetch, pinnedFetchImpl) {
+    if (injectedFetch) {
+        await validateRemoteUrl(url, lookupAddresses);
+        return injectedFetch(url, { signal, redirect: 'manual' });
+    }
+    return fetchPinnedRemoteUrl(url, signal, lookupAddresses, pinnedFetchImpl);
+}
+async function fetchPinnedRemoteUrl(url, signal, lookupAddresses, pinnedFetchImpl = requestPinnedAddress) {
+    const addresses = await resolveValidRemoteAddresses(url, lookupAddresses);
+    let lastError;
+    for (const address of addresses) {
+        try {
+            return await pinnedFetchImpl(url, address, signal);
+        }
+        catch (err) {
+            if (signal.aborted)
+                throw err;
+            lastError = err;
+        }
+    }
+    throw lastError instanceof Error ? lastError : new Error(`Could not fetch ${url.hostname}`);
+}
+async function requestPinnedAddress(url, address, signal) {
+    const client = url.protocol === 'https:' ? https : http;
+    const family = isIP(address);
+    if (family !== 4 && family !== 6)
+        throw new Error(`Refusing to fetch invalid resolved address: ${address}`);
+    const options = {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port ? Number(url.port) : undefined,
+        path: `${url.pathname}${url.search}`,
+        method: 'GET',
+        headers: { Host: url.host },
+        signal,
+        lookup: ((_hostname, options, callback) => {
+            // Node ≥22 passes { all: true } to custom lookup functions; the callback
+            // then expects an array of { address, family } objects rather than the
+            // legacy (address, family) positional form.
+            if (options.all) {
+                ;
+                callback(null, [{ address, family }]);
+            }
+            else {
+                callback(null, address, family);
+            }
+        }),
+    };
+    if (url.protocol === 'https:')
+        options.servername = url.hostname;
+    return new Promise((resolve, reject) => {
+        const req = client.request(options, (res) => {
+            const headers = new Headers();
+            for (const [key, value] of Object.entries(res.headers)) {
+                if (Array.isArray(value)) {
+                    for (const item of value)
+                        headers.append(key, item);
+                }
+                else if (value !== undefined) {
+                    headers.set(key, value);
+                }
+            }
+            resolve(new Response(Readable.toWeb(res), {
+                status: res.statusCode ?? 500,
+                statusText: res.statusMessage,
+                headers,
+            }));
+        });
+        req.on('error', reject);
+        req.end();
+    });
 }
 async function lookupHostname(hostname) {
     const records = await lookup(hostname, { all: true, verbatim: true });
@@ -70,17 +152,23 @@ async function lookupHostname(hostname) {
 function isRedirect(status) {
     return status >= 300 && status < 400;
 }
-function assertAllowedContentType(contentType, allowed, label) {
+function assertAllowedContentType(contentType, allowed, label, buffer, usedFallbackContentType) {
     if (!allowed || allowed.length === 0)
         return;
     const normalized = contentType.split(';', 1)[0].trim().toLowerCase();
-    if (!normalized || normalized === 'application/octet-stream')
+    if (normalized === 'application/octet-stream' && allowed.some((entry) => entry.toLowerCase() === 'application/octet-stream'))
+        return;
+    if ((!normalized || normalized === 'application/octet-stream' || usedFallbackContentType) && isAllowedByMagicBytes(buffer, allowed))
         return;
     const ok = allowed.some((entry) => {
         const allowedType = entry.toLowerCase();
         return normalized.startsWith(allowedType);
     });
     if (!ok)
+        throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`);
+    if (usedFallbackContentType)
+        throw new Error(`Could not fetch ${label}: missing content-type did not match allowed file signatures`);
+    if (normalized === 'application/octet-stream')
         throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`);
 }
 async function readBoundedBuffer(res, maxBytes, label) {
@@ -116,6 +204,55 @@ function filenameFromUrl(url, fallback) {
         return last;
     }
 }
+function isAllowedByMagicBytes(buffer, allowed) {
+    return allowed.some((entry) => {
+        const allowedType = entry.toLowerCase();
+        if (allowedType.startsWith('image/'))
+            return isImage(buffer);
+        if (allowedType.startsWith('audio/'))
+            return isAudio(buffer);
+        if (allowedType.startsWith('video/'))
+            return isVideo(buffer);
+        if (allowedType === 'application/pdf')
+            return startsWithAscii(buffer, '%PDF-');
+        if (allowedType === 'application/epub+zip')
+            return isZip(buffer);
+        if (allowedType.startsWith('application/vnd.openxmlformats-officedocument.'))
+            return isZip(buffer);
+        if (allowedType.startsWith('application/vnd.ms-') || allowedType === 'application/msword')
+            return isOle(buffer);
+        return false;
+    });
+}
+function isImage(buffer) {
+    return (buffer.subarray(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])) ||
+        buffer.subarray(0, 2).equals(Buffer.from([0xff, 0xd8])) ||
+        startsWithAscii(buffer, 'GIF8') ||
+        (startsWithAscii(buffer, 'RIFF') && buffer.subarray(8, 12).toString('ascii') === 'WEBP'));
+}
+function isAudio(buffer) {
+    return (startsWithAscii(buffer, 'ID3') ||
+        (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0) ||
+        (startsWithAscii(buffer, 'RIFF') && buffer.subarray(8, 12).toString('ascii') === 'WAVE') ||
+        startsWithAscii(buffer, 'OggS') ||
+        startsWithAscii(buffer, 'fLaC') ||
+        isMp4Family(buffer));
+}
+function isVideo(buffer) {
+    return isMp4Family(buffer) || buffer.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]));
+}
+function isMp4Family(buffer) {
+    return buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp';
+}
+function isZip(buffer) {
+    return buffer.subarray(0, 4).equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+}
+function isOle(buffer) {
+    return buffer.subarray(0, 8).equals(Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]));
+}
+function startsWithAscii(buffer, value) {
+    return buffer.subarray(0, value.length).toString('ascii') === value;
+}
 function isBlockedIp(address) {
     const version = isIP(address);
     if (version === 4)
@@ -141,9 +278,8 @@ function isBlockedIpv4(address) {
         (a === 198 && (b === 18 || b === 19)));
 }
 function isBlockedIpv6(address) {
-    const normalized = address.toLowerCase();
-    const mappedIpv4 = normalized.match(/(?:::ffff:)?(\d+\.\d+\.\d+\.\d+)$/)?.[1];
-    if (mappedIpv4 && isBlockedIpv4(mappedIpv4))
+    const normalized = address.toLowerCase().split('%')[0];
+    if (embeddedIpv4Candidates(normalized).some(isBlockedIpv4))
         return true;
     return (normalized === '::' ||
         normalized === '::1' ||
@@ -154,5 +290,68 @@ function isBlockedIpv6(address) {
         normalized.startsWith('fea') ||
         normalized.startsWith('feb') ||
         normalized.startsWith('ff'));
+}
+function ipv4FromHextets(high, low) {
+    return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`;
+}
+/**
+ * Decode IPv4-mapped, IPv4-compatible, IPv4-translated, well-known NAT64, and
+ * local-use NAT64 addresses, including hex form.
+ */
+function embeddedIpv4Candidates(address) {
+    const candidates = new Set();
+    const dotted = address.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1];
+    if (dotted)
+        candidates.add(dotted);
+    const groups = expandIpv6Groups(address);
+    if (!groups)
+        return [...candidates];
+    const last32 = ipv4FromHextets(groups[6], groups[7]);
+    const allZeroPrefix = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0;
+    const isMapped = allZeroPrefix && groups[4] === 0 && groups[5] === 0xffff;
+    const isCompatible = allZeroPrefix && groups[4] === 0 && groups[5] === 0;
+    const isTranslated = allZeroPrefix && groups[4] === 0xffff && groups[5] === 0;
+    const isWellKnownNat64 = groups[0] === 0x64 &&
+        groups[1] === 0xff9b &&
+        groups[2] === 0 &&
+        groups[3] === 0 &&
+        groups[4] === 0 &&
+        groups[5] === 0;
+    const isLocalUseNat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 0x1;
+    if (isMapped || isCompatible || isTranslated || isWellKnownNat64) {
+        candidates.add(last32);
+    }
+    if (isLocalUseNat64) {
+        candidates.add(last32);
+        for (const ipv4 of rfc6052EmbeddedIpv4s(groups))
+            candidates.add(ipv4);
+    }
+    return [...candidates];
+}
+/** RFC 6052 IPv4 embeddings for prefix lengths commonly used under NAT64. */
+function rfc6052EmbeddedIpv4s(groups) {
+    return [
+        `${(groups[3] >> 8) & 0xff}.${groups[3] & 0xff}.${groups[4] & 0xff}.${(groups[5] >> 8) & 0xff}`,
+        `${groups[3] & 0xff}.${groups[4] & 0xff}.${(groups[5] >> 8) & 0xff}.${groups[5] & 0xff}`,
+        `${groups[4] & 0xff}.${(groups[5] >> 8) & 0xff}.${groups[5] & 0xff}.${(groups[6] >> 8) & 0xff}`,
+        ipv4FromHextets(groups[6], groups[7]),
+    ];
+}
+function expandIpv6Groups(address) {
+    if (address.includes('.'))
+        return undefined;
+    const [head, tail] = address.split('::');
+    const parse = (part) => part ? part.split(':').filter(Boolean).map((group) => Number.parseInt(group, 16)) : [];
+    if (tail === undefined) {
+        const groups = parse(head);
+        return groups.length === 8 && groups.every(Number.isInteger) ? groups : undefined;
+    }
+    const left = parse(head);
+    const right = parse(tail);
+    const missing = 8 - left.length - right.length;
+    if (missing < 0 || left.some((n) => !Number.isInteger(n)) || right.some((n) => !Number.isInteger(n))) {
+        return undefined;
+    }
+    return [...left, ...Array(missing).fill(0), ...right];
 }
 //# sourceMappingURL=remote-fetch.js.map

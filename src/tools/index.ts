@@ -13,8 +13,9 @@
  *      - crypto/rpc/:network
  *   ⚠️  API key only (no x402):
  *      - characters (list, get, reviews)
- *      - billing/* (balance, usage-history, usage-analytics)
- *      - api_keys list/get/rate-limit reads, support-bot
+ *      - api_keys/rate_limits and rate_limits/log (INFERENCE or ADMIN)
+ *      - billing/* and api_keys list/get require an ADMIN key
+ *      - support-bot
  *   🔓 Auth-free:
  *      - models, models/card, models/traits
  *      - image/styles
@@ -30,6 +31,16 @@ import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
+import {
+  beginWeb3MintAttempt,
+  getSucceededWeb3Mint,
+  isUnknownMintOutcome,
+  markUnknownWeb3MintAttempt,
+  releaseWeb3MintAttempt,
+  succeedWeb3MintAttempt,
+  WEB3_MINT_RECOVERY_MESSAGE,
+  web3MintBlockedMessage,
+} from './web3-key-mint.js'
 
 /**
  * Sniff the MIME type of a base64-encoded image from its magic bytes.
@@ -95,6 +106,8 @@ const fail = (text: string): ToolResult => ({
 
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
+const ADMIN_API_KEY_ONLY =
+  ' ADMIN API key required — inference keys, including keys minted by venice_web3_key_mint, cannot call this endpoint. This endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
 const walletAddressSchema = z
   .string()
@@ -110,9 +123,16 @@ const utcTimestampSchema = z
   .string()
   .max(40)
   .regex(
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/,
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/,
     'Must be an ISO 8601 UTC timestamp with a Z suffix.',
   )
+
+function normalizeExpiresAt(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const match = value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/)
+  if (!match || !match[2] || match[2].length === 3) return value
+  return `${match[1]}.${match[2].padEnd(3, '0').slice(0, 3)}Z`
+}
 
 function normalizeWalletAddress(address: string): string {
   return address.startsWith('0x') ? address.toLowerCase() : address
@@ -1058,13 +1078,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     },
 
     // ========================================================================
-    // BILLING — API KEY ONLY
+    // BILLING — ADMIN API KEY ONLY
     // ========================================================================
 
     {
       name: 'venice_billing_balance',
       title: 'Venice Billing Balance',
-      description: `Get current USD, DIEM, and bundled-credit availability for the authenticated Venice account.${API_KEY_ONLY}`,
+      description: `Get current USD, DIEM, and bundled-credit availability for the authenticated Venice account.${ADMIN_API_KEY_ONLY}`,
       inputSchema: {},
       handler: async () => {
         try {
@@ -1079,7 +1099,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_billing_usage_analytics',
       title: 'Venice Billing Usage Analytics',
-      description: `Get beta aggregated usage by date, model, and API key. Data is cached for 10 minutes. Choose either lookback or a complete start/end date range.${API_KEY_ONLY}`,
+      description: `Get beta aggregated usage by date, model, and API key. Data is cached for 10 minutes. Choose either lookback or a complete start/end date range.${ADMIN_API_KEY_ONLY}`,
       inputSchema: {
         lookback: z
           .string()
@@ -1120,7 +1140,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_billing_usage_history',
       title: 'Venice Billing Usage History',
-      description: `Walk detailed billing usage in ascending timestamp order using cursor pagination. Supports JSON or upstream CSV. On continuation, send cursor without the original filters; CSV nextCursor values already encode format=csv so a cursor-only follow-up stays on text/csv. This uses /billing/usage-history, never deprecated /billing/usage.${API_KEY_ONLY}`,
+      description: `Walk detailed billing usage in ascending timestamp order using cursor pagination. Supports JSON or upstream CSV. On continuation, send cursor without the original filters; CSV nextCursor values already encode format=csv so a cursor-only follow-up stays on text/csv. This uses /billing/usage-history, never deprecated /billing/usage.${ADMIN_API_KEY_ONLY}`,
       inputSchema: {
         currency: z.enum(['USD', 'DIEM', 'BUNDLED_CREDITS']).optional(),
         cursor: z
@@ -1210,7 +1230,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_list_api_keys',
       title: 'Venice List API Keys',
-      description: `List active API-key metadata, including only the documented last six characters—not full key secrets.${API_KEY_ONLY}`,
+      description: `List active API-key metadata, including only the documented last six characters—not full key secrets.${ADMIN_API_KEY_ONLY}`,
       inputSchema: {},
       handler: async () => {
         try {
@@ -1225,7 +1245,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_get_api_key',
       title: 'Venice Get API Key Details',
-      description: `Get metadata, usage, balances, and rate-limit details for one API-key ID. The documented response does not reveal the full key secret.${API_KEY_ONLY}`,
+      description: `Get metadata, usage, balances, and rate-limit details for one API-key ID. The documented response does not reveal the full key secret.${ADMIN_API_KEY_ONLY}`,
       inputSchema: {
         id: z.string().min(1).max(256).describe('API-key ID, not the key secret.'),
       },
@@ -1299,7 +1319,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_web3_key_mint',
       title: 'Venice Web3 API Key Mint',
-      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit is required because the wallet signature covers only the challenge token. Never provide a private key. The returned apiKey is shown once—store it securely.${NO_AUTH}`,
+      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit is required because the wallet signature covers only the challenge token. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. Never provide a private key. The returned apiKey is shown once—store it securely. If minting times out or the response is lost, do not retry: revoke any unexpected key with an ADMIN key first.${NO_AUTH}`,
       inputSchema: {
         address: evmAddressSchema,
         signature: z.string().min(1).max(4096).describe('Signature created by the caller wallet over the raw challenge token.'),
@@ -1308,7 +1328,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           .literal('INFERENCE')
           .optional()
           .describe('Only INFERENCE keys can be minted through MCP. ADMIN is rejected.'),
-        description: z.string().max(500).optional(),
+        description: z.string().max(64).optional().describe('Optional API-key description (max 64 characters).'),
         expires_at: z
           .union([dateSchema, utcTimestampSchema])
           .optional()
@@ -1324,9 +1344,22 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             'At least one positive consumption limit (usd, diem, or vcu) is required.',
           )
           .describe('Required spend cap. The challenge signature does not bind key type or limits.'),
-        limit_period: z.enum(['EPOCH', 'MONTH', 'LIFETIME']).optional(),
+        limit_period: z
+          .enum(['EPOCH', 'MONTH', 'LIFETIME'])
+          .optional()
+          .describe(
+            'Reset window for consumption_limit. Defaults to LIFETIME (permanent cap). EPOCH resets every UTC day; MONTH resets on the 1st UTC day of the month.',
+          ),
       },
       handler: async (args) => {
+        const cached = getSucceededWeb3Mint(args.token)
+        if (cached !== undefined) {
+          return ok(`Store the newly minted API key securely; it is shown only once.\n${JSON.stringify(cached, null, 2)}`)
+        }
+        const attempt = beginWeb3MintAttempt(args.token)
+        if (attempt !== 'fresh') {
+          return fail(web3MintBlockedMessage(attempt === 'succeeded' ? 'unknown' : attempt))
+        }
         try {
           const resp = await client.post<unknown>(
             '/v1/api_keys/generate_web3_key',
@@ -1336,17 +1369,23 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               token: args.token,
               apiKeyType: 'INFERENCE',
               description: args.description,
-              expiresAt: args.expires_at,
+              expiresAt: normalizeExpiresAt(args.expires_at),
               consumptionLimit: args.consumption_limit,
-              limitPeriod: args.limit_period,
+              limitPeriod: args.limit_period ?? 'LIFETIME',
             },
             undefined,
             { auth: 'none' },
           )
+          succeedWeb3MintAttempt(args.token, resp)
           // The secret must reach the caller, but it is never written to server logs
           // or duplicated in structuredContent.
           return ok(`Store the newly minted API key securely; it is shown only once.\n${JSON.stringify(resp, null, 2)}`)
         } catch (err) {
+          if (isUnknownMintOutcome(err)) {
+            markUnknownWeb3MintAttempt(args.token)
+            return fail(`${WEB3_MINT_RECOVERY_MESSAGE} ${formatToolError(err)}`)
+          }
+          releaseWeb3MintAttempt(args.token)
           return fail(formatToolError(err))
         }
       },

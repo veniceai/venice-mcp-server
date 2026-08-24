@@ -2,12 +2,12 @@ import { VeniceUpstreamError } from './types.js';
 /**
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
- * - Otherwise adds `X-Sign-In-With-X` when a SIWX token is configured.
+ * - Otherwise adds the canonical `SIGN-IN-WITH-X` when a SIWX token is configured.
  * - Surfaces 402 responses as `VeniceUpstreamError(isPaymentRequired)` so tools
  *   can format a helpful top-up message back to the MCP host.
  *
- * We deliberately never set `X-402-Payment` on inference routes; Venice
- * rejects that header outside `/x402/top-up`.
+ * We deliberately never set a payment header. Payment submission belongs only
+ * on `/x402/top-up`, and this client currently exposes discovery—not settlement.
  */
 export class VeniceClient {
     cfg;
@@ -24,18 +24,36 @@ export class VeniceClient {
         if (init.json !== undefined)
             headers['Content-Type'] = 'application/json';
         const auth = init.auth ?? 'default';
-        if (auth === 'siwx') {
+        if (auth === 'apiKey') {
+            for (const key of Object.keys(headers)) {
+                if ([
+                    'authorization',
+                    'sign-in-with-x',
+                    'x-sign-in-with-x',
+                    'payment-signature',
+                    'x-402-payment',
+                    'x-payment',
+                ].includes(key.toLowerCase())) {
+                    delete headers[key];
+                }
+            }
+            if (!this.cfg.apiKey) {
+                throw new Error('VENICE_API_KEY is required for this API-key-only endpoint.');
+            }
+            headers.Authorization = `Bearer ${this.cfg.apiKey}`;
+        }
+        else if (auth === 'siwx') {
             delete headers.Authorization;
             delete headers.authorization;
-            if (this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
-                headers['X-Sign-In-With-X'] = this.cfg.siwxToken;
+            if (this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
+                headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken;
             }
         }
         else if (auth === 'default' && this.cfg.apiKey && !headers.Authorization) {
             headers.Authorization = `Bearer ${this.cfg.apiKey}`;
         }
-        else if (auth === 'default' && this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
-            headers['X-Sign-In-With-X'] = this.cfg.siwxToken;
+        else if (auth === 'default' && this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
+            headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken;
         }
         const ac = new AbortController();
         const timeout = setTimeout(() => ac.abort(), init.timeoutMs ?? this.cfg.timeoutMs);
@@ -60,6 +78,11 @@ export class VeniceClient {
             throw err;
         }
         clearTimeout(timeout);
+        const responseHeaders = {};
+        res.headers.forEach((value, key) => {
+            responseHeaders[key] = value;
+        });
+        init.onResponse?.({ status: res.status, headers: responseHeaders });
         const contentType = res.headers.get('content-type') ?? '';
         let body;
         if (contentType.includes('application/json')) {
@@ -69,15 +92,11 @@ export class VeniceClient {
             body = await res.text().catch(() => '');
         }
         if (!res.ok) {
-            const headerObj = {};
-            res.headers.forEach((v, k) => {
-                headerObj[k] = v;
-            });
             throw new VeniceUpstreamError({
                 message: `Venice ${res.status} on ${path}`,
                 status: res.status,
                 body,
-                headers: headerObj,
+                headers: responseHeaders,
             });
         }
         return body;
@@ -87,8 +106,8 @@ export class VeniceClient {
         return this.request(path, { method: 'GET', headers, ...opts });
     }
     /** POST request with JSON body. */
-    post(path, json, headers) {
-        return this.request(path, { method: 'POST', json, headers });
+    post(path, json, headers, opts = {}) {
+        return this.request(path, { method: 'POST', json, headers, ...opts });
     }
     /**
      * POST a multipart/form-data body. Used by endpoints that require file upload
@@ -107,7 +126,7 @@ export class VeniceClient {
         if (this.cfg.apiKey)
             headers.Authorization = `Bearer ${this.cfg.apiKey}`;
         else if (this.cfg.siwxToken)
-            headers['X-Sign-In-With-X'] = this.cfg.siwxToken;
+            headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken;
         // NOTE: don't set Content-Type — fetch sets the boundary automatically.
         const ac = new AbortController();
         const timeout = setTimeout(() => ac.abort(), opts.timeoutMs ?? this.cfg.timeoutMs);
@@ -143,7 +162,7 @@ export class VeniceClient {
         if (this.cfg.apiKey)
             headers.Authorization = `Bearer ${this.cfg.apiKey}`;
         else if (this.cfg.siwxToken)
-            headers['X-Sign-In-With-X'] = this.cfg.siwxToken;
+            headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken;
         let body;
         if ('form' in init) {
             body = init.form;

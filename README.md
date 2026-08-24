@@ -106,7 +106,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 |---|---|
 | `venice_crypto_rpc` | Proxy a JSON-RPC call to a supported blockchain network (`eth_call`, `eth_blockNumber`, …). Supports Base, Ethereum, Polygon, Arbitrum, Optimism. |
 
-### 💰 Billing (API key only)
+### 💰 Billing (ADMIN API key only)
 
 | Tool | Description |
 |---|---|
@@ -114,22 +114,22 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `venice_billing_usage_analytics` | Get beta aggregate usage by date, model, and API key using a lookback or custom date range. |
 | `venice_billing_usage_history` | Walk detailed usage with cursor pagination, first-page filters, and JSON or CSV output. |
 
-Usage-history continuation calls must send `cursor` without the original filters. CSV pages return a `csv:`-prefixed `nextCursor` so a cursor-only follow-up stays on `text/csv`. The deprecated `/billing/usage` route is not wrapped. Billing tools require `VENICE_API_KEY` and fail locally instead of falling back to SIWX.
+Usage-history continuation calls must send `cursor` without the original filters. CSV pages return a `csv:`-prefixed `nextCursor` so a cursor-only follow-up stays on `text/csv`. The deprecated `/billing/usage` route is not wrapped. Billing tools require an ADMIN `VENICE_API_KEY` and fail locally instead of falling back to SIWX. Inference keys, including keys minted through MCP, cannot call these endpoints.
 
 ### 🔑 API keys
 
 | Tool | Description |
 |---|---|
-| `venice_list_api_keys` | List active key metadata without full key secrets. API key only. |
-| `venice_get_api_key` | Get one key's metadata, usage, balances, and rate limits. API key only. |
+| `venice_list_api_keys` | List active key metadata without full key secrets. ADMIN API key only. |
+| `venice_get_api_key` | Get one key's metadata, usage, balances, and rate limits. ADMIN API key only. |
 | `venice_api_key_rate_limits` | Get current balances, access status, tier, and model limits. API key only. |
 | `venice_api_key_rate_limit_logs` | Get the last 50 exceeded rate-limit events. API key only; experimental upstream. |
 | `venice_web3_key_challenge` | Get the unauthenticated 15-minute Web3 mint challenge. |
-| `venice_web3_key_mint` | Submit a caller-signed EVM challenge and receive a one-time INFERENCE API-key secret. ADMIN minting is rejected; a positive consumption limit is required. |
+| `venice_web3_key_mint` | Submit a caller-signed EVM challenge and receive a one-time INFERENCE API-key secret. ADMIN minting is rejected; a positive consumption limit is required; omitted `limit_period` defaults to `LIFETIME`. |
 
-Web3 minting currently requires an EVM wallet with staked VVV on Base. Signing stays in the caller's wallet: this server accepts an address, signature, and challenge token, but never a private key. MCP minting is limited to `INFERENCE` keys with a required positive `consumption_limit`, because the wallet signature covers only the challenge token. Minted secrets are returned only to the MCP caller and are not written to server logs. Create/update/delete key mutations are intentionally not exposed.
+Web3 minting currently requires an EVM wallet with staked VVV on Base. Signing stays in the caller's wallet: this server accepts an address, signature, and challenge token, but never a private key. MCP minting is limited to `INFERENCE` keys with a required positive `consumption_limit`, because the wallet signature covers only the challenge token. Omitted `limit_period` is sent as `LIFETIME` so a dollar cap is a permanent cap rather than the upstream daily `EPOCH` default. The secret is shown once. If the mint times out or the response is lost, do not retry — use an ADMIN key to list and revoke any unexpected key, then start a new challenge. Minted secrets are returned only to the MCP caller and are not written to server logs. Create/update/delete key mutations are intentionally not exposed.
 
-The API-key list/get/rate-limit reads also require `VENICE_API_KEY`; they never forward `SIGN-IN-WITH-X`.
+List and get require an ADMIN `VENICE_API_KEY`. Rate-limit reads accept an INFERENCE or ADMIN key. These tools never forward `SIGN-IN-WITH-X`.
 
 ### 💳 x402 wallet helpers
 
