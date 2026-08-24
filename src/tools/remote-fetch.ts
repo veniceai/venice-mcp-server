@@ -336,10 +336,7 @@ function isBlockedIpv4(address: string): boolean {
 
 function isBlockedIpv6(address: string): boolean {
   const normalized = address.toLowerCase().split('%')[0]
-  const groups = expandIpv6Groups(normalized)
-  if (groups && isLocalUseNat64Prefix(groups)) return true
-
-  const embeddedIpv4 = ipv4FromMappedOrEmbedded(normalized, groups)
+  const embeddedIpv4 = ipv4FromMappedOrEmbedded(normalized)
   if (embeddedIpv4 && isBlockedIpv4(embeddedIpv4)) return true
 
   return (
@@ -355,10 +352,12 @@ function isBlockedIpv6(address: string): boolean {
   )
 }
 
-/** Decode IPv4-mapped, IPv4-compatible, and NAT64 well-known embeddings, including hex form. */
-function ipv4FromMappedOrEmbedded(address: string, groups = expandIpv6Groups(address)): string | undefined {
+/** Decode IPv4-mapped, IPv4-compatible, and NAT64-embedded addresses, including hex form. */
+function ipv4FromMappedOrEmbedded(address: string): string | undefined {
   const dotted = address.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1]
   if (dotted) return dotted
+
+  const groups = expandIpv6Groups(address)
   if (!groups) return undefined
 
   const isMapped =
@@ -368,43 +367,20 @@ function ipv4FromMappedOrEmbedded(address: string, groups = expandIpv6Groups(add
     groups[3] === 0 &&
     groups[4] === 0 &&
     groups[5] === 0xffff
-  const isCompatible =
-    groups[0] === 0 &&
-    groups[1] === 0 &&
-    groups[2] === 0 &&
-    groups[3] === 0 &&
-    groups[4] === 0 &&
-    groups[5] === 0
-  const isNat64WellKnown =
+  const isNat64 =
     groups[0] === 0x64 &&
     groups[1] === 0xff9b &&
     groups[2] === 0 &&
     groups[3] === 0 &&
     groups[4] === 0 &&
     groups[5] === 0
-  if (!isMapped && !isCompatible && !isNat64WellKnown) return undefined
+  if (!isMapped && !isNat64) return undefined
   return `${(groups[6] >> 8) & 0xff}.${groups[6] & 0xff}.${(groups[7] >> 8) & 0xff}.${groups[7] & 0xff}`
 }
 
-/** RFC 8215 local-use IPv4/IPv6 translation prefix 64:ff9b:1::/48. */
-function isLocalUseNat64Prefix(groups: number[]): boolean {
-  return groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 0x1
-}
-
 function expandIpv6Groups(address: string): number[] | undefined {
-  let hex = address
-  const dotted = address.match(/:(\d+\.\d+\.\d+\.\d+)$/)
-  if (dotted) {
-    const parts = dotted[1].split('.').map((part) => Number(part))
-    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
-      return undefined
-    }
-    const hi = ((parts[0] << 8) | parts[1]).toString(16)
-    const lo = ((parts[2] << 8) | parts[3]).toString(16)
-    hex = `${address.slice(0, -dotted[1].length)}${hi}:${lo}`
-  }
-
-  const [head, tail] = hex.split('::')
+  if (address.includes('.')) return undefined
+  const [head, tail] = address.split('::')
   const parse = (part: string | undefined) =>
     part ? part.split(':').filter(Boolean).map((group) => Number.parseInt(group, 16)) : []
   if (tail === undefined) {

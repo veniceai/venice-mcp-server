@@ -605,6 +605,20 @@ describe('tool output shaping', () => {
     assert.equal(retrieveBody.model, 'grok-imagine-text-to-video-private')
   })
 
+  it('venice_video_status ignores a caller download_url that is not a Venice host', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-1',
+      model: 'grok-imagine-text-to-video-private',
+      download_url: 'https://evil.example/payload.mp4',
+    } as never)
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /download_url/)
+  })
+
   it('venice_video_generate tells the host to pass queue-time download_url into status', async () => {
     const stub = new StubClient({
       '/v1/video/queue': () => ({

@@ -101,6 +101,20 @@ const fail = (text: string, structured?: Record<string, unknown>): ToolResult =>
   ...(structured ? { structuredContent: structured } : {}),
 })
 
+/** Caller-supplied queue URLs must be Venice HTTPS hosts. Retrieve URLs come from Venice and are not re-checked here. */
+function trustedQueueDownloadUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  try {
+    const parsed = new URL(value)
+    const host = parsed.hostname.toLowerCase()
+    if (parsed.protocol !== 'https:') return undefined
+    if (host === 'venice.ai' || host.endsWith('.venice.ai')) return parsed.href
+  } catch {
+    return undefined
+  }
+  return undefined
+}
+
 function decodeEnhancedPrompt(headers: Record<string, string>): string | undefined {
   const encoded = headers['x-venice-enhanced-prompt']
   if (!encoded) return undefined
@@ -575,12 +589,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned by Venice.')
-          const pollArgs = resp.download_url
-            ? `{ queue_id: "${id}", model: "${resp.model}", download_url: "${resp.download_url}" }`
-            : `{ queue_id: "${id}", model: "${resp.model}" }`
           return ok(
             `Queued: queue_id=${id}, model=${resp.model}\n` +
-              `Poll with venice_video_status(${pollArgs})`,
+              'Poll with venice_video_status using queue_id, model, and download_url from structuredContent. Do not invent a download_url.',
             { queue_id: id, model: resp.model, download_url: resp.download_url }
           )
         } catch (err) {
@@ -617,7 +628,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         queue_id: z.string().min(1).describe('Returned by venice_video_generate.'),
         model: z.string().min(1).describe('Same model id used to queue.'),
         download_url: z.string().url().optional().describe(
-          'Queue-time download_url from venice_video_generate. Required for VPS / Grok Imagine Private models: retrieve returns COMPLETED without a URL.',
+          'Queue-time download_url from venice_video_generate. Must be an https Venice host. Required for VPS / Grok Imagine Private models: retrieve returns COMPLETED without a URL.',
         ),
         delete_media_on_completion: z.boolean().optional(),
       },
@@ -683,7 +694,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             }
           }
           const resp = response.data
-          const url = resp.download_url ?? resp.url ?? queueDownloadUrl
+          const url = resp.download_url ?? resp.url ?? trustedQueueDownloadUrl(queueDownloadUrl)
           if (resp.status === 'COMPLETED') {
             if (!url) {
               return fail(
