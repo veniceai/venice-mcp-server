@@ -121,8 +121,8 @@ export function boundAsrResult(
 ): { text: string; structured: Record<string, unknown> } {
   const transcript = resp.text ?? resp.transcription ?? ''
   const structured: Record<string, unknown> = {}
-  if (resp.text !== undefined) structured.text = resp.text
-  else if (resp.transcription !== undefined) structured.text = resp.transcription
+  if (resp.text !== undefined) structured.text = truncate(resp.text)
+  else if (resp.transcription !== undefined) structured.text = truncate(resp.transcription)
   if (resp.duration !== undefined) structured.duration = resp.duration
   if (resp.timestamps !== undefined) Object.assign(structured, pageAsrTimestamps(resp.timestamps, offset, limit))
   return { text: transcript || JSON.stringify(structured, null, 2), structured }

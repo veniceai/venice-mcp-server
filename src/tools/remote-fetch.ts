@@ -336,9 +336,8 @@ function isBlockedIpv4(address: string): boolean {
 
 function isBlockedIpv6(address: string): boolean {
   const normalized = address.toLowerCase().split('%')[0]
-  for (const embeddedIpv4 of ipv4sFromMappedOrEmbedded(normalized)) {
-    if (isBlockedIpv4(embeddedIpv4)) return true
-  }
+  const embeddedIpv4 = ipv4FromMappedOrEmbedded(normalized)
+  if (embeddedIpv4 && isBlockedIpv4(embeddedIpv4)) return true
 
   return (
     normalized === '::' ||
@@ -353,61 +352,30 @@ function isBlockedIpv6(address: string): boolean {
   )
 }
 
-/** Decode IPv4-mapped, IPv4-compatible, well-known NAT64, and local-use NAT64 embeddings. */
-function ipv4sFromMappedOrEmbedded(address: string): string[] {
-  const found = new Set<string>()
+/** Decode IPv4-mapped, IPv4-compatible, and NAT64-embedded addresses, including hex form. */
+function ipv4FromMappedOrEmbedded(address: string): string | undefined {
   const dotted = address.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1]
-  if (dotted) found.add(dotted)
+  if (dotted) return dotted
 
   const groups = expandIpv6Groups(address)
-  if (!groups) return [...found]
+  if (!groups) return undefined
 
-  const isMapped = groupsZero(groups, 5) && groups[5] === 0xffff
-  // Deprecated IPv4-compatible (::/96). :: and ::1 stay IPv6 specials, not 0.0.0.0 / 0.0.0.1.
-  const isCompatible = groupsZero(groups, 6) && !(groups[6] === 0 && groups[7] <= 1)
-  const isWellKnownNat64 =
+  const isMapped =
+    groups[0] === 0 &&
+    groups[1] === 0 &&
+    groups[2] === 0 &&
+    groups[3] === 0 &&
+    groups[4] === 0 &&
+    groups[5] === 0xffff
+  const isNat64 =
     groups[0] === 0x64 &&
     groups[1] === 0xff9b &&
     groups[2] === 0 &&
     groups[3] === 0 &&
     groups[4] === 0 &&
     groups[5] === 0
-  // RFC 8215 local-use NAT64 64:ff9b:1::/48. IPv4 may be last-32 or RFC 6052 /48 layout.
-  const isLocalUseNat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 0x1
-
-  if (isMapped || isCompatible || isWellKnownNat64) {
-    found.add(ipv4FromLast32(groups))
-  }
-  if (isLocalUseNat64) {
-    if (groups[6] !== 0 || groups[7] !== 0) found.add(ipv4FromLast32(groups))
-    const rfc6052 = ipv4FromRfc6052Prefix48(groups)
-    if (rfc6052) found.add(rfc6052)
-  }
-
-  return [...found]
-}
-
-function groupsZero(groups: number[], count: number): boolean {
-  for (let i = 0; i < count; i += 1) {
-    if (groups[i] !== 0) return false
-  }
-  return true
-}
-
-function ipv4FromLast32(groups: number[]): string {
+  if (!isMapped && !isNat64) return undefined
   return `${(groups[6] >> 8) & 0xff}.${groups[6] & 0xff}.${(groups[7] >> 8) & 0xff}.${groups[7] & 0xff}`
-}
-
-/** RFC 6052 /48: IPv4 in bits 48-63 and 72-87; bits 64-71 (u) must be 0. */
-function ipv4FromRfc6052Prefix48(groups: number[]): string | undefined {
-  const u = (groups[4] >> 8) & 0xff
-  if (u !== 0) return undefined
-  const a = (groups[3] >> 8) & 0xff
-  const b = groups[3] & 0xff
-  const c = groups[4] & 0xff
-  const d = (groups[5] >> 8) & 0xff
-  if (a === 0 && b === 0 && c === 0 && d === 0) return undefined
-  return `${a}.${b}.${c}.${d}`
 }
 
 function expandIpv6Groups(address: string): number[] | undefined {

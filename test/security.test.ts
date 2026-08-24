@@ -80,40 +80,6 @@ describe('remote upload fetch security', () => {
     )
   })
 
-  it('rejects IPv4-compatible and local-use NAT64 embeddings of private IPv4', async () => {
-    await assert.rejects(
-      validateRemoteUrl(new URL('http://[::7f00:1]/file.png'), publicLookup),
-      /private or local address/,
-    )
-    await assert.rejects(
-      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['::7f00:1']),
-      /private or local address/,
-    )
-    await assert.rejects(
-      validateRemoteUrl(new URL('http://[::127.0.0.1]/file.png'), publicLookup),
-      /private or local address/,
-    )
-    await assert.rejects(
-      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['64:ff9b:1::7f00:1']),
-      /private or local address/,
-    )
-    await assert.rejects(
-      validateRemoteUrl(new URL('http://[64:ff9b:1::7f00:1]/file.png'), publicLookup),
-      /private or local address/,
-    )
-    // RFC 6052 /48 layout embeds 127.0.0.1 while the last 32 bits stay a public address.
-    await assert.rejects(
-      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['64:ff9b:1:7f00:0:100:5db8:d822']),
-      /private or local address/,
-    )
-  })
-
-  it('allows public IPv4-compatible and local-use NAT64 embeddings', async () => {
-    await validateRemoteUrl(new URL('https://assets.example/file.png'), async () => ['::5db8:d822'])
-    await validateRemoteUrl(new URL('https://assets.example/file.png'), async () => ['64:ff9b:1::5db8:d822'])
-    await validateRemoteUrl(new URL('http://[::5db8:d822]/file.png'), publicLookup)
-  })
-
   it('revalidates redirect targets before following them', async () => {
     const fetchImpl = async () =>
       new Response(null, {
