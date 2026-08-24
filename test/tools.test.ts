@@ -582,6 +582,52 @@ describe('tool output shaping', () => {
     assert.match((r.content[0] as { text: string }).text, /download_url/)
   })
 
+  it('venice_video_status uses the queue-time download_url when retrieve omits one', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-1',
+      model: 'grok-imagine-text-to-video-private',
+      download_url: 'https://private-share.venice.ai/v1/share/read/abc',
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { status: string }).status, 'COMPLETED')
+    assert.equal(
+      (r.structuredContent as { url: string }).url,
+      'https://private-share.venice.ai/v1/share/read/abc',
+    )
+    const retrieveBody = stub.calls.find((call) => call.path === '/v1/video/retrieve')!.body as Record<string, unknown>
+    assert.equal(retrieveBody.download_url, undefined)
+    assert.equal(retrieveBody.queue_id, 'vps-1')
+    assert.equal(retrieveBody.model, 'grok-imagine-text-to-video-private')
+  })
+
+  it('venice_video_generate tells the host to pass queue-time download_url into status', async () => {
+    const stub = new StubClient({
+      '/v1/video/queue': () => ({
+        model: 'grok-imagine-text-to-video-private',
+        queue_id: 'vps-1',
+        download_url: 'https://private-share.venice.ai/v1/share/read/abc',
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_generate')!.handler({
+      prompt: 'a gondola',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /venice_video_status/)
+    assert.match(text, /download_url/)
+    assert.equal(
+      (r.structuredContent as { download_url?: string }).download_url,
+      'https://private-share.venice.ai/v1/share/read/abc',
+    )
+  })
+
   it('venice_video_status defers requested deletion until after MP4 buffering', async () => {
     const stub = new StubClient({
       '/v1/video/retrieve': () => ({

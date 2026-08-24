@@ -63,7 +63,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | Tool | Description |
 |---|---|
 | `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs, and the Seedance consent attestation flow where applicable. |
-| `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link. |
+| `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link. Pass the queue-time `download_url` for VPS / Grok Imagine Private models. |
 | `venice_video_complete` | Mark a completed video as downloaded; deletes server-side media. |
 | `venice_video_transcriptions` | Transcribe a YouTube video URL. |
 | `venice_video_quote` | Get a price quote for a video generation BEFORE queuing. |
@@ -105,7 +105,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 - `venice_list_models` forwards a supplied `type` to `GET /v1/models?type=...`; video and music capabilities should be discovered from those server-filtered results.
 - Image `aspect_ratio` and `resolution` values remain free strings because supported values vary by model. Venice validates them. When `enhance_prompt` is applied, image generate/edit/multi-edit results include the URL-decoded `enhanced_prompt` returned in `x-venice-enhanced-prompt`.
 - Current public Seedance models may reject media containing detectable persons outright. Defensive support remains for compatible or legacy `needs_consent` responses: the tool returns Venice's policy text, affected media roles, and next step. The three `consents.seedance` flags are legal attestations and must only be set to `true` after the user explicitly confirms all three statements. Consent is never a content-policy bypass.
-- Completed videos may arrive as `video/mp4` or as JSON with a `download_url`. Binary completions are returned as an embedded MCP resource (`blob`, `mimeType: "video/mp4"`, synthetic `venice://video/...` URI), streamed into a bounded buffer that defaults to 25 MiB (`VENICE_MAX_VIDEO_RESPONSE_BYTES`). Oversized binary results remain queued and can be retried with the same queue ID after changing the limit. JSON completions return the `download_url` as an MCP resource link instead of fetching that URL.
+- Completed videos may arrive as `video/mp4` or as JSON with a `download_url`. Binary completions are returned as an embedded MCP resource (`blob`, `mimeType: "video/mp4"`, synthetic `venice://video/...` URI), streamed into a bounded buffer that defaults to 25 MiB (`VENICE_MAX_VIDEO_RESPONSE_BYTES`). Oversized binary results remain queued and can be retried with the same queue ID after changing the limit. JSON completions return the `download_url` as an MCP resource link instead of fetching that URL. For VPS / Grok Imagine Private models, `download_url` is returned only on queue; pass that URL into `venice_video_status` so a `COMPLETED` retrieve without an inline URL still yields a resource link.
 
 ### ⛓️ Crypto
 

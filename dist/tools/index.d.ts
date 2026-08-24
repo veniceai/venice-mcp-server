@@ -46,7 +46,15 @@ type ResourceLinkContent = {
     mimeType?: string;
     description?: string;
 };
-type ToolContent = TextContent | ImageContent | AudioContent | ResourceLinkContent;
+type EmbeddedResourceContent = {
+    type: 'resource';
+    resource: {
+        uri: string;
+        mimeType?: string;
+        blob: string;
+    };
+};
+type ToolContent = TextContent | ImageContent | AudioContent | ResourceLinkContent | EmbeddedResourceContent;
 export interface ToolResult {
     content: ToolContent[];
     isError?: boolean;

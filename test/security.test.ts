@@ -78,6 +78,35 @@ describe('remote upload fetch security', () => {
       validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['64:ff9b::7f00:1']),
       /private or local address/,
     )
+    await assert.rejects(
+      validateRemoteUrl(new URL('http://[::7f00:1]/file.png'), publicLookup),
+      /private or local address/,
+    )
+    await assert.rejects(
+      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['::7f00:1']),
+      /private or local address/,
+    )
+    await assert.rejects(
+      validateRemoteUrl(new URL('http://[64:ff9b:1::7f00:1]/file.png'), publicLookup),
+      /private or local address/,
+    )
+    await assert.rejects(
+      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['64:ff9b:1:1::7f00:1']),
+      /private or local address/,
+    )
+    await assert.rejects(
+      validateRemoteUrl(new URL('http://[64:ff9b:1:7f00:0:100::]/file.png'), publicLookup),
+      /private or local address/,
+    )
+  })
+
+  it('still allows public IPv4-compatible embeddings', async () => {
+    await assert.doesNotReject(
+      validateRemoteUrl(new URL('http://[::808:808]/file.png'), publicLookup),
+    )
+    await assert.doesNotReject(
+      validateRemoteUrl(new URL('https://example.com/file.png'), async () => ['::808:808']),
+    )
   })
 
   it('revalidates redirect targets before following them', async () => {

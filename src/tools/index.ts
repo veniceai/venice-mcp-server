@@ -575,9 +575,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned by Venice.')
+          const pollArgs = resp.download_url
+            ? `{ queue_id: "${id}", model: "${resp.model}", download_url: "${resp.download_url}" }`
+            : `{ queue_id: "${id}", model: "${resp.model}" }`
           return ok(
             `Queued: queue_id=${id}, model=${resp.model}\n` +
-              `Poll with venice_video_status({ queue_id: "${id}", model: "${resp.model}" })`,
+              `Poll with venice_video_status(${pollArgs})`,
             { queue_id: id, model: resp.model, download_url: resp.download_url }
           )
         } catch (err) {
@@ -609,14 +612,18 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_status',
       title: 'Venice Video Retrieve / Status',
-      description: `Check status of a queued video job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 video/mp4 MCP resource or a download_url resource link, depending on Venice's retrieve response. POST endpoint with body {model, queue_id}.${X402_OK}`,
+      description: `Check status of a queued video job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 video/mp4 MCP resource or a download_url resource link. For VPS / Grok Imagine Private models, pass the queue-time download_url — retrieve returns COMPLETED JSON without a URL. POST endpoint with body {model, queue_id}.${X402_OK}`,
       inputSchema: {
         queue_id: z.string().min(1).describe('Returned by venice_video_generate.'),
         model: z.string().min(1).describe('Same model id used to queue.'),
+        download_url: z.string().url().optional().describe(
+          'Queue-time download_url from venice_video_generate. Required for VPS / Grok Imagine Private models: retrieve returns COMPLETED without a URL.',
+        ),
         delete_media_on_completion: z.boolean().optional(),
       },
       handler: async (args) => {
         try {
+          const { download_url: queueDownloadUrl, ...retrieveArgs } = args
           const response = await client.postMixed<{
             status?: 'PROCESSING' | 'COMPLETED'
             download_url?: string
@@ -624,7 +631,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             average_execution_time?: number
             execution_duration?: number
           }>('/v1/video/retrieve', {
-            ...args,
+            ...retrieveArgs,
             // Defer deletion until the result is safely captured. This keeps an
             // oversized binary response retryable after increasing the configured limit.
             delete_media_on_completion: false,
@@ -676,7 +683,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             }
           }
           const resp = response.data
-          const url = resp.download_url ?? resp.url
+          const url = resp.download_url ?? resp.url ?? queueDownloadUrl
           if (resp.status === 'COMPLETED') {
             if (!url) {
               return fail(
