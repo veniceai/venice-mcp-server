@@ -77,6 +77,16 @@ describe('VeniceClient', () => {
         },
       },
       {
+        match: 'POST /v1/error-envelope-stream',
+        reply: {
+          __status: 200,
+          __rawBody:
+            'data: {"error":{"message":"attestation stale","type":"invalid_request_error"}}\n\n' +
+            'data: [DONE]\n\n',
+          __headers: { 'content-type': 'text/event-stream' },
+        },
+      },
+      {
         match: 'POST /v1/e2ee-insufficient',
         reply: {
           __status: 402,
@@ -229,6 +239,22 @@ describe('VeniceClient', () => {
         const e = err as VeniceUpstreamError
         assert.equal(e.status, 502)
         assert.match(e.message, /text\/event-streaming instead of text\/event-stream/)
+        return true
+      },
+    )
+  })
+
+  it('rejects an SSE stream that contains an error envelope even when it ends with [DONE]', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postEventStream('/v1/error-envelope-stream', { stream: true }),
+      (err: unknown) => {
+        const e = err as VeniceUpstreamError
+        assert.equal(e.status, 502)
+        assert.match(e.message, /error envelope/)
+        assert.deepEqual(e.body, {
+          error: { message: 'attestation stale', type: 'invalid_request_error' },
+        })
         return true
       },
     )

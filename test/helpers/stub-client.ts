@@ -90,7 +90,7 @@ export class StubClient {
 
 function defaultResponse(path: string, _binary?: boolean, eventStream?: boolean): unknown {
   if (eventStream && path.startsWith('/v1/chat/completions')) {
-    return 'data: {"choices":[{"delta":{"content":"deadbeef"}}]}\n\ndata: [DONE]\n\n'
+    return `data: {"choices":[{"delta":{"content":"${'ab'.repeat(93)}"}}]}\n\ndata: [DONE]\n\n`
   }
   if (path.startsWith('/v1/chat/completions'))
     return { choices: [{ message: { content: 'reply' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
@@ -127,6 +127,11 @@ function defaultResponse(path: string, _binary?: boolean, eventStream?: boolean)
     return {
       data: [
         { id: 'deepseek-v4-flash-0731', type: 'text' },
+        {
+          id: 'e2ee-qwen3-5-122b-a10b',
+          type: 'text',
+          model_spec: { capabilities: { supportsE2EE: true, supportsTeeAttestation: true } },
+        },
         { id: 'flux-2-pro', type: 'image' },
         { id: 'veo3.1-fast-text-to-video', type: 'video' },
       ],

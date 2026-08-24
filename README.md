@@ -42,7 +42,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_chat` | Chat completions with documented text/image/audio/video/file blocks, structured response formats, function tools, prompt caching, reasoning controls, and `venice_parameters.enable_e2ee`. |
+| `venice_chat` | Chat completions with documented text/image/audio/video/file blocks, structured response formats, function tools, prompt caching, reasoning controls, and `venice_parameters.enable_e2ee` (explicit E2EE-capable model and ciphertext-only user/system content; no files, tools, or web). |
 | `venice_responses` | Alpha, stateless Responses API for text models. Supports text/image input and reasoning controls. E2EE models are not supported, and this tool does not expose unreliable tool fields. |
 | `venice_embeddings` | Compute embeddings for text input (OpenAI-compatible). |
 | `venice_chat_with_character` | Chat with a Venice character by slug. |
@@ -113,17 +113,17 @@ These tools expose evidence; they do not verify it. Full E2EE requires the calle
 
 1. Generate a fresh 32-byte nonce and independently verify the returned nonce and hardware evidence.
 2. Verify the attested signing/encryption key binding and that debug mode is disabled.
-3. Encrypt request messages and pass the three required keys through `venice_chat.e2ee_headers`; the server forwards them as `X-Venice-TEE-Client-Pub-Key`, `X-Venice-TEE-Model-Pub-Key`, and `X-Venice-TEE-Signing-Algo`.
+3. Encrypt every user/system message to hex ciphertext (at least 186 hex characters) and pass the three required keys through `venice_chat.e2ee_headers`; the server forwards them as `X-Venice-TEE-Client-Pub-Key`, `X-Venice-TEE-Model-Pub-Key`, and `X-Venice-TEE-Signing-Algo`.
 4. Decrypt the encrypted response and cryptographically verify its signature against the verified attestation.
 
-Venice requires E2EE chat completions to stream. Plaintext `venice_chat` calls continue to send `stream: false` and return the normal completion text. When `enable_e2ee: true` and a complete validated `e2ee_headers` bundle are both present, the tool sends `stream: true`, requests `text/event-stream`, and returns:
+Venice requires E2EE chat completions to stream. Plaintext `venice_chat` calls continue to send `stream: false` and return the normal completion text. When `enable_e2ee: true` is set, the tool also requires an explicit catalog model with `supportsE2EE`, a complete `e2ee_headers` bundle, and encrypted hex user/system content. File, tool, and web features are rejected, and the Venice system prompt is forced off. Only then does the tool send `stream: true`, request `text/event-stream`, and return:
 
-- `content[0].text`: the complete upstream SSE text after validating an exact `text/event-stream` media type and a terminal `data: [DONE]` event, without parsing, truncation, newline normalization, ciphertext extraction, or removal of SSE framing.
-- `structuredContent`: `{ transport: "sse", media_type: "text/event-stream", encrypted: true, byte_length, framing }`.
+- `content[0].text`: the complete upstream SSE text after validating an exact `text/event-stream` media type, a terminal `data: [DONE]` event, no SSE error envelope, and encrypted hex content deltas — without truncation, newline normalization, ciphertext extraction, or removal of SSE framing.
+- `structuredContent`: `{ transport: "sse", media_type: "text/event-stream", encrypted: true, byte_length, framing }`. `encrypted` is set only after those checks succeed.
 
-The request timeout remains active until the entire stream body has been consumed. A stalled body becomes a 504, while truncated/erroring bodies, lookalike content types, and streams missing the terminal `[DONE]` event are rejected rather than returned as complete. JSON error responses—including structured 402 payment diagnostics—are parsed before these successful-stream checks.
+The request timeout remains active until the entire stream body has been consumed. A stalled body becomes a 504, while truncated/erroring bodies, lookalike content types, streams containing `{"error":...}`, streams missing the terminal `[DONE]` event, and streams whose content is not valid ciphertext are rejected rather than returned as complete encrypted results. JSON error responses—including structured 402 payment diagnostics—are parsed before these successful-stream checks.
 
-The E2EE result is encrypted transport data, not a plaintext completion. `enable_e2ee: true` without all three headers is rejected before an API call; providing TEE E2EE headers without `enable_e2ee: true` is also rejected.
+The E2EE result is encrypted transport data, not a plaintext completion. `enable_e2ee: true` without all three headers, without an explicit E2EE-capable model, or with plaintext/file/tool/web inputs is rejected before an API completion call; providing TEE E2EE headers without `enable_e2ee: true` is also rejected.
 
 Setting `venice_parameters.enable_e2ee: true` without the caller-side cryptographic operations above does **not** create a trustworthy end-to-end encrypted session.
 

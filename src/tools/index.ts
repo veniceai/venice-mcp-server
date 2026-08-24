@@ -23,9 +23,10 @@
  *      - tee/attestation, tee/signature
  */
 import { z } from 'zod'
-import type { VeniceClient } from '../venice-client.js'
+import { collectSseDataEvents, type VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
+import { modelSupportsE2ee, validateE2eeChatRequest, validateE2eeSseContent } from '../e2ee.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -320,7 +321,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee plus e2ee_headers, use upstream SSE, and return the complete encrypted SSE framing unchanged in content[0].text for caller-side decryption and verification. This server does not decrypt, verify, or claim plaintext completion.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. File, tool, and web features are rejected. Upstream SSE is returned unchanged in content[0].text only after ciphertext and error-envelope checks. This server does not decrypt, verify, or claim plaintext completion.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -355,6 +356,57 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             return fail('e2ee_headers may only be supplied when venice_parameters.enable_e2ee is true.')
           }
 
+          if (e2eeEnabled && parsedE2eeHeaders.success) {
+            const requestError = validateE2eeChatRequest(args)
+            if (requestError) return fail(requestError)
+
+            const model = args.model!.trim()
+            const catalog = await client.get<unknown>('/v1/models')
+            if (!modelSupportsE2ee(model, catalog)) {
+              return fail(`E2EE requires an explicit catalog model with supportsE2EE; "${model}" is not E2EE-capable.`)
+            }
+
+            const veniceParameters = {
+              ...args.venice_parameters,
+              include_venice_system_prompt: false,
+            }
+            const body = {
+              model,
+              messages: args.messages,
+              temperature: args.temperature,
+              max_tokens: args.max_tokens,
+              max_completion_tokens: args.max_completion_tokens,
+              top_p: args.top_p,
+              stop: args.stop,
+              verbosity: args.verbosity,
+              response_format: args.response_format,
+              prompt_cache_key: args.prompt_cache_key,
+              prompt_cache_retention: args.prompt_cache_retention,
+              reasoning: args.reasoning,
+              reasoning_effort: args.reasoning_effort,
+              venice_parameters: veniceParameters,
+              stream: true,
+            }
+            const headers = {
+              'X-Venice-TEE-Client-Pub-Key': parsedE2eeHeaders.data.client_public_key,
+              'X-Venice-TEE-Model-Pub-Key': parsedE2eeHeaders.data.model_public_key,
+              'X-Venice-TEE-Signing-Algo': parsedE2eeHeaders.data.signing_algorithm,
+            }
+            const rawSse = await client.postEventStream('/v1/chat/completions', body, headers)
+            const responseError = validateE2eeSseContent(collectSseDataEvents(rawSse))
+            if (responseError) return fail(responseError)
+            return {
+              content: [{ type: 'text', text: rawSse }],
+              structuredContent: {
+                transport: 'sse',
+                media_type: 'text/event-stream',
+                encrypted: true,
+                byte_length: Buffer.byteLength(rawSse, 'utf8'),
+                framing: 'content[0].text is the complete upstream SSE stream, including data lines, event separators, and [DONE].',
+              },
+            }
+          }
+
           const body = {
             model: args.model ?? cfg.defaultChatModel,
             messages: args.messages,
@@ -373,26 +425,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             reasoning: args.reasoning,
             reasoning_effort: args.reasoning_effort,
             venice_parameters: args.venice_parameters,
-            stream: e2eeEnabled,
-          }
-
-          if (e2eeEnabled && parsedE2eeHeaders.success) {
-            const headers = {
-              'X-Venice-TEE-Client-Pub-Key': parsedE2eeHeaders.data.client_public_key,
-              'X-Venice-TEE-Model-Pub-Key': parsedE2eeHeaders.data.model_public_key,
-              'X-Venice-TEE-Signing-Algo': parsedE2eeHeaders.data.signing_algorithm,
-            }
-            const rawSse = await client.postEventStream('/v1/chat/completions', body, headers)
-            return {
-              content: [{ type: 'text', text: rawSse }],
-              structuredContent: {
-                transport: 'sse',
-                media_type: 'text/event-stream',
-                encrypted: true,
-                byte_length: Buffer.byteLength(rawSse, 'utf8'),
-                framing: 'content[0].text is the complete upstream SSE stream, including data lines, event separators, and [DONE].',
-              },
-            }
+            stream: false,
           }
 
           const resp = await client.post<{

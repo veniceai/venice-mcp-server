@@ -89,7 +89,23 @@ export class VeniceClient {
             body,
           })
         }
-        if (typeof body !== 'string' || !hasTerminalDoneEvent(body)) {
+        if (typeof body !== 'string') {
+          throw new VeniceUpstreamError({
+            message: `Venice E2EE stream ended without a terminal "data: [DONE]" event on ${path}; the encrypted response may be incomplete`,
+            status: 502,
+            body: { error: 'incomplete_event_stream' },
+          })
+        }
+        const dataEvents = collectSseDataEvents(body)
+        const errorEnvelope = firstSseErrorEnvelope(dataEvents)
+        if (errorEnvelope !== undefined) {
+          throw new VeniceUpstreamError({
+            message: `Venice E2EE stream contained an error envelope on ${path}`,
+            status: 502,
+            body: errorEnvelope,
+          })
+        }
+        if (!hasTerminalDoneEvent(dataEvents)) {
           throw new VeniceUpstreamError({
             message: `Venice E2EE stream ended without a terminal "data: [DONE]" event on ${path}; the encrypted response may be incomplete`,
             status: 502,
@@ -278,30 +294,57 @@ async function readResponseBody(res: Response, mediaType: string): Promise<unkno
   return text
 }
 
-function hasTerminalDoneEvent(rawSse: string): boolean {
-  // Parse only a copy for completeness validation. The original SSE string is
-  // returned untouched. SSE recognizes CRLF, CR, and LF as line endings.
+/**
+ * Parse SSE data payloads from a copy. The original stream string is never mutated.
+ * SSE recognizes CRLF, CR, and LF as line endings. A trailing unterminated block
+ * is ignored, matching the previous completeness check.
+ */
+export function collectSseDataEvents(rawSse: string): string[] {
   const normalized = rawSse.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
   const boundary = /\n\n+/g
+  const events: string[] = []
   let start = 0
-  let lastDataEvent: string | undefined
   let match: RegExpExecArray | null
   while ((match = boundary.exec(normalized)) !== null) {
     const block = normalized.slice(start, match.index)
     start = boundary.lastIndex
-    const dataLines: string[] = []
-    for (const line of block.split('\n')) {
-      if (line.startsWith(':')) continue
-      const colon = line.indexOf(':')
-      const field = colon === -1 ? line : line.slice(0, colon)
-      if (field !== 'data') continue
-      let value = colon === -1 ? '' : line.slice(colon + 1)
-      if (value.startsWith(' ')) value = value.slice(1)
-      dataLines.push(value)
-    }
-    if (dataLines.length > 0) lastDataEvent = dataLines.join('\n')
+    const data = dataFieldFromSseBlock(block)
+    if (data !== undefined) events.push(data)
   }
-  return lastDataEvent === '[DONE]'
+  return events
+}
+
+function dataFieldFromSseBlock(block: string): string | undefined {
+  const dataLines: string[] = []
+  for (const line of block.split('\n')) {
+    if (line.startsWith(':')) continue
+    const colon = line.indexOf(':')
+    const field = colon === -1 ? line : line.slice(0, colon)
+    if (field !== 'data') continue
+    let value = colon === -1 ? '' : line.slice(colon + 1)
+    if (value.startsWith(' ')) value = value.slice(1)
+    dataLines.push(value)
+  }
+  return dataLines.length > 0 ? dataLines.join('\n') : undefined
+}
+
+function hasTerminalDoneEvent(dataEvents: readonly string[]): boolean {
+  return dataEvents[dataEvents.length - 1] === '[DONE]'
+}
+
+function firstSseErrorEnvelope(dataEvents: readonly string[]): unknown | undefined {
+  for (const data of dataEvents) {
+    if (data === '[DONE]') continue
+    try {
+      const parsed = JSON.parse(data) as unknown
+      if (parsed && typeof parsed === 'object' && 'error' in parsed && (parsed as { error?: unknown }).error != null) {
+        return parsed
+      }
+    } catch {
+      // Non-JSON data events are left for the caller; they are not error envelopes.
+    }
+  }
+  return undefined
 }
 
 /**

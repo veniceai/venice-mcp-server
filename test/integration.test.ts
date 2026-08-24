@@ -85,7 +85,19 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
 
   before(async () => {
     venice = await startMockVenice([
-      { match: 'GET /v1/models', reply: { data: [{ id: 'deepseek-v4-flash-0731', type: 'text' }] } },
+      {
+        match: 'GET /v1/models',
+        reply: {
+          data: [
+            { id: 'deepseek-v4-flash-0731', type: 'text' },
+            {
+              id: 'e2ee-qwen3-5-122b-a10b',
+              type: 'text',
+              model_spec: { capabilities: { supportsE2EE: true, supportsTeeAttestation: true } },
+            },
+          ],
+        },
+      },
       {
         match: 'POST /v1/chat/completions',
         reply: ({ headers, body }) => {
@@ -243,17 +255,11 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(call.headers.accept, 'application/json')
   })
 
-  it('forwards advanced chat fields unchanged over MCP and HTTP', async () => {
+  it('forwards a valid E2EE chat over MCP after catalog and ciphertext checks', async () => {
     const arguments_ = {
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'text', text: 'Inspect' },
-          { type: 'file', file: { file_data: 'https://example.com/report.pdf', filename: 'report.pdf' } },
-        ],
-      }],
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: INTEGRATION_ENCRYPTED_CHUNK }],
       max_completion_tokens: 321,
-      response_format: { type: 'json_object' },
       reasoning_effort: 'high',
       prompt_cache_key: 'integration-cache',
       prompt_cache_retention: '24h',
@@ -269,26 +275,59 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
       arguments: arguments_,
     })) as RpcResult
     assert.equal(r.error, undefined)
+    const result = r.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+      structuredContent: { transport: string; encrypted: boolean; byte_length: number }
+    }
+    assert.equal(result.isError, undefined)
     const call = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').at(-1)!
     const body = call.body as Record<string, unknown>
-    const { e2ee_headers: _headers, ...bodyArguments } = arguments_
-    for (const [key, value] of Object.entries(bodyArguments)) {
-      assert.deepEqual(body[key], value, `chat body.${key}`)
-    }
+    assert.equal(body.model, 'e2ee-qwen3-5-122b-a10b')
+    assert.deepEqual(body.messages, arguments_.messages)
+    assert.equal(body.max_completion_tokens, 321)
+    assert.equal(body.reasoning_effort, 'high')
+    assert.equal(body.prompt_cache_key, 'integration-cache')
+    assert.equal(body.stream, true)
     assert.equal('e2ee_headers' in body, false)
+    assert.equal((body.venice_parameters as { include_venice_system_prompt: boolean }).include_venice_system_prompt, false)
     assert.equal(call.headers['x-venice-tee-client-pub-key'], arguments_.e2ee_headers.client_public_key)
     assert.equal(call.headers['x-venice-tee-model-pub-key'], arguments_.e2ee_headers.model_public_key)
     assert.equal(call.headers['x-venice-tee-signing-algo'], 'ecdsa')
     assert.equal(call.headers.accept, 'text/event-stream')
-    assert.equal(body.stream, true)
-    const result = r.result as {
-      content: Array<{ text: string }>
-      structuredContent: { transport: string; encrypted: boolean; byte_length: number }
-    }
     assert.equal(result.content[0].text, INTEGRATION_RAW_SSE)
     assert.equal(result.structuredContent.transport, 'sse')
     assert.equal(result.structuredContent.encrypted, true)
     assert.equal(result.structuredContent.byte_length, Buffer.byteLength(INTEGRATION_RAW_SSE))
+  })
+
+  it('rejects E2EE plaintext and file payloads over MCP without contacting chat completions', async () => {
+    const beforeCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_chat',
+      arguments: {
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Inspect' },
+            { type: 'file', file: { file_data: 'https://example.com/report.pdf', filename: 'report.pdf' } },
+          ],
+        }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: {
+          client_public_key: `04${'1'.repeat(128)}`,
+          model_public_key: `04${'2'.repeat(128)}`,
+          signing_algorithm: 'ecdsa',
+        },
+      },
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as { isError?: boolean; content: Array<{ text: string }> }
+    assert.equal(result.isError, true)
+    assert.match(result.content[0].text, /encrypted hex ciphertext/)
+    const afterCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
+    assert.equal(afterCalls, beforeCalls)
   })
 
   it('rejects incoherent E2EE inputs over MCP without contacting Venice', async () => {
