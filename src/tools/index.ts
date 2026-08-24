@@ -130,8 +130,16 @@ function cryptoRpcMethods(body: unknown): string[] {
   return Array.isArray(body) ? body.map(cryptoRpcMethodName) : [cryptoRpcMethodName(body)]
 }
 
+function isBroadcastRpcMethod(method: string): boolean {
+  const normalized = method.toLowerCase()
+  if (CRYPTO_RPC_BROADCAST_METHODS.has(normalized)) return true
+  if (normalized.includes('sendrawtransaction') || normalized.includes('sendtransaction')) return true
+  if (normalized.startsWith('starknet_add')) return true
+  return false
+}
+
 function cryptoRpcRequiresIdempotencyKey(body: unknown): boolean {
-  return cryptoRpcMethods(body).some((method) => CRYPTO_RPC_BROADCAST_METHODS.has(method.toLowerCase()))
+  return cryptoRpcMethods(body).some(isBroadcastRpcMethod)
 }
 
 /**

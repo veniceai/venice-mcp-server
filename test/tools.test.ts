@@ -546,6 +546,14 @@ describe('tool output shaping', () => {
     assert.equal(batchMissing.isError, true)
     assert.equal(stub.calls.length, 0)
 
+    const sendTransaction = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendTransaction',
+      rpc_params: [{}],
+    } as never)
+    assert.equal(sendTransaction.isError, true)
+    assert.equal(stub.calls.length, 0)
+
     const sent = await tool.handler({
       network: 'ethereum-mainnet',
       rpc_method: 'eth_sendRawTransaction',
