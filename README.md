@@ -107,7 +107,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | Tool | Description |
 |---|---|
 | `venice_crypto_networks` | List the live network slugs supported by the crypto RPC proxy. No authentication required. |
-| `venice_crypto_rpc` | Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. |
+| `venice_crypto_rpc` | Proxy one JSON-RPC request or a batch of up to 100 requests. Transaction broadcasts require `idempotency_key`. |
 
 ### 💳 x402 wallet helpers
 

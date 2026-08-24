@@ -39,6 +39,7 @@ describe('VeniceClient', () => {
       },
       { match: 'POST /v1/server-error', reply: { __status: 503, __body: { error: 'down' } } },
       { match: 'POST /v1/text-only', reply: { __status: 200, __body: 'plain text', __headers: { 'content-type': 'text/plain' } } },
+      { match: 'POST /v1/huge', reply: { data: 'x'.repeat(8_000) } },
       {
         match: 'POST /v1/slow',
         reply: () =>
@@ -165,6 +166,14 @@ describe('VeniceClient', () => {
     const c = new VeniceClient(makeCfg())
     const r = await c.post<string>('/v1/text-only', {})
     assert.equal(r, 'plain text')
+  })
+
+  it('rejects responses larger than maxResponseBytes', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.post('/v1/huge', {}, undefined, { maxResponseBytes: 64 }),
+      /larger than 64 bytes/,
+    )
   })
 
   it('aborts on timeout and surfaces a 504 VeniceUpstreamError', async () => {

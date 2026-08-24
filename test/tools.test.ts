@@ -505,6 +505,71 @@ describe('tool output shaping', () => {
       schema.safeParse({ network: 'ethereum-mainnet', request: [{ jsonrpc: '2.0', method: '' }] }).success,
       false,
     )
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        rpc_method: 'eth_chainId',
+        idempotency_key: 'agent-tx-1',
+      }).success,
+      true,
+    )
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        rpc_method: 'eth_chainId',
+        idempotency_key: 'has spaces',
+      }).success,
+      false,
+    )
+  })
+
+  it('venice_crypto_rpc requires idempotency_key for transaction broadcasts', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_crypto_rpc')
+
+    const missing = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendRawTransaction',
+      rpc_params: ['0xabc'],
+    } as never)
+    assert.equal(missing.isError, true)
+    assert.match((missing.content[0] as { text: string }).text, /idempotency_key/)
+    assert.equal(stub.calls.length, 0)
+
+    const batchMissing = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: [
+        { jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 },
+        { jsonrpc: '2.0', method: 'eth_sendRawTransaction', params: ['0xabc'], id: 2 },
+      ],
+    } as never)
+    assert.equal(batchMissing.isError, true)
+    assert.equal(stub.calls.length, 0)
+
+    const sent = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendRawTransaction',
+      rpc_params: ['0xabc'],
+      idempotency_key: 'agent-tx-1',
+    } as never)
+    assert.equal(sent.isError, undefined)
+    assert.equal(stub.calls.at(-1)?.headers?.['Idempotency-Key'], 'agent-tx-1')
+  })
+
+  it('venice_crypto_rpc rejects oversized responses', async () => {
+    const stub = new StubClient({
+      '/v1/crypto/rpc/': () => ({ jsonrpc: '2.0', id: 1, result: '0x' + 'aa'.repeat(200_000) }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const tool = tools.find((t) => t.name === 'venice_crypto_rpc')!
+    const result = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_getLogs',
+      rpc_params: [],
+    } as never)
+    assert.equal(result.isError, true)
+    assert.match((result.content[0] as { text: string }).text, /exceeds 262144 bytes/)
+    assert.doesNotMatch((result.content[0] as { text: string }).text, /aaaaaa/)
   })
 
   it('venice_crypto_rpc rejects ambiguous or missing request forms without calling upstream', async () => {

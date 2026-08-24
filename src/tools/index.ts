@@ -95,6 +95,15 @@ const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API k
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
 
+const CRYPTO_RPC_MAX_RESPONSE_BYTES = 256 * 1024
+const CRYPTO_RPC_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{1,255}$/
+const CRYPTO_RPC_BROADCAST_METHODS = new Set([
+  'eth_sendrawtransaction',
+  'starknet_addinvoketransaction',
+  'starknet_adddeclaretransaction',
+  'starknet_adddeployaccounttransaction',
+])
+
 const cryptoRpcIdSchema = z.union([z.string(), z.number().int()])
 const cryptoRpcRequestSchema = z.object({
   jsonrpc: z.literal('2.0').optional().describe('JSON-RPC version. Defaults to "2.0" when using rpc_method.'),
@@ -105,6 +114,25 @@ const cryptoRpcRequestSchema = z.object({
 const cryptoRpcBatchRequestSchema = cryptoRpcRequestSchema.extend({
   id: cryptoRpcIdSchema.describe('Required request ID used to correlate this batch item with its response.'),
 })
+const cryptoRpcIdempotencyKeySchema = z
+  .string()
+  .regex(CRYPTO_RPC_IDEMPOTENCY_KEY)
+  .describe(
+    'Reuse the same key when retrying a request. Required for eth_sendRawTransaction and Starknet writes so a lost response is not broadcast again.',
+  )
+
+function cryptoRpcMethodName(item: unknown): string {
+  if (typeof item !== 'object' || item === null || !('method' in item)) return ''
+  return String((item as { method: unknown }).method)
+}
+
+function cryptoRpcMethods(body: unknown): string[] {
+  return Array.isArray(body) ? body.map(cryptoRpcMethodName) : [cryptoRpcMethodName(body)]
+}
+
+function cryptoRpcRequiresIdempotencyKey(body: unknown): boolean {
+  return cryptoRpcMethods(body).some((method) => CRYPTO_RPC_BROADCAST_METHODS.has(method.toLowerCase()))
+}
 
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
@@ -879,7 +907,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_crypto_rpc',
       title: 'Venice Crypto RPC Proxy',
-      description: `Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. Use venice_crypto_networks for the live network list. For a simple call, pass rpc_method/rpc_params; for complete request IDs or batches, pass request.${X402_OK}`,
+      description: `Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. Use venice_crypto_networks for the live network list. For a simple call, pass rpc_method/rpc_params; for complete request IDs or batches, pass request. Transaction broadcasts (eth_sendRawTransaction and Starknet writes) require idempotency_key; reuse the same key when retrying a relay. Responses larger than 256 KiB are rejected.${X402_OK}`,
       inputSchema: {
         network: z.string().min(1).describe('Network slug returned by venice_crypto_networks.'),
         request: z
@@ -888,6 +916,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           .describe('A single JSON-RPC request object (ID optional) or a non-empty batch of at most 100 request objects (ID required per item).'),
         rpc_method: z.string().min(1).optional().describe('Convenience form for a single request. Do not combine with request.'),
         rpc_params: z.array(z.unknown()).optional().describe('Parameters for rpc_method.'),
+        idempotency_key: cryptoRpcIdempotencyKeySchema.optional(),
       },
       handler: async (args) => {
         try {
@@ -906,11 +935,25 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             params: args.rpc_params ?? [],
             id: 1,
           }
+          if (cryptoRpcRequiresIdempotencyKey(body) && !args.idempotency_key) {
+            return fail(
+              'idempotency_key is required for transaction broadcasts (eth_sendRawTransaction and Starknet writes). Reuse the same key when retrying so Venice can return the cached result instead of broadcasting again.',
+            )
+          }
+          const headers = args.idempotency_key ? { 'Idempotency-Key': args.idempotency_key } : undefined
           const resp = await client.post<unknown>(
             `/v1/crypto/rpc/${encodeURIComponent(args.network)}`,
             body,
+            headers,
+            { maxResponseBytes: CRYPTO_RPC_MAX_RESPONSE_BYTES },
           )
-          return ok(JSON.stringify(resp, null, 2))
+          const text = JSON.stringify(resp, null, 2)
+          if (Buffer.byteLength(text, 'utf8') > CRYPTO_RPC_MAX_RESPONSE_BYTES) {
+            return fail(
+              `Crypto RPC response exceeds ${CRYPTO_RPC_MAX_RESPONSE_BYTES} bytes. Narrow the query (smaller eth_getLogs range, fewer batch items, or avoid trace/replay methods).`,
+            )
+          }
+          return ok(text)
         } catch (err) {
           return fail(formatToolError(err))
         }

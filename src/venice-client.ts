@@ -11,6 +11,8 @@ export interface RequestInitJSON {
   timeoutMs?: number
   /** Override default API-key-first auth behavior for endpoint-specific requirements. */
   auth?: 'default' | 'apiKey' | 'siwx' | 'none'
+  /** Reject the response if the body exceeds this many bytes. */
+  maxResponseBytes?: number
 }
 
 /**
@@ -89,13 +91,7 @@ export class VeniceClient {
     }
     clearTimeout(timeout)
 
-    const contentType = res.headers.get('content-type') ?? ''
-    let body: unknown
-    if (contentType.includes('application/json')) {
-      body = await res.json().catch(() => ({}))
-    } else {
-      body = await res.text().catch(() => '')
-    }
+    const body = await readResponseBody(res, init.maxResponseBytes)
 
     if (!res.ok) {
       const headerObj: Record<string, string> = {}
@@ -126,7 +122,7 @@ export class VeniceClient {
     path: string,
     json: unknown,
     headers?: Record<string, string>,
-    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs'> = {},
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxResponseBytes'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'POST', json, headers, ...opts })
   }
@@ -236,18 +232,59 @@ export class VeniceClient {
   }
 }
 
-/**
- * Shared response parser used by `request` and `postMultipart`.
- * Handles JSON vs text content, surfaces 402 / 4xx / 5xx as VeniceUpstreamError.
- */
-async function parseResponse<T>(res: Response, path: string): Promise<T> {
+/** Parse JSON or text, optionally aborting once the body exceeds `maxResponseBytes`. */
+async function readResponseBody(res: Response, maxResponseBytes?: number): Promise<unknown> {
   const contentType = res.headers.get('content-type') ?? ''
-  let body: unknown
-  if (contentType.includes('application/json')) {
-    body = await res.json().catch(() => ({}))
-  } else {
-    body = await res.text().catch(() => '')
+  if (maxResponseBytes !== undefined) {
+    const text = await readBoundedResponseText(res, maxResponseBytes)
+    if (contentType.includes('application/json')) {
+      if (!text) return {}
+      try {
+        return JSON.parse(text)
+      } catch {
+        return {}
+      }
+    }
+    return text
   }
+  if (contentType.includes('application/json')) {
+    return await res.json().catch(() => ({}))
+  }
+  return await res.text().catch(() => '')
+}
+
+async function readBoundedResponseText(res: Response, maxBytes: number): Promise<string> {
+  const contentLength = res.headers.get('content-length')
+  if (contentLength !== null) {
+    const size = Number(contentLength)
+    if (Number.isFinite(size) && size > maxBytes) {
+      if (res.body) await res.body.cancel().catch(() => undefined)
+      throw new Error(`Upstream response is larger than ${maxBytes} bytes`)
+    }
+  }
+
+  if (!res.body) return ''
+
+  const chunks: Buffer[] = []
+  let total = 0
+  try {
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      const buf = Buffer.from(chunk)
+      total += buf.length
+      if (total > maxBytes) {
+        throw new Error(`Upstream response is larger than ${maxBytes} bytes`)
+      }
+      chunks.push(buf)
+    }
+  } catch (err) {
+    await res.body.cancel().catch(() => undefined)
+    throw err
+  }
+  return Buffer.concat(chunks, total).toString('utf8')
+}
+
+async function parseResponse<T>(res: Response, path: string): Promise<T> {
+  const body = await readResponseBody(res)
   if (!res.ok) {
     const headerObj: Record<string, string> = {}
     res.headers.forEach((v, k) => (headerObj[k] = v))
