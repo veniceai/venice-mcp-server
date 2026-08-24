@@ -717,6 +717,14 @@ describe('tool output shaping', () => {
     assert.equal(stub.calls.filter((call) => call.method === 'POST').length, 1)
     assert.match((first.content[0] as { text: string }).text, /vk_replay_secret/)
     assert.match((second.content[0] as { text: string }).text, /vk_replay_secret/)
+
+    const otherSigner = await mint.handler({
+      ...args,
+      address: `0x${'b'.repeat(40)}`,
+    } as never)
+    assert.equal(otherSigner.isError, true)
+    assert.match((otherSigner.content[0] as { text: string }).text, /different wallet or signature/)
+    assert.equal(stub.calls.filter((call) => call.method === 'POST').length, 1)
   })
 
   it('refuses to retry a web3 mint after an unknown outcome', async () => {
@@ -749,6 +757,36 @@ describe('tool output shaping', () => {
     assert.match((first.content[0] as { text: string }).text, /Mint outcome is unknown/)
     assert.match((second.content[0] as { text: string }).text, /Do not retry/)
     assert.match((second.content[0] as { text: string }).text, /venice_list_api_keys/)
+  })
+
+  it('refuses to retry a web3 mint after a 429', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        throw new VeniceUpstreamError({
+          message: 'rate limited',
+          status: 429,
+          body: { error: 'rate limited' },
+        })
+      },
+    })
+    const mint = buildTools(stub.asClient(), cfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const args = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'rate-limited-token',
+      consumption_limit: { usd: 25 },
+    } as never
+
+    const first = await mint.handler(args)
+    const second = await mint.handler(args)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, true)
+    assert.equal(posts, 1)
+    assert.match((second.content[0] as { text: string }).text, /Do not retry/)
   })
 
   it('allows a corrected web3 mint after a definitive 4xx', async () => {

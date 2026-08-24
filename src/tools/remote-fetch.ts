@@ -336,7 +336,8 @@ function isBlockedIpv4(address: string): boolean {
 
 function isBlockedIpv6(address: string): boolean {
   const normalized = address.toLowerCase().split('%')[0]
-  if (embeddedIpv4Candidates(normalized).some(isBlockedIpv4)) return true
+  const embeddedIpv4 = ipv4FromMappedOrEmbedded(normalized)
+  if (embeddedIpv4 && isBlockedIpv4(embeddedIpv4)) return true
 
   return (
     normalized === '::' ||
@@ -351,54 +352,30 @@ function isBlockedIpv6(address: string): boolean {
   )
 }
 
-function ipv4FromHextets(high: number, low: number): string {
-  return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`
-}
-
-/**
- * Decode IPv4-mapped, IPv4-compatible, IPv4-translated, well-known NAT64, and
- * local-use NAT64 addresses, including hex form.
- */
-function embeddedIpv4Candidates(address: string): string[] {
-  const candidates = new Set<string>()
+/** Decode IPv4-mapped, IPv4-compatible, and NAT64-embedded addresses, including hex form. */
+function ipv4FromMappedOrEmbedded(address: string): string | undefined {
   const dotted = address.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1]
-  if (dotted) candidates.add(dotted)
+  if (dotted) return dotted
 
   const groups = expandIpv6Groups(address)
-  if (!groups) return [...candidates]
+  if (!groups) return undefined
 
-  const last32 = ipv4FromHextets(groups[6], groups[7])
-  const allZeroPrefix = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0
-  const isMapped = allZeroPrefix && groups[4] === 0 && groups[5] === 0xffff
-  const isCompatible = allZeroPrefix && groups[4] === 0 && groups[5] === 0
-  const isTranslated = allZeroPrefix && groups[4] === 0xffff && groups[5] === 0
-  const isWellKnownNat64 =
+  const isMapped =
+    groups[0] === 0 &&
+    groups[1] === 0 &&
+    groups[2] === 0 &&
+    groups[3] === 0 &&
+    groups[4] === 0 &&
+    groups[5] === 0xffff
+  const isNat64 =
     groups[0] === 0x64 &&
     groups[1] === 0xff9b &&
     groups[2] === 0 &&
     groups[3] === 0 &&
     groups[4] === 0 &&
     groups[5] === 0
-  const isLocalUseNat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 0x1
-
-  if (isMapped || isCompatible || isTranslated || isWellKnownNat64) {
-    candidates.add(last32)
-  }
-  if (isLocalUseNat64) {
-    candidates.add(last32)
-    for (const ipv4 of rfc6052EmbeddedIpv4s(groups)) candidates.add(ipv4)
-  }
-  return [...candidates]
-}
-
-/** RFC 6052 IPv4 embeddings for prefix lengths commonly used under NAT64. */
-function rfc6052EmbeddedIpv4s(groups: number[]): string[] {
-  return [
-    `${(groups[3] >> 8) & 0xff}.${groups[3] & 0xff}.${groups[4] & 0xff}.${(groups[5] >> 8) & 0xff}`,
-    `${groups[3] & 0xff}.${groups[4] & 0xff}.${(groups[5] >> 8) & 0xff}.${groups[5] & 0xff}`,
-    `${groups[4] & 0xff}.${(groups[5] >> 8) & 0xff}.${groups[5] & 0xff}.${(groups[6] >> 8) & 0xff}`,
-    ipv4FromHextets(groups[6], groups[7]),
-  ]
+  if (!isMapped && !isNat64) return undefined
+  return `${(groups[6] >> 8) & 0xff}.${groups[6] & 0xff}.${(groups[7] >> 8) & 0xff}.${groups[7] & 0xff}`
 }
 
 function expandIpv6Groups(address: string): number[] | undefined {

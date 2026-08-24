@@ -320,7 +320,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_list_characters` | `GET /v1/characters` |
 | `venice_chat_with_character` | `POST /v1/chat/completions` (with `character_slug`) |
 
-### Billing and API-key reads (API key only)
+### Billing and API-key reads (ADMIN API key only, except rate-limit tools)
 
 | Tool | Endpoint |
 |---|---|
@@ -329,8 +329,8 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_billing_usage_history` | `GET /v1/billing/usage-history` |
 | `venice_list_api_keys` | `GET /v1/api_keys` |
 | `venice_get_api_key` | `GET /v1/api_keys/:id` |
-| `venice_api_key_rate_limits` | `GET /v1/api_keys/rate_limits` |
-| `venice_api_key_rate_limit_logs` | `GET /v1/api_keys/rate_limits/log` |
+| `venice_api_key_rate_limits` | `GET /v1/api_keys/rate_limits` (INFERENCE or ADMIN) |
+| `venice_api_key_rate_limit_logs` | `GET /v1/api_keys/rate_limits/log` (INFERENCE or ADMIN) |
 
 ### Web3 API-key mint (auth-free)
 

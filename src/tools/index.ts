@@ -144,7 +144,7 @@ function redactSecretFields(value: unknown): unknown {
   const redacted: Record<string, unknown> = {}
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
     const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase()
-    redacted[key] = ['apikey', 'signature', 'token', 'paymentsignature', 'authorization', 'secret'].includes(normalizedKey)
+    redacted[key] = ['apikey', 'signature', 'token', 'paymentsignature', 'authorization', 'secret', 'privatekey', 'password', 'key'].includes(normalizedKey)
       ? '[REDACTED]'
       : redactSecretFields(child)
   }
@@ -1319,7 +1319,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_web3_key_mint',
       title: 'Venice Web3 API Key Mint',
-      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit is required because the wallet signature covers only the challenge token. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. Never provide a private key. The returned apiKey is shown once—store it securely. If minting times out or the response is lost, do not retry: revoke any unexpected key with an ADMIN key first.${NO_AUTH}`,
+      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit is required because the wallet signature covers only the challenge token. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. Never provide a private key. The returned apiKey is shown once—store it securely. Same-process retries reuse the cached secret for this token+wallet+signature only; a new challenge, another process, or a timeout after 15 minutes can still mint a second key. If minting times out or the response is lost, do not retry: revoke any unexpected key with an ADMIN key first.${NO_AUTH}`,
       inputSchema: {
         address: evmAddressSchema,
         signature: z.string().min(1).max(4096).describe('Signature created by the caller wallet over the raw challenge token.'),
@@ -1352,11 +1352,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           ),
       },
       handler: async (args) => {
-        const cached = getSucceededWeb3Mint(args.token)
+        const cached = getSucceededWeb3Mint(args.token, args.address, args.signature)
         if (cached !== undefined) {
           return ok(`Store the newly minted API key securely; it is shown only once.\n${JSON.stringify(cached, null, 2)}`)
         }
-        const attempt = beginWeb3MintAttempt(args.token)
+        const attempt = beginWeb3MintAttempt(args.token, args.address, args.signature)
         if (attempt !== 'fresh') {
           return fail(web3MintBlockedMessage(attempt === 'succeeded' ? 'unknown' : attempt))
         }
@@ -1376,13 +1376,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'none' },
           )
-          succeedWeb3MintAttempt(args.token, resp)
+          succeedWeb3MintAttempt(args.token, args.address, args.signature, resp)
           // The secret must reach the caller, but it is never written to server logs
           // or duplicated in structuredContent.
           return ok(`Store the newly minted API key securely; it is shown only once.\n${JSON.stringify(resp, null, 2)}`)
         } catch (err) {
           if (isUnknownMintOutcome(err)) {
-            markUnknownWeb3MintAttempt(args.token)
+            markUnknownWeb3MintAttempt(args.token, args.address, args.signature)
             return fail(`${WEB3_MINT_RECOVERY_MESSAGE} ${formatToolError(err)}`)
           }
           releaseWeb3MintAttempt(args.token)
