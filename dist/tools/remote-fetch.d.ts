@@ -1,6 +1,5 @@
 type FetchImpl = typeof fetch;
 type LookupAddresses = (hostname: string) => Promise<string[]>;
-type PinnedFetchImpl = (url: URL, address: string, signal: AbortSignal) => Promise<Response>;
 export interface FetchUploadSourceOptions {
     label: string;
     fallbackContentType: string;
@@ -9,7 +8,6 @@ export interface FetchUploadSourceOptions {
     maxBytes?: number;
     allowedContentTypes?: string[];
     fetchImpl?: FetchImpl;
-    pinnedFetchImpl?: PinnedFetchImpl;
     lookupAddresses?: LookupAddresses;
 }
 export interface UploadSource {
