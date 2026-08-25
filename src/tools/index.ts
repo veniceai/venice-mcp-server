@@ -13,20 +13,34 @@
  *      - crypto/rpc/:network
  *   ⚠️  API key only (no x402):
  *      - characters (list, get, reviews)
- *      - billing/* (balance, cost, usage, usage-analytics)
- *      - api_keys/*, support-bot
+ *      - api_keys/rate_limits and rate_limits/log (INFERENCE or ADMIN)
+ *      - billing/* and api_keys list/get require an ADMIN key
+ *      - support-bot
  *   🔓 Auth-free:
  *      - models, models/card, models/traits
  *      - image/styles
  *      - audio/quote, video/quote
- *      - x402/balance, x402/top-up, x402/transactions
+ *      - x402/top-up requirement discovery
+ *      - api_keys/generate_web3_key challenge + signed submission
  *      - tee/attestation, tee/signature
+ *   👛 SIWX only:
+ *      - x402/balance, x402/transactions
  */
 import { z } from 'zod'
 import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
+import {
+  beginWeb3MintAttempt,
+  getSucceededWeb3Mint,
+  isUnknownMintOutcome,
+  markUnknownWeb3MintAttempt,
+  releaseWeb3MintAttempt,
+  succeedWeb3MintAttempt,
+  WEB3_MINT_RECOVERY_MESSAGE,
+  web3MintBlockedMessage,
+} from './web3-key-mint.js'
 
 /**
  * Sniff the MIME type of a base64-encoded image from its magic bytes.
@@ -92,7 +106,54 @@ const fail = (text: string): ToolResult => ({
 
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
+const ADMIN_API_KEY_ONLY =
+  ' ADMIN API key required — inference keys, including keys minted by venice_web3_key_mint, cannot call this endpoint. This endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
+const walletAddressSchema = z
+  .string()
+  .regex(
+    /^(0x[a-fA-F0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/,
+    'Must be an EVM (0x + 40 hex characters) or Solana base58 wallet address.',
+  )
+const evmAddressSchema = z
+  .string()
+  .regex(/^0x[a-fA-F0-9]{40}$/, 'Web3 API-key minting currently requires an EVM wallet address.')
+const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must use YYYY-MM-DD format.')
+const utcTimestampSchema = z
+  .string()
+  .max(40)
+  .regex(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/,
+    'Must be an ISO 8601 UTC timestamp with a Z suffix.',
+  )
+
+function normalizeExpiresAt(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const match = value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/)
+  if (!match || !match[2] || match[2].length === 3) return value
+  return `${match[1]}.${match[2].padEnd(3, '0').slice(0, 3)}Z`
+}
+
+function normalizeWalletAddress(address: string): string {
+  return address.startsWith('0x') ? address.toLowerCase() : address
+}
+
+function redactSecretFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSecretFields)
+  if (typeof value !== 'object' || value === null) return value
+  const redacted: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase()
+    redacted[key] = ['apikey', 'signature', 'token', 'paymentsignature', 'authorization', 'secret', 'privatekey', 'password', 'key'].includes(normalizedKey)
+      ? '[REDACTED]'
+      : redactSecretFields(child)
+  }
+  return redacted
+}
+
+function safeJson(value: unknown): string {
+  return JSON.stringify(redactSecretFields(value), null, 2)
+}
 
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
@@ -970,7 +1031,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if (args.offset !== undefined) params.set('offset', String(args.offset))
           const qs = params.toString()
           const resp = await client.get<{ data?: unknown[]; characters?: unknown[] }>(
-            `/v1/characters${qs ? `?${qs}` : ''}`
+            `/v1/characters${qs ? `?${qs}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
           )
           const list = resp.data ?? resp.characters ?? []
           return ok(JSON.stringify(list, null, 2), { count: list.length })
@@ -1015,21 +1078,335 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     },
 
     // ========================================================================
-    // x402 wallet helpers — auth-free
+    // BILLING — ADMIN API KEY ONLY
+    // ========================================================================
+
+    {
+      name: 'venice_billing_balance',
+      title: 'Venice Billing Balance',
+      description: `Get current USD, DIEM, and bundled-credit availability for the authenticated Venice account.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<unknown>('/v1/billing/balance', undefined, { auth: 'apiKey' })
+          return ok(JSON.stringify(resp, null, 2))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_billing_usage_analytics',
+      title: 'Venice Billing Usage Analytics',
+      description: `Get beta aggregated usage by date, model, and API key. Data is cached for 10 minutes. Choose either lookback or a complete start/end date range.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        lookback: z
+          .string()
+          .regex(/^[1-9]\d*d$/, 'Must be a number of days such as 7d or 30d.')
+          .optional()
+          .describe('Relative lookback from 1d through 90d. Cannot be combined with start_date/end_date.'),
+        start_date: dateSchema.optional().describe('Inclusive custom range start in YYYY-MM-DD format. Requires end_date.'),
+        end_date: dateSchema.optional().describe('Custom range end in YYYY-MM-DD format. Requires start_date.'),
+      },
+      handler: async (args) => {
+        try {
+          if (args.lookback && (args.start_date || args.end_date)) {
+            return fail('Choose either lookback or start_date/end_date, not both.')
+          }
+          if ((args.start_date && !args.end_date) || (!args.start_date && args.end_date)) {
+            return fail('start_date and end_date must be provided together.')
+          }
+          if (args.lookback && Number(args.lookback.slice(0, -1)) > 90) {
+            return fail('lookback cannot exceed 90d.')
+          }
+          const params = new URLSearchParams()
+          if (args.lookback) params.set('lookback', args.lookback)
+          if (args.start_date) params.set('startDate', args.start_date)
+          if (args.end_date) params.set('endDate', args.end_date)
+          const query = params.toString()
+          const resp = await client.get<unknown>(
+            `/v1/billing/usage-analytics${query ? `?${query}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(JSON.stringify(resp, null, 2))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_billing_usage_history',
+      title: 'Venice Billing Usage History',
+      description: `Walk detailed billing usage in ascending timestamp order using cursor pagination. Supports JSON or upstream CSV. On continuation, send cursor without the original filters; CSV nextCursor values already encode format=csv so a cursor-only follow-up stays on text/csv. This uses /billing/usage-history, never deprecated /billing/usage.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        currency: z.enum(['USD', 'DIEM', 'BUNDLED_CREDITS']).optional(),
+        cursor: z
+          .string()
+          .min(1)
+          .max(516)
+          .regex(/^(csv:)?[A-Za-z0-9_-]+$/)
+          .optional()
+          .describe('Opaque nextCursor from the previous page. CSV pages return a csv: prefix so continuation stays on text/csv. Cannot be combined with filters or page_size.'),
+        start_timestamp: utcTimestampSchema
+          .optional()
+          .describe('Inclusive first-page lower bound, ISO 8601 UTC with Z suffix.'),
+        end_timestamp: utcTimestampSchema
+          .optional()
+          .describe('Exclusive first-page upper bound, ISO 8601 UTC with Z suffix.'),
+        page_size: z.number().int().min(10).max(1000).optional(),
+        format: z.enum(['json', 'csv']).optional().describe('Defaults to json. Optional on continuation; CSV nextCursor values already stay on CSV.'),
+      },
+      handler: async (args) => {
+        try {
+          if (
+            args.cursor &&
+            (args.currency || args.start_timestamp || args.end_timestamp || args.page_size !== undefined)
+          ) {
+            return fail('cursor must be sent without currency, timestamps, or page_size. format may be resent.')
+          }
+          if (
+            args.start_timestamp &&
+            args.end_timestamp &&
+            Date.parse(args.start_timestamp) >= Date.parse(args.end_timestamp)
+          ) {
+            return fail('end_timestamp must be later than start_timestamp.')
+          }
+          const CSV_CURSOR_PREFIX = 'csv:'
+          const rawCursor = args.cursor?.startsWith(CSV_CURSOR_PREFIX)
+            ? args.cursor.slice(CSV_CURSOR_PREFIX.length)
+            : args.cursor
+          if (args.cursor?.startsWith(CSV_CURSOR_PREFIX) && args.format === 'json') {
+            return fail('csv-prefixed cursor cannot be combined with format=json.')
+          }
+          const wantCsv = args.format === 'csv' || Boolean(args.cursor?.startsWith(CSV_CURSOR_PREFIX))
+          const params = new URLSearchParams()
+          if (rawCursor) params.set('cursor', rawCursor)
+          if (args.currency) params.set('currency', args.currency)
+          if (args.start_timestamp) params.set('startTimestamp', args.start_timestamp)
+          if (args.end_timestamp) params.set('endTimestamp', args.end_timestamp)
+          if (args.page_size !== undefined) params.set('pageSize', String(args.page_size))
+          const query = params.toString()
+          const path = `/v1/billing/usage-history${query ? `?${query}` : ''}`
+          if (wantCsv) {
+            let nextCursor: string | undefined
+            const csv = await client.get<string>(
+              path,
+              { Accept: 'text/csv' },
+              {
+                auth: 'apiKey',
+                onResponse: ({ headers }) => {
+                  nextCursor = headers['x-next-cursor']
+                },
+              },
+            )
+            return ok(csv, {
+              format: 'csv',
+              nextCursor: nextCursor ? `${CSV_CURSOR_PREFIX}${nextCursor}` : null,
+            })
+          }
+          const resp = await client.get<{ data?: unknown[]; nextCursor?: string | null }>(
+            path,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(JSON.stringify(resp, null, 2), {
+            format: 'json',
+            count: resp.data?.length ?? 0,
+            nextCursor: resp.nextCursor ?? null,
+          })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    // ========================================================================
+    // API KEYS — safe reads + unauthenticated Web3 mint flow
+    // ========================================================================
+
+    {
+      name: 'venice_list_api_keys',
+      title: 'Venice List API Keys',
+      description: `List active API-key metadata, including only the documented last six characters—not full key secrets.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<{ data?: unknown[] }>('/v1/api_keys', undefined, { auth: 'apiKey' })
+          return ok(safeJson(resp), { count: resp.data?.length ?? 0 })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_get_api_key',
+      title: 'Venice Get API Key Details',
+      description: `Get metadata, usage, balances, and rate-limit details for one API-key ID. The documented response does not reveal the full key secret.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        id: z.string().min(1).max(256).describe('API-key ID, not the key secret.'),
+      },
+      handler: async ({ id }) => {
+        try {
+          const resp = await client.get<unknown>(
+            `/v1/api_keys/${encodeURIComponent(id)}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(safeJson(resp))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_api_key_rate_limits',
+      title: 'Venice API Key Rate Limits',
+      description: `Get the current key's balances, access status, tier, expiration, and model-specific rate limits.${API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<unknown>('/v1/api_keys/rate_limits', undefined, { auth: 'apiKey' })
+          return ok(safeJson(resp))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_api_key_rate_limit_logs',
+      title: 'Venice API Key Rate Limit Logs',
+      description: `Get the last 50 exceeded rate-limit events for the account. This read-only endpoint is experimental.${API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<{ data?: unknown[] }>(
+            '/v1/api_keys/rate_limits/log',
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(safeJson(resp), { count: resp.data?.length ?? 0 })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_web3_key_challenge',
+      title: 'Venice Web3 API Key Challenge',
+      description: `Get the unauthenticated, short-lived token for autonomous API-key minting. Sign the raw token outside this server with an EVM wallet holding staked VVV; this server never accepts a private key.${NO_AUTH}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<unknown>(
+            '/v1/api_keys/generate_web3_key',
+            undefined,
+            { auth: 'none' },
+          )
+          return ok(JSON.stringify(resp, null, 2))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_web3_key_mint',
+      title: 'Venice Web3 API Key Mint',
+      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit is required because the wallet signature covers only the challenge token. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. Never provide a private key. The returned apiKey is shown once—store it securely. Same-process retries reuse the cached secret for this token+wallet+signature only. After a timeout or unknown outcome, this wallet cannot mint again (even with a new challenge) until that attempt expires. If the response is lost, revoke any unexpected key with an ADMIN key first. A process restart still cannot recover a secret this server never saw.${NO_AUTH}`,
+      inputSchema: {
+        address: evmAddressSchema,
+        signature: z.string().min(1).max(4096).describe('Signature created by the caller wallet over the raw challenge token.'),
+        token: z.string().min(1).max(8192).describe('Unmodified token returned by venice_web3_key_challenge.'),
+        api_key_type: z
+          .literal('INFERENCE')
+          .optional()
+          .describe('Only INFERENCE keys can be minted through MCP. ADMIN is rejected.'),
+        description: z.string().max(64).optional().describe('Optional API-key description (max 64 characters).'),
+        expires_at: z
+          .union([dateSchema, utcTimestampSchema])
+          .optional()
+          .describe('Optional YYYY-MM-DD or ISO 8601 UTC expiration.'),
+        consumption_limit: z
+          .object({
+            usd: z.number().min(0).max(9_999_999_999).nullable().optional(),
+            diem: z.number().min(0).max(9_999_999_999).nullable().optional(),
+            vcu: z.number().min(0).max(9_999_999_999).nullable().optional(),
+          })
+          .refine(
+            (limit) => [limit.usd, limit.diem, limit.vcu].some((value) => typeof value === 'number' && value > 0),
+            'At least one positive consumption limit (usd, diem, or vcu) is required.',
+          )
+          .describe('Required spend cap. The challenge signature does not bind key type or limits.'),
+        limit_period: z
+          .enum(['EPOCH', 'MONTH', 'LIFETIME'])
+          .optional()
+          .describe(
+            'Reset window for consumption_limit. Defaults to LIFETIME (permanent cap). EPOCH resets every UTC day; MONTH resets on the 1st UTC day of the month.',
+          ),
+      },
+      handler: async (args) => {
+        const cached = getSucceededWeb3Mint(args.token, args.address, args.signature)
+        if (cached !== undefined) {
+          return ok(`Store the newly minted API key securely; it is shown only once.\n${JSON.stringify(cached, null, 2)}`)
+        }
+        const attempt = beginWeb3MintAttempt(args.token, args.address, args.signature)
+        if (attempt !== 'fresh') {
+          return fail(web3MintBlockedMessage(attempt === 'succeeded' ? 'unknown' : attempt))
+        }
+        try {
+          const resp = await client.post<unknown>(
+            '/v1/api_keys/generate_web3_key',
+            {
+              address: args.address,
+              signature: args.signature,
+              token: args.token,
+              apiKeyType: 'INFERENCE',
+              description: args.description,
+              expiresAt: normalizeExpiresAt(args.expires_at),
+              consumptionLimit: args.consumption_limit,
+              limitPeriod: args.limit_period ?? 'LIFETIME',
+            },
+            undefined,
+            { auth: 'none' },
+          )
+          succeedWeb3MintAttempt(args.token, args.address, args.signature, resp)
+          // The secret must reach the caller, but it is never written to server logs
+          // or duplicated in structuredContent.
+          return ok(`Store the newly minted API key securely; it is shown only once.\n${JSON.stringify(resp, null, 2)}`)
+        } catch (err) {
+          if (isUnknownMintOutcome(err)) {
+            markUnknownWeb3MintAttempt(args.token, args.address, args.signature)
+            return fail(`${WEB3_MINT_RECOVERY_MESSAGE} ${formatToolError(err)}`)
+          }
+          releaseWeb3MintAttempt(args.token)
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    // ========================================================================
+    // x402 wallet helpers — SIWX reads + auth-free top-up discovery
     // ========================================================================
 
     {
       name: 'venice_x402_balance',
       title: 'Venice x402 Wallet Balance',
       description:
-        `Check the prepaid x402 credit balance for a wallet address. SIWX-ONLY: this endpoint rejects API key auth and requires X-Sign-In-With-X (forwarded from VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
+        `Check the prepaid x402 credit balance for an EVM or Solana wallet address. SIWX-ONLY: this endpoint rejects API key auth and requires SIGN-IN-WITH-X (forwarded from VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
       inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+        wallet_address: walletAddressSchema,
       },
       handler: async ({ wallet_address }) => {
         try {
           const resp = await client.get<unknown>(
-            `/v1/x402/balance/${encodeURIComponent(wallet_address.toLowerCase())}`,
+            `/v1/x402/balance/${encodeURIComponent(normalizeWalletAddress(wallet_address))}`,
             undefined,
             { auth: 'siwx' },
           )
@@ -1044,17 +1421,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       name: 'venice_x402_top_up_info',
       title: 'Venice x402 Top-up Requirements',
       description:
-        `Fetch step-1 top-up requirements (network, USDC token address, receiver wallet, min amount). Steps 2 (sign USDC authorization) and 3 (POST signed payment) require a wallet and happen OUTSIDE this MCP server.`,
+        `Fetch step-1 Base and Solana USDC top-up requirements for an EVM or Solana wallet. The API accepts an empty POST; the address is validated locally for the caller's intended wallet. Signing and PAYMENT-SIGNATURE submission happen OUTSIDE this MCP server.`,
       inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-        amount_usd: z.number().min(1).max(1_000_000).optional(),
+        wallet_address: walletAddressSchema,
       },
-      handler: async (args) => {
+      handler: async () => {
         try {
-          await client.post('/v1/x402/top-up', {
-            walletAddress: args.wallet_address,
-            amountUsd: args.amount_usd ?? 10,
-          })
+          await client.post('/v1/x402/top-up', {}, undefined, { auth: 'none' })
           return ok('Unexpected non-402 response. Top-up may already be processed.')
         } catch (err) {
           if (err instanceof Error && (err as { status?: number }).status === 402) {
@@ -1068,16 +1441,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_x402_transactions',
       title: 'Venice x402 Transaction History',
-      description: `List recent x402 top-up + debit transactions for a wallet. SIWX-ONLY: rejects API key, requires X-Sign-In-With-X (VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
+      description: `List recent x402 top-up + debit transactions for an EVM or Solana wallet. SIWX-ONLY: rejects API key, requires SIGN-IN-WITH-X (VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
       inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+        wallet_address: walletAddressSchema,
         limit: z.number().int().min(1).max(100).optional(),
       },
       handler: async ({ wallet_address, limit }) => {
         try {
           const qs = limit ? `?limit=${limit}` : ''
           const resp = await client.get<unknown>(
-            `/v1/x402/transactions/${encodeURIComponent(wallet_address.toLowerCase())}${qs}`,
+            `/v1/x402/transactions/${encodeURIComponent(normalizeWalletAddress(wallet_address))}${qs}`,
             undefined,
             { auth: 'siwx' },
           )

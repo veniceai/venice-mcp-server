@@ -162,7 +162,7 @@ async function phaseTopUp() {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'X-402-Payment': paymentHeader,
+      'PAYMENT-SIGNATURE': paymentHeader,
     },
   })
   log(`status: ${res.status}`)

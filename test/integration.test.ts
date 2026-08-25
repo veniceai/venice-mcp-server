@@ -90,7 +90,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
               message: {
                 content:
                   `auth=${headers.authorization ?? 'none'};` +
-                  `siwx=${headers['x-sign-in-with-x'] ?? 'none'};` +
+                  `siwx=${headers['sign-in-with-x'] ?? 'none'};` +
                   `model=${(body as { model?: string }).model};`,
               },
             },
@@ -101,6 +101,21 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
       {
         match: 'POST /v1/image/generate',
         reply: { id: 'mock-img-id', images: ['bW9jay1iYXNlNjQ='] },
+      },
+      {
+        match: 'GET /v1/billing/usage-history?currency=USD&pageSize=10',
+        reply: {
+          data: [{ timestamp: '2026-08-01T00:00:00.000Z', amount: -0.01, currency: 'USD' }],
+          nextCursor: 'integration-cursor',
+        },
+      },
+      {
+        match: 'GET /v1/api_keys/generate_web3_key',
+        reply: ({ headers }) => ({
+          success: true,
+          data: { token: 'integration-challenge' },
+          sawAuth: Boolean(headers.authorization || headers['sign-in-with-x']),
+        }),
       },
       {
         match: 'POST /v1/insufficient',
@@ -171,15 +186,17 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 31 tools over JSON-RPC', async () => {
+  it('lists 40 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 31)
+    assert.equal(list.length, 40)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
     assert.ok(names.includes('venice_video_status'))
     assert.ok(names.includes('venice_x402_balance'))
+    assert.ok(names.includes('venice_billing_usage_history'))
+    assert.ok(names.includes('venice_web3_key_mint'))
   })
 
   it('lists 3 resources', async () => {
@@ -225,6 +242,37 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(result.structuredContent?.id, 'mock-img-id')
   })
 
+  it('walks billing usage history through MCP with nextCursor metadata', async () => {
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_billing_usage_history',
+      arguments: { currency: 'USD', page_size: 10 },
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as {
+      content: Array<{ text: string }>
+      structuredContent?: { count?: number; nextCursor?: string }
+    }
+    assert.match(result.content[0].text, /2026-08-01/)
+    assert.equal(result.structuredContent?.count, 1)
+    assert.equal(result.structuredContent?.nextCursor, 'integration-cursor')
+    const upstreamCall = venice.calls.find(
+      (call) => call.path === '/v1/billing/usage-history?currency=USD&pageSize=10',
+    )
+    assert.equal(upstreamCall?.headers.authorization, 'Bearer vk_integration')
+    assert.equal(upstreamCall?.headers['sign-in-with-x'], undefined)
+  })
+
+  it('retrieves a Web3 challenge without forwarding configured auth', async () => {
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_web3_key_challenge',
+      arguments: {},
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const text = (r.result as { content: Array<{ text: string }> }).content[0].text
+    assert.match(text, /integration-challenge/)
+    assert.match(text, /"sawAuth": false/)
+  })
+
   it('reads venice://models resource', async () => {
     const r = (await rpc.request('resources/read', { uri: 'venice://models' })) as RpcResult
     assert.equal(r.error, undefined)
@@ -243,9 +291,9 @@ describe('integration — x402-only mode (no API key)', () => {
       {
         match: 'POST /v1/chat/completions',
         reply: ({ headers }) =>
-          headers['x-sign-in-with-x']
+          headers['sign-in-with-x']
             ? {
-                choices: [{ message: { content: `siwx=${headers['x-sign-in-with-x']}` } }],
+                choices: [{ message: { content: `siwx=${headers['sign-in-with-x']}` } }],
               }
             : {
                 __status: 402,
@@ -291,6 +339,41 @@ describe('integration — x402-only mode (no API key)', () => {
     })) as RpcResult
     const text = (r.result as { content: Array<{ text: string }> }).content[0].text
     assert.match(text, /siwx=siwx_integration_token/)
+
+    const characterChat = (await rpc.request('tools/call', {
+      name: 'venice_chat_with_character',
+      arguments: {
+        character_slug: 'venice',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    })) as RpcResult
+    const characterText = (characterChat.result as { content: Array<{ text: string }> }).content[0].text
+    assert.match(characterText, /siwx=siwx_integration_token/)
+  })
+
+  it('rejects every API_KEY_ONLY discovery/read tool locally without contacting upstream', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['venice_list_characters', { limit: 3 }],
+      ['venice_billing_balance', {}],
+      ['venice_billing_usage_analytics', { lookback: '7d' }],
+      ['venice_billing_usage_history', { page_size: 10 }],
+      ['venice_list_api_keys', {}],
+      ['venice_get_api_key', { id: 'key-1' }],
+      ['venice_api_key_rate_limits', {}],
+      ['venice_api_key_rate_limit_logs', {}],
+    ]
+    const callsBefore = venice.calls.length
+    for (const [name, arguments_] of cases) {
+      const r = (await rpc.request('tools/call', {
+        name,
+        arguments: arguments_,
+      })) as RpcResult
+      assert.equal(r.error, undefined, `${name} protocol error`)
+      const result = r.result as { isError?: boolean; content: Array<{ text: string }> }
+      assert.equal(result.isError, true, `${name} should fail`)
+      assert.match(result.content[0].text, /VENICE_API_KEY is required/, `${name} safe error`)
+    }
+    assert.equal(venice.calls.length, callsBefore)
   })
 })
 
