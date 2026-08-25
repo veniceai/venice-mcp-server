@@ -61,6 +61,25 @@ describe('remote upload fetch security', () => {
     )
   })
 
+  it('rejects IPv4-mapped and NAT64-embedded loopback addresses, including hex form', async () => {
+    await assert.rejects(
+      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['::ffff:127.0.0.1']),
+      /private or local address/,
+    )
+    await assert.rejects(
+      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['::ffff:7f00:1']),
+      /private or local address/,
+    )
+    await assert.rejects(
+      validateRemoteUrl(new URL('http://[::ffff:7f00:1]/file.png'), publicLookup),
+      /private or local address/,
+    )
+    await assert.rejects(
+      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['64:ff9b::7f00:1']),
+      /private or local address/,
+    )
+  })
+
   it('revalidates redirect targets before following them', async () => {
     const fetchImpl = async () =>
       new Response(null, {

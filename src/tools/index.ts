@@ -23,9 +23,10 @@
  *      - tee/attestation, tee/signature
  */
 import { z } from 'zod'
-import type { VeniceClient } from '../venice-client.js'
+import { collectSseDataEvents, type VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
+import { modelSupportsE2ee, validateE2eeChatRequest, validateE2eeSseContent } from '../e2ee.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -94,6 +95,165 @@ const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API k
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
 
+const cacheControlSchema = z
+  .object({
+    type: z.literal('ephemeral'),
+    ttl: z.string().optional().describe('Optional extended cache TTL, for example "1h".'),
+  })
+  .describe('Prompt cache control for providers that support it.')
+
+const textContentPartSchema = z.object({
+  type: z.literal('text'),
+  text: z.string().min(1),
+  cache_control: cacheControlSchema.optional(),
+})
+
+const chatUserContentPartSchema = z.union([
+  textContentPartSchema,
+  z.object({
+    type: z.literal('image_url'),
+    image_url: z.object({
+      url: z.string().min(1).describe('Public URL or base64 data URL for an image at least 64px square.'),
+    }),
+    cache_control: cacheControlSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('input_audio'),
+    input_audio: z.object({
+      data: z.string().min(1).describe('Base64-encoded audio bytes; direct audio URLs are not supported.'),
+      format: z.enum(['wav', 'mp3', 'aiff', 'aac', 'ogg', 'flac', 'm4a', 'pcm16', 'pcm24']).optional(),
+    }),
+    cache_control: cacheControlSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('video_url'),
+    video_url: z.object({
+      url: z.string().min(1).describe('Public video URL, supported YouTube URL, or base64 video data URL.'),
+    }),
+    cache_control: cacheControlSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('file'),
+    file: z.object({
+      file_data: z.string().min(1).describe('Public file URL or base64 data URL.'),
+      filename: z.string().optional(),
+    }),
+    cache_control: cacheControlSchema.optional(),
+  }),
+])
+
+const assistantToolCallSchema = z.object({
+  id: z.string(),
+  type: z.literal('function'),
+  function: z.object({
+    name: z.string(),
+    arguments: z.string(),
+  }),
+})
+
+const chatMessageSchema = z.union([
+  z.object({
+    role: z.literal('user'),
+    content: z.union([z.string(), z.array(chatUserContentPartSchema).min(1)]),
+    name: z.string().optional(),
+  }),
+  z.object({
+    role: z.literal('assistant'),
+    content: z.union([z.string(), z.array(textContentPartSchema), z.null()]).optional(),
+    name: z.string().optional(),
+    tool_calls: z.array(assistantToolCallSchema).optional(),
+    reasoning_content: z.string().nullable().optional(),
+    reasoning_details: z.array(z.object({
+      type: z.string(),
+      data: z.string().optional(),
+      format: z.string().optional(),
+      id: z.string().optional(),
+      index: z.number().optional(),
+      text: z.string().optional(),
+    })).optional(),
+    thought_signature: z.string().nullable().optional(),
+  }),
+  z.object({
+    role: z.literal('tool'),
+    content: z.string(),
+    tool_call_id: z.string(),
+    name: z.string().optional(),
+  }),
+  z.object({
+    role: z.enum(['system', 'developer']),
+    content: z.union([z.string(), z.array(textContentPartSchema).min(1)]),
+    name: z.string().optional(),
+  }),
+])
+
+const reasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+const reasoningSchema = z.object({
+  effort: reasoningEffortSchema.optional(),
+  summary: z.enum(['auto', 'concise', 'detailed']).optional(),
+})
+
+const jsonSchemaValue = z.record(z.unknown())
+const responseFormatSchema = z.union([
+  z.object({ type: z.literal('json_schema'), json_schema: jsonSchemaValue }),
+  z.object({ type: z.literal('json_object') }),
+  z.object({ type: z.literal('text') }),
+])
+
+const chatFunctionToolSchema = z.object({
+  type: z.literal('function').optional(),
+  id: z.string().optional(),
+  function: z.object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    parameters: jsonSchemaValue.optional(),
+    strict: z.boolean().optional(),
+  }),
+})
+
+const chatToolSchema = z.union([
+  chatFunctionToolSchema,
+  z.object({ type: z.enum(['web_search', 'x_search']) }),
+])
+
+const chatToolChoiceSchema = z.union([
+  z.enum(['none', 'auto', 'required']),
+  z.object({
+    type: z.literal('function'),
+    function: z.object({ name: z.string().min(1) }),
+  }),
+])
+
+const uncompressedSecp256k1KeySchema = z
+  .string()
+  .regex(/^04[0-9a-fA-F]{128}$/)
+  .describe('Uncompressed secp256k1 public key: 130 hexadecimal characters beginning with 04.')
+
+const e2eeHeadersSchema = z.object({
+  client_public_key: uncompressedSecp256k1KeySchema,
+  model_public_key: uncompressedSecp256k1KeySchema,
+  signing_algorithm: z.literal('ecdsa'),
+}).describe('TEE headers produced by a caller-side E2EE implementation after independently verifying attestation.')
+
+const responsesContentPartSchema = z.union([
+  z.object({ type: z.enum(['input_text', 'text', 'output_text']), text: z.string() }),
+  z.object({
+    type: z.enum(['input_image', 'image_url']),
+    image_url: z.union([
+      z.string().min(1),
+      z.object({
+        url: z.string().min(1),
+        detail: z.enum(['auto', 'low', 'high']).optional(),
+      }),
+    ]),
+  }),
+])
+
+const responsesMessageSchema = z.object({
+  role: z.enum(['system', 'developer', 'user', 'assistant']),
+  content: z.union([z.string(), z.array(responsesContentPartSchema).min(1)]),
+  type: z.literal('message').optional(),
+})
+
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
  * narrower set than `/chat/completions` and silently strips the rest, so the
@@ -137,9 +297,13 @@ const veniceParametersSchema = z
       .boolean()
       .optional()
       .describe('Turn reasoning off entirely on supported models, and strip the <think></think> blocks.'),
+    enable_e2ee: z
+      .boolean()
+      .optional()
+      .describe('Request E2EE on an E2EE-capable text model. This flag alone does not encrypt anything: the caller must verify attestation, encrypt/decrypt payloads, provide the required TEE headers, and verify the response signature.'),
   })
   .optional()
-  .describe('Venice-only options: web search, citations, system prompt control, reasoning control, characters.')
+  .describe('Venice-only options: web search, citations, system prompt control, reasoning control, characters, and E2EE enablement.')
 
 const responsesVeniceParametersSchema = z
   .object(sharedVeniceParameters)
@@ -157,38 +321,121 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored 1.1, etc.). Use venice_parameters for live web search with citations, character personas, and system prompt or reasoning control.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. File, tool, and web features are rejected. Upstream SSE is returned unchanged in content[0].text only after ciphertext and error-envelope checks. This server does not decrypt, verify, or claim plaintext completion.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
-          .array(z.object({ role: z.enum(['system', 'user', 'assistant']), content: z.string() }))
+          .array(chatMessageSchema)
           .min(1)
-          .describe('Chat messages, OpenAI format.'),
+          .describe('Chat messages. Multimodal image, audio, video, and file blocks belong in user messages.'),
         model: z.string().optional().describe(`Model id. Defaults to ${cfg.defaultChatModel}.`),
         temperature: z.number().min(0).max(2).optional(),
         max_tokens: z.number().int().positive().max(32_000).optional(),
+        max_completion_tokens: z.number().int().positive().optional().describe('Maximum visible plus reasoning tokens. Preferred over deprecated max_tokens.'),
         top_p: z.number().min(0).max(1).optional(),
-        stop: z.array(z.string()).max(8).optional(),
+        stop: z.union([z.string(), z.array(z.string()).min(1).max(4)]).optional(),
         verbosity: z.enum(['low', 'medium', 'high', 'auto']).optional().describe('How much text the model returns.'),
+        response_format: responseFormatSchema.optional(),
+        tools: z.array(chatToolSchema).optional(),
+        tool_choice: chatToolChoiceSchema.optional(),
+        parallel_tool_calls: z.boolean().optional(),
+        prompt_cache_key: z.string().optional(),
+        prompt_cache_retention: z.enum(['default', 'extended', '24h']).optional(),
+        reasoning: reasoningSchema.optional(),
+        reasoning_effort: reasoningEffortSchema.optional().describe('Takes precedence over reasoning.effort.'),
         venice_parameters: veniceParametersSchema,
+        e2ee_headers: e2eeHeadersSchema.optional().describe('Required exactly when enable_e2ee is true. Forwards the documented X-Venice-TEE-* headers; the server does not verify these keys or perform encryption.'),
       },
       handler: async (args) => {
         try {
-          const resp = await client.post<{
-            choices?: Array<{ message?: { content?: string } }>
-            usage?: Record<string, number>
-          }>('/v1/chat/completions', {
+          const e2eeEnabled = args.venice_parameters?.enable_e2ee === true
+          const parsedE2eeHeaders = e2eeHeadersSchema.safeParse(args.e2ee_headers)
+          if (e2eeEnabled && !parsedE2eeHeaders.success) {
+            return fail('E2EE requires the complete validated e2ee_headers bundle.')
+          }
+          if (!e2eeEnabled && args.e2ee_headers !== undefined) {
+            return fail('e2ee_headers may only be supplied when venice_parameters.enable_e2ee is true.')
+          }
+
+          if (e2eeEnabled && parsedE2eeHeaders.success) {
+            const requestError = validateE2eeChatRequest(args)
+            if (requestError) return fail(requestError)
+
+            const model = args.model!.trim()
+            const catalog = await client.get<unknown>('/v1/models')
+            if (!modelSupportsE2ee(model, catalog)) {
+              return fail(`E2EE requires an explicit catalog model with supportsE2EE; "${model}" is not E2EE-capable.`)
+            }
+
+            const veniceParameters = {
+              ...args.venice_parameters,
+              include_venice_system_prompt: false,
+              enable_web_search: 'off' as const,
+            }
+            const body = {
+              model,
+              messages: args.messages,
+              temperature: args.temperature,
+              max_tokens: args.max_tokens,
+              max_completion_tokens: args.max_completion_tokens,
+              top_p: args.top_p,
+              stop: args.stop,
+              verbosity: args.verbosity,
+              response_format: args.response_format,
+              prompt_cache_key: args.prompt_cache_key,
+              prompt_cache_retention: args.prompt_cache_retention,
+              reasoning: args.reasoning,
+              reasoning_effort: args.reasoning_effort,
+              venice_parameters: veniceParameters,
+              stream: true,
+            }
+            const headers = {
+              'X-Venice-TEE-Client-Pub-Key': parsedE2eeHeaders.data.client_public_key,
+              'X-Venice-TEE-Model-Pub-Key': parsedE2eeHeaders.data.model_public_key,
+              'X-Venice-TEE-Signing-Algo': parsedE2eeHeaders.data.signing_algorithm,
+            }
+            const rawSse = await client.postEventStream('/v1/chat/completions', body, headers)
+            const responseError = validateE2eeSseContent(collectSseDataEvents(rawSse))
+            if (responseError) return fail(responseError)
+            return {
+              content: [{ type: 'text', text: rawSse }],
+              structuredContent: {
+                transport: 'sse',
+                media_type: 'text/event-stream',
+                encrypted: true,
+                byte_length: Buffer.byteLength(rawSse, 'utf8'),
+                framing: 'content[0].text is the complete upstream SSE stream, including data lines, event separators, and [DONE].',
+              },
+            }
+          }
+
+          const body = {
             model: args.model ?? cfg.defaultChatModel,
             messages: args.messages,
             temperature: args.temperature,
             max_tokens: args.max_tokens,
+            max_completion_tokens: args.max_completion_tokens,
             top_p: args.top_p,
             stop: args.stop,
             verbosity: args.verbosity,
+            response_format: args.response_format,
+            tools: args.tools,
+            tool_choice: args.tool_choice,
+            parallel_tool_calls: args.parallel_tool_calls,
+            prompt_cache_key: args.prompt_cache_key,
+            prompt_cache_retention: args.prompt_cache_retention,
+            reasoning: args.reasoning,
+            reasoning_effort: args.reasoning_effort,
             venice_parameters: args.venice_parameters,
             stream: false,
-          })
-          const text = resp.choices?.[0]?.message?.content ?? ''
-          return ok(truncate(text), { usage: resp.usage })
+          }
+
+          const resp = await client.post<{
+            choices?: Array<{ message?: Record<string, unknown> & { content?: string | null } }>
+            usage?: Record<string, number>
+          }>('/v1/chat/completions', body)
+          const message = resp.choices?.[0]?.message
+          const text = message?.content ?? JSON.stringify(message ?? resp, null, 2)
+          return ok(truncate(text), { message, usage: resp.usage })
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -198,17 +445,19 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_responses',
       title: 'Venice Responses API',
-      description: `OpenAI-compatible Responses API. Single-turn or multi-turn with tool support.${nsfwNote}${X402_OK}`,
+      description: `Alpha, stateless OpenAI-compatible Responses API for Venice text models. Supports text/image input and reasoning controls, but this MCP tool does not advertise tool calling because the endpoint does not reliably accept those fields. E2EE-capable models are not supported; use venice_chat for E2EE.${nsfwNote}${X402_OK}`,
       inputSchema: {
         input: z
           .union([
             z.string(),
-            z.array(z.object({ role: z.enum(['system', 'user', 'assistant']), content: z.string() })),
+            z.array(responsesMessageSchema),
           ])
-          .describe('Either a plain string or an array of role+content messages.'),
+          .describe('Plain text or an array of text/image message inputs.'),
         model: z.string().optional(),
         max_output_tokens: z.number().int().positive().max(32_000).optional(),
         temperature: z.number().min(0).max(2).optional(),
+        top_p: z.number().min(0).max(1).optional(),
+        reasoning: reasoningSchema.optional(),
         venice_parameters: responsesVeniceParametersSchema,
       },
       handler: async (args) => {
@@ -867,6 +1116,55 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     // ========================================================================
 
     {
+      name: 'venice_tee_attestation',
+      title: 'Venice TEE Attestation',
+      description: `Fetch hardware-attestation evidence for a TEE-capable text model. The caller must supply a fresh 32-byte nonce and independently verify the echoed nonce, Intel TDX quote, optional NVIDIA evidence, debug-mode state, and signing-key binding before trusting the key. Fetching this evidence does not itself establish E2EE.${NO_AUTH}`,
+      inputSchema: {
+        model: z.string().min(1).describe('TEE-capable text model id; check supportsTeeAttestation in venice_list_models.'),
+        nonce: z
+          .string()
+          .regex(/^[0-9a-fA-F]{64}$/)
+          .describe('Caller-generated 32-byte freshness challenge encoded as exactly 64 hexadecimal characters.'),
+      },
+      handler: async ({ model, nonce }) => {
+        try {
+          const params = new URLSearchParams({ model, nonce })
+          const resp = await client.get<Record<string, unknown>>(
+            `/v1/tee/attestation?${params.toString()}`,
+            undefined,
+            { auth: 'none' },
+          )
+          return ok(JSON.stringify(resp, null, 2), resp)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_tee_signature',
+      title: 'Venice TEE Response Signature',
+      description: `Fetch the enclave signature for a completed TEE text-model chat request. The caller must cryptographically verify it against the signing identity bound by a separately verified attestation; this tool only returns the provider payload.${NO_AUTH}`,
+      inputSchema: {
+        model: z.string().min(1).describe('Same TEE-capable text model used for the chat completion.'),
+        request_id: z.string().min(1).describe('Completion id returned by POST /v1/chat/completions.'),
+      },
+      handler: async ({ model, request_id }) => {
+        try {
+          const params = new URLSearchParams({ model, request_id })
+          const resp = await client.get<Record<string, unknown>>(
+            `/v1/tee/signature?${params.toString()}`,
+            undefined,
+            { auth: 'none' },
+          )
+          return ok(JSON.stringify(resp, null, 2), resp)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
       name: 'venice_list_models',
       title: 'Venice List Models',
       description: `List the live model catalog with capabilities and prices.${NO_AUTH}`,
@@ -1044,17 +1342,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       name: 'venice_x402_top_up_info',
       title: 'Venice x402 Top-up Requirements',
       description:
-        `Fetch step-1 top-up requirements (network, USDC token address, receiver wallet, min amount). Steps 2 (sign USDC authorization) and 3 (POST signed payment) require a wallet and happen OUTSIDE this MCP server.`,
+        `Fetch step-1 top-up requirements for a wallet. The API accepts an empty POST; the address is validated locally for the caller's intended wallet. Signing and payment-header submission happen OUTSIDE this MCP server.`,
       inputSchema: {
         wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-        amount_usd: z.number().min(1).max(1_000_000).optional(),
       },
-      handler: async (args) => {
+      handler: async () => {
         try {
-          await client.post('/v1/x402/top-up', {
-            walletAddress: args.wallet_address,
-            amountUsd: args.amount_usd ?? 10,
-          })
+          await client.post('/v1/x402/top-up', {}, undefined, { auth: 'none' })
           return ok('Unexpected non-402 response. Top-up may already be processed.')
         } catch (err) {
           if (err instanceof Error && (err as { status?: number }).status === 402) {

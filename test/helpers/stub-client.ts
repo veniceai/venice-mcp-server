@@ -10,6 +10,8 @@ export interface StubCall {
   multipart?: boolean
   /** Whether this call went through postBinary (binary response expected). */
   binary?: boolean
+  /** Whether this call expects an unparsed text/event-stream response. */
+  eventStream?: boolean
 }
 
 export type StubHandler = (call: StubCall) => unknown | Promise<unknown>
@@ -31,14 +33,17 @@ export class StubClient {
       const out = await this.overrides[matchKey](call)
       return out as T
     }
-    return (defaultResponse(call.path, call.binary) as T) ?? ({} as T)
+    return (defaultResponse(call.path, call.binary, call.eventStream) as T) ?? ({} as T)
   }
 
   get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
     return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
-  post<T>(path: string, json: unknown) {
-    return this.dispatch<T>({ method: 'POST', path, body: json })
+  post<T>(path: string, json: unknown, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
+    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
+  }
+  postEventStream(path: string, json: unknown, headers?: Record<string, string>) {
+    return this.dispatch<string>({ method: 'POST', path, body: json, headers, eventStream: true })
   }
   /**
    * Stub for postBinary. Tool calls expecting binary back get a synthetic
@@ -83,7 +88,10 @@ export class StubClient {
   }
 }
 
-function defaultResponse(path: string, _binary?: boolean): unknown {
+function defaultResponse(path: string, _binary?: boolean, eventStream?: boolean): unknown {
+  if (eventStream && path.startsWith('/v1/chat/completions')) {
+    return `data: {"choices":[{"delta":{"content":"${'ab'.repeat(93)}"}}]}\n\ndata: [DONE]\n\n`
+  }
   if (path.startsWith('/v1/chat/completions'))
     return { choices: [{ message: { content: 'reply' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
   if (path.startsWith('/v1/responses')) return { output_text: 'response' }
@@ -119,10 +127,28 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
     return {
       data: [
         { id: 'deepseek-v4-flash-0731', type: 'text' },
+        {
+          id: 'e2ee-qwen3-5-122b-a10b',
+          type: 'text',
+          model_spec: { capabilities: { supportsE2EE: true, supportsTeeAttestation: true } },
+        },
         { id: 'flux-2-pro', type: 'image' },
         { id: 'veo3.1-fast-text-to-video', type: 'video' },
       ],
     }
+  if (path.startsWith('/v1/tee/attestation'))
+    return {
+      verified: true,
+      nonce: '0'.repeat(64),
+      model: 'e2ee-model',
+      tee_provider: 'near-ai',
+      intel_quote: 'quote',
+      nvidia_payload: null,
+      signing_key: '04' + '1'.repeat(128),
+      signing_address: `0x${'2'.repeat(40)}`,
+    }
+  if (path.startsWith('/v1/tee/signature'))
+    return { model: 'e2ee-model', request_id: 'chatcmpl-test', signature: '0xsigned' }
   if (path.startsWith('/v1/characters')) return { data: [{ slug: 'sample', name: 'Sample' }] }
   if (path.startsWith('/v1/x402/balance')) return { walletAddress: '0x', balanceUsd: 5.42, currency: 'USDC' }
   if (path.startsWith('/v1/x402/transactions')) return { transactions: [] }
