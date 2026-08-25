@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { VeniceClient } from '../src/venice-client.js'
+import { VeniceClient, VeniceResponseTooLargeError } from '../src/venice-client.js'
 import { loadConfig } from '../src/config.js'
 import { VeniceUpstreamError } from '../src/types.js'
 import { startMockVenice, type MockVeniceServer } from './helpers/mock-venice-server.js'
@@ -39,6 +39,54 @@ describe('VeniceClient', () => {
       },
       { match: 'POST /v1/server-error', reply: { __status: 503, __body: { error: 'down' } } },
       { match: 'POST /v1/text-only', reply: { __status: 200, __body: 'plain text', __headers: { 'content-type': 'text/plain' } } },
+      {
+        match: 'POST /v1/metadata',
+        reply: {
+          __status: 200,
+          __body: { ok: true },
+          __headers: { 'x-venice-enhanced-prompt': 'detailed%20prompt' },
+        },
+      },
+      {
+        match: 'POST /v1/video/processing',
+        reply: {
+          __status: 200,
+          __body: { status: 'PROCESSING', average_execution_time: 60_000, execution_duration: 10_000 },
+        },
+      },
+      {
+        match: 'POST /v1/video/completed',
+        reply: {
+          __status: 200,
+          __body: Buffer.from('mp4-binary-data'),
+          __headers: { 'content-type': 'video/mp4' },
+        },
+      },
+      {
+        match: 'POST /v1/video/exact-limit',
+        reply: {
+          __status: 200,
+          __body: Buffer.from('12345678'),
+          __headers: { 'content-type': 'video/mp4' },
+        },
+      },
+      {
+        match: 'POST /v1/video/over-limit',
+        reply: {
+          __status: 200,
+          __body: Buffer.from('123456789'),
+          __headers: { 'content-type': 'video/mp4' },
+        },
+      },
+      {
+        match: 'POST /v1/video/stalled-body',
+        reply: {
+          __status: 200,
+          __body: Buffer.from('partial-mp4'),
+          __headers: { 'content-type': 'video/mp4' },
+          __stallBody: true,
+        },
+      },
       {
         match: 'POST /v1/slow',
         reply: () =>
@@ -139,6 +187,66 @@ describe('VeniceClient', () => {
     const c = new VeniceClient(makeCfg())
     const r = await c.post<string>('/v1/text-only', {})
     assert.equal(r, 'plain text')
+  })
+
+  it('offers opt-in response metadata without changing existing body-only methods', async () => {
+    const c = new VeniceClient(makeCfg())
+    const r = await c.postWithMetadata<{ ok: boolean }>('/v1/metadata', {})
+    assert.equal(r.data.ok, true)
+    assert.equal(r.status, 200)
+    assert.equal(r.headers['x-venice-enhanced-prompt'], 'detailed%20prompt')
+  })
+
+  it('postMixed parses a JSON processing response', async () => {
+    const c = new VeniceClient(makeCfg())
+    const r = await c.postMixed<{ status: string; execution_duration: number }>('/v1/video/processing', {})
+    assert.equal(r.kind, 'json')
+    if (r.kind === 'json') {
+      assert.equal(r.data.status, 'PROCESSING')
+      assert.equal(r.data.execution_duration, 10_000)
+    }
+  })
+
+  it('postMixed preserves a completed video/mp4 response as binary', async () => {
+    const c = new VeniceClient(makeCfg())
+    const r = await c.postMixed('/v1/video/completed', {})
+    assert.equal(r.kind, 'binary')
+    if (r.kind === 'binary') {
+      assert.equal(r.contentType, 'video/mp4')
+      assert.equal(r.buffer.toString(), 'mp4-binary-data')
+    }
+  })
+
+  it('postMixed permits a binary response exactly at its byte limit', async () => {
+    const c = new VeniceClient(makeCfg())
+    const r = await c.postMixed('/v1/video/exact-limit', {}, { maxBytes: 8 })
+    assert.equal(r.kind, 'binary')
+    if (r.kind === 'binary') assert.equal(r.buffer.length, 8)
+  })
+
+  it('postMixed rejects a binary response over its byte limit before buffering it', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMixed('/v1/video/over-limit', {}, { maxBytes: 8 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceResponseTooLargeError)
+        assert.equal(err.maxBytes, 8)
+        return true
+      },
+    )
+  })
+
+  it('postMixed times out when headers arrive but the streamed body stalls', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
+    await assert.rejects(
+      () => c.postMixed('/v1/video/stalled-body', {}, { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 504)
+        assert.match(err.message, /timed out after 30ms/)
+        return true
+      },
+    )
   })
 
   it('aborts on timeout and surfaces a 504 VeniceUpstreamError', async () => {

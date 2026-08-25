@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
@@ -145,25 +146,78 @@ const MAPPINGS: Mapping[] = [
   // image
   {
     tool: 'venice_image_generate',
-    args: { prompt: 'a cat' },
+    args: {
+      prompt: 'a cat',
+      aspect_ratio: '21:9-custom',
+      resolution: '2K-model-tier',
+      quality: 'high',
+      enhance_prompt: true,
+      style_references: [{ image: 'https://x/style.png', strength: 0.7 }],
+      enable_web_search: true,
+      disable_prompt_optimization_thinking: true,
+      variants: 3,
+      format: 'png',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/image/generate',
+    expectBodyContains: {
+      aspect_ratio: '21:9-custom',
+      resolution: '2K-model-tier',
+      quality: 'high',
+      enhance_prompt: true,
+      style_references: [{ image: 'https://x/style.png', strength: 0.7 }],
+      enable_web_search: true,
+      disable_prompt_optimization_thinking: true,
+      variants: 3,
+      format: 'png',
+    },
   },
   {
     tool: 'venice_image_edit',
-    args: { image_url: 'https://x/img.png', prompt: 'add hat' },
+    args: {
+      image_url: 'https://x/img.png',
+      prompt: 'add hat',
+      aspect_ratio: '7:3-model-specific',
+      enhance_prompt: true,
+      resolution: '4K-custom',
+      output_format: 'webp',
+      quality: 'medium',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/image/edit',
     // Real endpoint returns binary; tool uses postBinary. Body uses `image` (not `image_url`).
-    expectBodyContains: { image: 'https://x/img.png', prompt: 'add hat' },
+    expectBodyContains: {
+      image: 'https://x/img.png',
+      prompt: 'add hat',
+      aspect_ratio: '7:3-model-specific',
+      enhance_prompt: true,
+      resolution: '4K-custom',
+      output_format: 'webp',
+      quality: 'medium',
+    },
   },
   {
     tool: 'venice_image_multi_edit',
-    args: { image_urls: ['https://x/a.png', 'https://x/b.png'], prompt: 'merge' },
+    args: {
+      image_urls: ['https://x/a.png', 'https://x/b.png'],
+      prompt: 'merge',
+      aspect_ratio: '5:2-model-specific',
+      enhance_prompt: true,
+      resolution: '2K-custom',
+      output_format: 'jpeg',
+      quality: 'high',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/image/multi-edit',
     // Tool sends `images` (plural array), not `image_urls`.
-    expectBodyContains: { images: ['https://x/a.png', 'https://x/b.png'] },
+    expectBodyContains: {
+      images: ['https://x/a.png', 'https://x/b.png'],
+      aspect_ratio: '5:2-model-specific',
+      enhance_prompt: true,
+      resolution: '2K-custom',
+      output_format: 'jpeg',
+      quality: 'high',
+    },
   },
   {
     tool: 'venice_image_upscale',
@@ -188,16 +242,39 @@ const MAPPINGS: Mapping[] = [
   // video
   {
     tool: 'venice_video_generate',
-    args: { prompt: 'a sunset' },
+    args: {
+      prompt: 'a sunset',
+      model: 'seedance-2-0-reference-to-video',
+      consents: {
+        seedance: {
+          confirmed_terms_and_privacy: true,
+          confirmed_legal_right: true,
+          confirmed_screening_acknowledged: true,
+        },
+      },
+    },
     expectMethod: 'POST',
     expectPath: '/v1/video/queue',
+    expectBodyContains: {
+      consents: {
+        seedance: {
+          confirmed_terms_and_privacy: true,
+          confirmed_legal_right: true,
+          confirmed_screening_acknowledged: true,
+        },
+      },
+    },
   },
   {
     tool: 'venice_video_status',
     args: { queue_id: 'vid-123', model: 'veo3.1-fast-text-to-video' },
     expectMethod: 'POST', // ← critical: NOT GET
     expectPath: '/v1/video/retrieve',
-    expectBodyContains: { queue_id: 'vid-123', model: 'veo3.1-fast-text-to-video' },
+    expectBodyContains: {
+      queue_id: 'vid-123',
+      model: 'veo3.1-fast-text-to-video',
+      delete_media_on_completion: false,
+    },
   },
   {
     tool: 'venice_video_complete',
@@ -246,9 +323,30 @@ const MAPPINGS: Mapping[] = [
   // music (audio/queue + audio/retrieve + audio/complete)
   {
     tool: 'venice_music_generate',
-    args: { prompt: 'jazz' },
+    args: {
+      prompt: 'jazz',
+      model: 'elevenlabs-music',
+      duration_seconds: '60',
+      force_instrumental: true,
+      lyrics_prompt: 'City lights',
+      lyrics_optimizer: false,
+      loop: true,
+      voice: 'Aria',
+      language_code: 'en',
+      speed: 1.25,
+    },
     expectMethod: 'POST',
     expectPath: '/v1/audio/queue',
+    expectBodyContains: {
+      duration_seconds: '60',
+      force_instrumental: true,
+      lyrics_prompt: 'City lights',
+      lyrics_optimizer: false,
+      loop: true,
+      voice: 'Aria',
+      language_code: 'en',
+      speed: 1.25,
+    },
   },
   {
     tool: 'venice_music_status',
@@ -304,6 +402,7 @@ const MAPPINGS: Mapping[] = [
 
   // catalog
   { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models' },
+  { tool: 'venice_list_models', args: { type: 'video' }, expectMethod: 'GET', expectPath: '/v1/models?type=video' },
 
   // characters
   { tool: 'venice_list_characters', args: {}, expectMethod: 'GET', expectPath: '/v1/characters' },
@@ -389,11 +488,245 @@ describe('tool output shaping', () => {
     assert.equal((r.structuredContent as { id: string }).id, 'stub-img-id')
   })
 
-  it('venice_video_status returns COMPLETED + URL when ready', async () => {
+  it('venice_image_generate returns every Venice images[] variant', async () => {
+    const variants = ['dmFyaWFudC0x', 'dmFyaWFudC0y', 'dmFyaWFudC0z']
+    const stub = new StubClient({
+      '/v1/image/generate': () => ({
+        __stubResponse: true,
+        data: { id: 'variants', images: variants },
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_image_generate')!.handler({
+      prompt: 'three scenes',
+      variants: 3,
+    } as never)
+
+    const images = r.content.filter((item) => item.type === 'image') as Array<{ data: string }>
+    assert.deepEqual(images.map((image) => image.data), variants)
+    assert.equal((r.structuredContent as { count: number }).count, 3)
+  })
+
+  it('venice_image_generate returns every usable OpenAI data[] variant', async () => {
+    const stub = new StubClient({
+      '/v1/image/generate': () => ({
+        __stubResponse: true,
+        data: {
+          id: 'openai-variants',
+          data: [
+            { url: 'https://x/one.png' },
+            { b64_json: 'dmFyaWFudC10d28=' },
+            { url: 'https://x/three.png' },
+          ],
+        },
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_image_generate')!.handler({
+      prompt: 'three scenes',
+      variants: 3,
+    } as never)
+
+    const media = r.content.filter((item) => item.type === 'image' || item.type === 'resource_link')
+    assert.equal(media.length, 3)
+    assert.equal(media[0].type, 'resource_link')
+    assert.equal(media[1].type, 'image')
+    assert.equal(media[2].type, 'resource_link')
+    assert.equal((r.structuredContent as { count: number }).count, 3)
+  })
+
+  it('venice_video_status returns a completed MP4 as an embedded MCP blob resource', async () => {
+    const mp4 = Buffer.from('mock-mp4-bytes')
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({
+        kind: 'binary',
+        buffer: mp4,
+        contentType: 'video/mp4',
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'x',
+      model: 'm',
+    } as never)
+    assert.equal((r.structuredContent as { status: string }).status, 'COMPLETED')
+    const resource = r.content.find((c) => c.type === 'resource') as {
+      type: 'resource'
+      resource: { mimeType: string; blob: string }
+    } | undefined
+    assert.equal(resource?.resource.mimeType, 'video/mp4')
+    assert.equal(resource?.resource.blob, mp4.toString('base64'))
+  })
+
+  it('venice_video_status returns a JSON completed download_url as a resource link', async () => {
     const { get } = setup()
     const r = await get('venice_video_status').handler({ queue_id: 'x', model: 'm' } as never)
     assert.equal((r.structuredContent as { status: string }).status, 'COMPLETED')
     assert.equal((r.structuredContent as { url: string }).url, 'https://stub/v.mp4')
+    assert.equal((r.structuredContent as { representation: string }).representation, 'download_url resource link')
+    const link = r.content.find((c) => c.type === 'resource_link') as { uri: string; mimeType?: string } | undefined
+    assert.equal(link?.uri, 'https://stub/v.mp4')
+    assert.equal(link?.mimeType, 'video/mp4')
+  })
+
+  it('venice_video_status fails JSON COMPLETED responses that omit a download URL', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'x',
+      model: 'm',
+    } as never)
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /download_url/)
+  })
+
+  it('venice_video_status uses the queue-time download_url when retrieve omits one', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-1',
+      model: 'grok-imagine-text-to-video-private',
+      download_url: 'https://private-share.venice.ai/v1/share/read/abc',
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { status: string }).status, 'COMPLETED')
+    assert.equal(
+      (r.structuredContent as { url: string }).url,
+      'https://private-share.venice.ai/v1/share/read/abc',
+    )
+    const retrieveBody = stub.calls.find((call) => call.path === '/v1/video/retrieve')!.body as Record<string, unknown>
+    assert.equal(retrieveBody.download_url, undefined)
+    assert.equal(retrieveBody.queue_id, 'vps-1')
+    assert.equal(retrieveBody.model, 'grok-imagine-text-to-video-private')
+  })
+
+  it('venice_video_status reuses a queue-time URL remembered from generate', async () => {
+    const stub = new StubClient({
+      '/v1/video/queue': () => ({
+        model: 'grok-imagine-text-to-video-private',
+        queue_id: 'vps-remember',
+        download_url: 'https://private-share.venice.ai/v1/share/read/remembered',
+      }),
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({
+      prompt: 'a gondola',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-remember',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    assert.equal(r.isError, undefined)
+    assert.equal(
+      (r.structuredContent as { url: string }).url,
+      'https://private-share.venice.ai/v1/share/read/remembered',
+    )
+  })
+
+  it('venice_video_generate evicts the oldest remembered queue URL instead of growing forever', async () => {
+    let queued = 0
+    const stub = new StubClient({
+      '/v1/video/queue': () => {
+        queued += 1
+        return {
+          model: 'grok-imagine-text-to-video-private',
+          queue_id: `vps-bulk-${queued}`,
+          download_url: `https://private-share.venice.ai/v1/share/read/${queued}`,
+        }
+      },
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const generate = tools.find((t) => t.name === 'venice_video_generate')!
+    const status = tools.find((t) => t.name === 'venice_video_status')!
+    for (let i = 0; i < 1001; i += 1) {
+      await generate.handler({ prompt: 'a gondola', model: 'grok-imagine-text-to-video-private' } as never)
+    }
+
+    const evicted = await status.handler({
+      queue_id: 'vps-bulk-1',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    assert.equal(evicted.isError, true)
+
+    const newest = await status.handler({
+      queue_id: `vps-bulk-${queued}`,
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    assert.equal(newest.isError, undefined)
+    assert.equal(
+      (newest.structuredContent as { url: string }).url,
+      `https://private-share.venice.ai/v1/share/read/${queued}`,
+    )
+  })
+
+  it('venice_video_status ignores a caller download_url that is not a Venice host', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-1',
+      model: 'grok-imagine-text-to-video-private',
+      download_url: 'https://evil.example/payload.mp4',
+    } as never)
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /download_url/)
+  })
+
+  it('venice_video_generate tells the host to pass queue-time download_url into status', async () => {
+    const stub = new StubClient({
+      '/v1/video/queue': () => ({
+        model: 'grok-imagine-text-to-video-private',
+        queue_id: 'vps-1',
+        download_url: 'https://private-share.venice.ai/v1/share/read/abc',
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_generate')!.handler({
+      prompt: 'a gondola',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /venice_video_status/)
+    assert.match(text, /download_url/)
+    assert.equal(
+      (r.structuredContent as { download_url?: string }).download_url,
+      'https://private-share.venice.ai/v1/share/read/abc',
+    )
+  })
+
+  it('venice_video_status defers requested deletion until after MP4 buffering', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({
+        kind: 'binary',
+        buffer: Buffer.from('mock-mp4'),
+        contentType: 'video/mp4',
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'delete-after-buffer',
+      model: 'm',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(
+      (stub.calls.find((call) => call.path === '/v1/video/retrieve')!.body as {
+        delete_media_on_completion: boolean
+      }).delete_media_on_completion,
+      false,
+    )
+    assert.ok(stub.calls.some((call) => call.path === '/v1/video/complete'))
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, true)
   })
 
   it('venice_video_status returns PROCESSING progress when not ready', async () => {
@@ -429,10 +762,132 @@ describe('tool output shaping', () => {
   })
 
   it('venice_list_models filters by capability type', async () => {
-    const { get } = setup()
+    const stub = new StubClient({
+      '/v1/models?type=image': () => ({ data: [{ id: 'flux-2-pro' }] }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const get = (name: string) => tools.find((t) => t.name === name)!
     const r = await get('venice_list_models').handler({ type: 'image' } as never)
-    assert.equal((r.structuredContent as { count: number; total: number }).total, 3)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
+    assert.equal((r.structuredContent as { count: number; total: number }).total, 1)
     assert.equal((r.structuredContent as { count: number }).count, 1)
+  })
+
+  it('venice_list_models does not truncate a server-filtered catalog', async () => {
+    const models = Array.from({ length: 101 }, (_, index) => ({ id: `video-${index}` }))
+    const stub = new StubClient({
+      '/v1/models?type=video': () => ({ data: models }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_list_models')!.handler({ type: 'video' } as never)
+
+    assert.equal((r.structuredContent as { count: number }).count, 101)
+    assert.equal((JSON.parse((r.content[0] as { text: string }).text) as unknown[]).length, 101)
+  })
+
+  it('venice_music_generate accepts model-defined lyrics_prompt lengths', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_music_generate').inputSchema)
+    const longLyrics = 'la'.repeat(3_000)
+    const parsed = schema.parse({
+      prompt: 'song',
+      model: 'lyrics-model',
+      lyrics_prompt: longLyrics,
+    })
+    assert.equal(parsed.lyrics_prompt, longLyrics)
+  })
+
+  it('venice_video_status returns retry-safe guidance for an oversized MP4', async () => {
+    const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => {
+        throw new VeniceResponseTooLargeError('/v1/video/retrieve', 1024)
+      },
+    })
+    const tools = buildTools(stub.asClient(), { ...cfg, maxVideoResponseBytes: 1024 })
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'still-queued',
+      model: 'video-model',
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal((r.structuredContent as { retry_safe: boolean }).retry_safe, true)
+    assert.equal((r.structuredContent as { queue_id: string }).queue_id, 'still-queued')
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /same queue_id/)
+    assert.match(text, /VENICE_MAX_VIDEO_RESPONSE_BYTES/)
+    assert.match(text, /not deleted/)
+  })
+
+  it('image tools surface URL-decoded enhanced prompts from response headers', async () => {
+    const stub = new StubClient({
+      '/v1/image/generate': () => ({
+        __stubResponse: true,
+        data: { id: 'enhanced', images: ['cG5n'] },
+        headers: { 'x-venice-enhanced-prompt': 'a%20more%20detailed%20prompt' },
+      }),
+      '/v1/image/edit': () => ({
+        buffer: Buffer.from('edited'),
+        contentType: 'image/png',
+        headers: { 'x-venice-enhanced-prompt': 'make%20it%20winter' },
+      }),
+      '/v1/image/multi-edit': () => ({
+        buffer: Buffer.from('multi-edited'),
+        contentType: 'image/png',
+        headers: { 'x-venice-enhanced-prompt': 'unified%20winter%20scene' },
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const get = (name: string) => tools.find((t) => t.name === name)!
+
+    const generated = await get('venice_image_generate').handler({ prompt: 'scene', enhance_prompt: true } as never)
+    assert.equal((generated.structuredContent as { enhanced_prompt: string }).enhanced_prompt, 'a more detailed prompt')
+
+    const edited = await get('venice_image_edit').handler({
+      image_url: 'https://x/img.png',
+      prompt: 'winter',
+      enhance_prompt: true,
+    } as never)
+    assert.equal((edited.structuredContent as { enhanced_prompt: string }).enhanced_prompt, 'make it winter')
+
+    const multiEdited = await get('venice_image_multi_edit').handler({
+      image_urls: ['https://x/a.png'],
+      prompt: 'winter',
+      enhance_prompt: true,
+    } as never)
+    assert.equal((multiEdited.structuredContent as { enhanced_prompt: string }).enhanced_prompt, 'unified winter scene')
+  })
+
+  it('venice_video_generate returns Seedance consent policy and explicit next step', async () => {
+    const stub = new StubClient({
+      '/v1/video/queue': async () => {
+        const { VeniceUpstreamError } = await import('../src/types.js')
+        throw new VeniceUpstreamError({
+          message: 'consent required',
+          status: 409,
+          body: {
+            error: { code: 'needs_consent', message: 'Seedance consent is required.' },
+            consent_flow: 'seedance',
+            face_media_roles: ['reference_image'],
+            consent: { consent_version: 'v2.0', policy_text: 'You have legal consent for every depicted person.' },
+            docs_url: 'https://docs.venice.ai/guides/media/seedance-face-consent',
+          },
+        })
+      },
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_generate')!.handler({
+      prompt: 'animate',
+      model: 'seedance-2-0-reference-to-video',
+      reference_image_urls: ['https://x/person.png'],
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal((r.structuredContent as { status: string }).status, 'needs_consent')
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /legal consent/)
+    assert.match(text, /Only after the user explicitly confirms/)
+    assert.match(text, /all set to true/)
   })
 
   it('x402 wallet helper tools request SIWX auth override', async () => {
@@ -476,5 +931,17 @@ describe('tool output shaping', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+})
+
+describe('x402 top-up discovery auth', () => {
+  it('posts an empty unauthenticated body so a configured API key is not forwarded', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
+    await tool.handler({ wallet_address: `0x${'a'.repeat(40)}` } as never)
+    const call = stub.calls.at(-1)
+    assert.equal(call?.path, '/v1/x402/top-up')
+    assert.deepEqual(call?.body, {})
+    assert.equal(call?.auth, 'none')
   })
 })

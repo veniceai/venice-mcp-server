@@ -37,8 +37,31 @@ export class StubClient {
   get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
     return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
-  post<T>(path: string, json: unknown) {
-    return this.dispatch<T>({ method: 'POST', path, body: json })
+  post<T>(path: string, json: unknown, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
+    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
+  }
+  async postWithMetadata<T>(path: string, json: unknown) {
+    const output = await this.dispatch<T | {
+      __stubResponse: true
+      data: T
+      headers?: Record<string, string>
+      contentType?: string
+      status?: number
+    }>({ method: 'POST', path, body: json })
+    if (output && typeof output === 'object' && '__stubResponse' in output) {
+      return {
+        data: output.data,
+        status: output.status ?? 200,
+        contentType: output.contentType ?? 'application/json',
+        headers: output.headers ?? {},
+      }
+    }
+    return {
+      data: output as T,
+      status: 200,
+      contentType: 'application/json',
+      headers: {},
+    }
   }
   /**
    * Stub for postBinary. Tool calls expecting binary back get a synthetic
@@ -47,7 +70,7 @@ export class StubClient {
   async postBinary(
     path: string,
     init: { json?: unknown; method?: string; form?: unknown },
-  ): Promise<{ buffer: Buffer; contentType: string }> {
+  ): Promise<{ buffer: Buffer; status: number; contentType: string; headers: Record<string, string> }> {
     const body = (init as { json?: unknown }).json
     const isMultipart = (init as { form?: unknown }).form !== undefined
     this.calls.push({
@@ -57,9 +80,73 @@ export class StubClient {
       multipart: isMultipart,
       binary: true,
     })
+    const matchKey = Object.keys(this.overrides).find((k) => path.startsWith(k))
+    if (matchKey) {
+      const output = await this.overrides[matchKey](this.calls.at(-1)!)
+      if (output && typeof output === 'object' && 'buffer' in output) {
+        const response = output as {
+          buffer: Buffer
+          status?: number
+          contentType?: string
+          headers?: Record<string, string>
+        }
+        return {
+          buffer: response.buffer,
+          status: response.status ?? 200,
+          contentType: response.contentType ?? 'application/octet-stream',
+          headers: response.headers ?? {},
+        }
+      }
+    }
     return {
       buffer: Buffer.from('stub-binary-image-data'),
+      status: 200,
       contentType: 'image/png',
+      headers: {},
+    }
+  }
+  async postMixed<T>(path: string, json: unknown): Promise<
+    | { kind: 'json'; data: T; status: number; contentType: string; headers: Record<string, string> }
+    | { kind: 'binary'; buffer: Buffer; status: number; contentType: string; headers: Record<string, string> }
+  > {
+    const call: StubCall = { method: 'POST', path, body: json, binary: true }
+    const data = await this.dispatch<T | {
+      kind: 'json'
+      data: T
+      status?: number
+      contentType?: string
+      headers?: Record<string, string>
+    } | {
+      kind: 'binary'
+      buffer: Buffer
+      status?: number
+      contentType?: string
+      headers?: Record<string, string>
+    }>(call)
+    if (data && typeof data === 'object' && 'kind' in data) {
+      if (data.kind === 'binary') {
+        return {
+          kind: 'binary',
+          buffer: data.buffer,
+          status: data.status ?? 200,
+          contentType: data.contentType ?? 'application/octet-stream',
+          headers: data.headers ?? {},
+        }
+      }
+      return {
+        kind: 'json',
+        data: data.data,
+        status: data.status ?? 200,
+        contentType: data.contentType ?? 'application/json',
+        headers: data.headers ?? {},
+      }
+    }
+    return {
+      kind: 'json',
+      data: data as T,
+      status: 200,
+      contentType: 'application/json',
+      headers: {},
     }
   }
   /** Stub for postMultipart — returns canned JSON like normal POST. */
