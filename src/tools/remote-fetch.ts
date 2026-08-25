@@ -87,7 +87,7 @@ async function resolveValidRemoteAddresses(url: URL, lookupAddresses: LookupAddr
     throw new Error(`Refusing to fetch URL with unsupported scheme: ${url.protocol}`)
   }
 
-  const hostname = url.hostname.toLowerCase()
+  const hostname = stripIpv6Brackets(url.hostname.toLowerCase())
   if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
     throw new Error(`Refusing to fetch local hostname: ${url.hostname}`)
   }
@@ -308,10 +308,14 @@ function startsWithAscii(buffer: Buffer, value: string): boolean {
   return buffer.subarray(0, value.length).toString('ascii') === value
 }
 
+function stripIpv6Brackets(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+}
+
 function isBlockedIp(address: string): boolean {
-  const version = isIP(address)
+  const version = isIP(stripIpv6Brackets(address))
   if (version === 4) return isBlockedIpv4(address)
-  if (version === 6) return isBlockedIpv6(address)
+  if (version === 6) return isBlockedIpv6(stripIpv6Brackets(address))
   return true
 }
 
@@ -335,9 +339,20 @@ function isBlockedIpv4(address: string): boolean {
 }
 
 function isBlockedIpv6(address: string): boolean {
-  const normalized = address.toLowerCase()
-  const mappedIpv4 = normalized.match(/(?:::ffff:)?(\d+\.\d+\.\d+\.\d+)$/)?.[1]
-  if (mappedIpv4 && isBlockedIpv4(mappedIpv4)) return true
+  const normalized = address.toLowerCase().split('%')[0]
+  if (ipv4sFromEmbeddings(normalized).some(isBlockedIpv4)) return true
+
+  const groups = expandIpv6Groups(normalized)
+  if (groups) {
+    const [g0] = groups
+    const isUnspecifiedOrLoopback = groups[0] === 0 && groups.slice(1, 7).every((group) => group === 0) && groups[7] <= 1
+    if (isUnspecifiedOrLoopback) return true
+    if ((g0 & 0xfe00) === 0xfc00) return true // unique local fc00::/7
+    if ((g0 & 0xffc0) === 0xfe80) return true // link-local fe80::/10
+    if ((g0 & 0xffc0) === 0xfec0) return true // deprecated site-local fec0::/10
+    if ((g0 & 0xff00) === 0xff00) return true // multicast ff00::/8
+    return false
+  }
 
   return (
     normalized === '::' ||
@@ -348,6 +363,103 @@ function isBlockedIpv6(address: string): boolean {
     normalized.startsWith('fe9') ||
     normalized.startsWith('fea') ||
     normalized.startsWith('feb') ||
+    normalized.startsWith('fec') ||
     normalized.startsWith('ff')
   )
+}
+
+function ipv4FromHextets(high: number, low: number): string {
+  return `${(high >> 8) & 0xff}.${high & 0xff}.${(low >> 8) & 0xff}.${low & 0xff}`
+}
+
+/**
+ * Decode IPv4 carried inside IPv6 translation / tunneling forms.
+ * Public embeddings stay allowed; private extracted IPv4s are blocked by the caller.
+ */
+function ipv4sFromEmbeddings(address: string): string[] {
+  const found = new Set<string>()
+  const dotted = address.match(/(\d+\.\d+\.\d+\.\d+)$/)?.[1]
+  if (dotted) found.add(dotted)
+
+  const groups = expandIpv6Groups(address)
+  if (!groups) return [...found]
+
+  const last32 = ipv4FromHextets(groups[6], groups[7])
+  const first96Zero = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0
+  const isMapped = first96Zero && groups[5] === 0xffff
+  const isCompatible = first96Zero && groups[5] === 0
+  const isTranslated = groups[0] === 0 && groups[1] === 0 && groups[2] === 0 && groups[3] === 0 && groups[4] === 0xffff && groups[5] === 0
+  const isWellKnownNat64 =
+    groups[0] === 0x64 &&
+    groups[1] === 0xff9b &&
+    groups[2] === 0 &&
+    groups[3] === 0 &&
+    groups[4] === 0 &&
+    groups[5] === 0
+  const isLocalUseNat64 = groups[0] === 0x64 && groups[1] === 0xff9b && groups[2] === 0x1
+  const is6to4 = groups[0] === 0x2002
+  const isTeredo = groups[0] === 0x2001 && groups[1] === 0
+  const isIsatap = groups[5] === 0x5efe
+
+  if (isMapped || isCompatible || isTranslated || isWellKnownNat64 || isIsatap) found.add(last32)
+  if (is6to4) found.add(ipv4FromHextets(groups[1], groups[2]))
+  if (isTeredo) {
+    found.add(
+      `${(groups[6] >> 8) ^ 0xff}.${(groups[6] & 0xff) ^ 0xff}.${(groups[7] >> 8) ^ 0xff}.${(groups[7] & 0xff) ^ 0xff}`,
+    )
+  }
+  if (isLocalUseNat64) {
+    found.add(last32)
+    for (const ipv4 of ipv4sFromRfc6052Layouts(groups)) found.add(ipv4)
+  }
+
+  return [...found]
+}
+
+/**
+ * RFC 6052 puts IPv4 at a different offset per prefix length, and RFC 8215 reserves
+ * local-use 64:ff9b:1::/48 so operators can carve /56 and /64 translators out of it.
+ * Every layout is decoded and the u octet (bits 64-71) is not required to be zero, so
+ * a malformed address cannot carry a private destination past the check. A candidate
+ * starting at 0 means the wrong offset was read: 0.0.0.0/8 is never a real destination.
+ */
+function ipv4sFromRfc6052Layouts(groups: number[]): string[] {
+  const hi = (group: number) => (group >> 8) & 0xff
+  const lo = (group: number) => group & 0xff
+  return [
+    `${hi(groups[3])}.${lo(groups[3])}.${lo(groups[4])}.${hi(groups[5])}`, // /48
+    `${lo(groups[3])}.${lo(groups[4])}.${hi(groups[5])}.${lo(groups[5])}`, // /56
+    `${lo(groups[4])}.${hi(groups[5])}.${lo(groups[5])}.${hi(groups[6])}`, // /64
+  ].filter((ipv4) => !ipv4.startsWith('0.'))
+}
+
+function expandIpv6Groups(address: string): number[] | undefined {
+  let hex = address
+  const dotted = address.match(/:(\d+\.\d+\.\d+\.\d+)$/)
+  if (dotted) {
+    const parts = dotted[1].split('.').map((part) => Number(part))
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) {
+      return undefined
+    }
+    const hi = ((parts[0] << 8) | parts[1]).toString(16)
+    const lo = ((parts[2] << 8) | parts[3]).toString(16)
+    hex = `${address.slice(0, -dotted[1].length)}${hi}:${lo}`
+  } else if (address.includes('.')) {
+    return undefined
+  }
+
+  const [head, tail] = hex.split('::')
+  const parse = (part: string | undefined) =>
+    part ? part.split(':').filter(Boolean).map((group) => Number.parseInt(group, 16)) : []
+  if (tail === undefined) {
+    const groups = parse(head)
+    return groups.length === 8 && groups.every(Number.isInteger) ? groups : undefined
+  }
+  const left = parse(head)
+  const right = parse(tail)
+  const missing = 8 - left.length - right.length
+  if (missing < 0 || left.some((n) => !Number.isInteger(n)) || right.some((n) => !Number.isInteger(n))) {
+    return undefined
+  }
+  return [...left, ...Array<number>(missing).fill(0), ...right]
 }
