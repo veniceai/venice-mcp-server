@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **31 tools across all modalities, one config block.**
+Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **34 tools across all modalities, one config block.**
 
 ## Quick start
 
@@ -36,7 +36,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**31 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**34 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
 
 ### 💬 Chat & embeddings
 
@@ -98,13 +98,16 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | Tool | Description |
 |---|---|
 | `venice_list_models` | List the live model catalog with capabilities and prices. |
-| `venice_list_characters` | List public Venice characters. |
+| `venice_list_characters` | List public Venice characters with search, tag/category/model, content, capability, sort, and pagination filters. API key only. |
+| `venice_get_character` | Get a public character by slug. API key only. |
+| `venice_character_reviews` | List paginated public reviews for a character. API key only. |
 
 ### ⛓️ Crypto
 
 | Tool | Description |
 |---|---|
-| `venice_crypto_rpc` | Proxy a JSON-RPC call to a supported blockchain network (`eth_call`, `eth_blockNumber`, …). Supports Base, Ethereum, Polygon, Arbitrum, Optimism. |
+| `venice_crypto_networks` | List the live network slugs supported by the crypto RPC proxy. No authentication required. |
+| `venice_crypto_rpc` | Proxy one JSON-RPC request or a batch of up to 100 requests. Transaction broadcasts require `idempotency_key`. |
 
 ### 💳 x402 wallet helpers
 
@@ -215,7 +218,9 @@ Some Venice endpoints don't accept both auth modes:
 
 | Tool | API key | x402 | Notes |
 |---|---|---|---|
-| `venice_list_characters` | ✓ | ✗ | Characters endpoint is API-key only |
+| `venice_list_characters` | ✓ | ✗ | Character discovery endpoint is API-key only |
+| `venice_get_character` | ✓ | ✗ | Character discovery endpoint is API-key only |
+| `venice_character_reviews` | ✓ | ✗ | Character discovery endpoint is API-key only |
 | `venice_x402_balance` | ✗ | ✓ | Wallet-bound by design |
 | `venice_x402_transactions` | ✗ | ✓ | Wallet-bound by design |
 | `venice_x402_top_up_info` | ✓ | ✓ | Auth-free; same 402 response in both modes |
@@ -231,7 +236,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 31 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 34 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -287,12 +292,15 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_image_styles` | `GET /v1/image/styles` |
 | `venice_audio_quote` | `POST /v1/audio/quote` |
 | `venice_video_quote` | `POST /v1/video/quote` |
+| `venice_crypto_networks` | `GET /v1/crypto/rpc/networks` |
 
 ### Characters (API key only)
 
 | Tool | Endpoint |
 |---|---|
 | `venice_list_characters` | `GET /v1/characters` |
+| `venice_get_character` | `GET /v1/characters/:slug` |
+| `venice_character_reviews` | `GET /v1/characters/:slug/reviews` |
 | `venice_chat_with_character` | `POST /v1/chat/completions` (with `character_slug`) |
 
 ### x402 wallet helpers (SIWX only)
@@ -324,7 +332,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # 31 tool registry + endpoint+method+body mappings
+├── tools.test.ts              # 34 tool registry + endpoint+method+body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub
@@ -347,7 +355,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 31 tools × both auth modes, side-by-side report
+# Comprehensive — all 34 tools × both auth modes, side-by-side report
 VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 

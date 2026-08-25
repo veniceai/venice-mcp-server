@@ -5,7 +5,7 @@ export interface StubCall {
   path: string
   body?: unknown
   headers?: Record<string, string>
-  auth?: 'default' | 'siwx' | 'none'
+  auth?: 'default' | 'apiKey' | 'siwx' | 'none'
   /** Whether this call went through postMultipart (FormData body) instead of JSON. */
   multipart?: boolean
   /** Whether this call went through postBinary (binary response expected). */
@@ -37,8 +37,8 @@ export class StubClient {
   get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
     return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
-  post<T>(path: string, json: unknown) {
-    return this.dispatch<T>({ method: 'POST', path, body: json })
+  post<T>(path: string, json: unknown, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
+    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
   }
   /**
    * Stub for postBinary. Tool calls expecting binary back get a synthetic
