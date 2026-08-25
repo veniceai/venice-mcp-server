@@ -101,6 +101,25 @@ const fail = (text: string, structured?: Record<string, unknown>): ToolResult =>
   ...(structured ? { structuredContent: structured } : {}),
 })
 
+const QUEUE_DOWNLOAD_URL_TTL_MS = 24 * 60 * 60 * 1000
+const queueDownloadUrls = new Map<string, { url: string; expiresAt: number }>()
+
+function rememberQueueDownloadUrl(queueId: string, url: string | undefined): void {
+  const trusted = trustedQueueDownloadUrl(url)
+  if (!trusted) return
+  queueDownloadUrls.set(queueId, { url: trusted, expiresAt: Date.now() + QUEUE_DOWNLOAD_URL_TTL_MS })
+}
+
+function rememberedQueueDownloadUrl(queueId: string): string | undefined {
+  const entry = queueDownloadUrls.get(queueId)
+  if (!entry) return undefined
+  if (entry.expiresAt <= Date.now()) {
+    queueDownloadUrls.delete(queueId)
+    return undefined
+  }
+  return entry.url
+}
+
 /** Caller-supplied queue URLs must be Venice HTTPS hosts. Retrieve URLs come from Venice and are not re-checked here. */
 function trustedQueueDownloadUrl(value: string | undefined): string | undefined {
   if (!value) return undefined
@@ -589,9 +608,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned by Venice.')
+          rememberQueueDownloadUrl(id, resp.download_url)
           return ok(
             `Queued: queue_id=${id}, model=${resp.model}\n` +
-              'Poll with venice_video_status using queue_id, model, and download_url from structuredContent. Do not invent a download_url.',
+              'Poll with venice_video_status using queue_id and model. This process remembers download_url; pass it from structuredContent only if another process will poll. Do not invent a download_url.',
             { queue_id: id, model: resp.model, download_url: resp.download_url }
           )
         } catch (err) {
@@ -623,12 +643,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_status',
       title: 'Venice Video Retrieve / Status',
-      description: `Check status of a queued video job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 video/mp4 MCP resource or a download_url resource link. For VPS / Grok Imagine Private models, pass the queue-time download_url — retrieve returns COMPLETED JSON without a URL. POST endpoint with body {model, queue_id}.${X402_OK}`,
+      description: `Check status of a queued video job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 video/mp4 MCP resource or a download_url resource link. For VPS / Grok Imagine Private models, retrieve returns COMPLETED JSON without a URL: this process reuses the queue-time download_url when venice_video_generate ran here, or accepts a Venice-host download_url argument. POST endpoint with body {model, queue_id}.${X402_OK}`,
       inputSchema: {
         queue_id: z.string().min(1).describe('Returned by venice_video_generate.'),
         model: z.string().min(1).describe('Same model id used to queue.'),
         download_url: z.string().url().optional().describe(
-          'Queue-time download_url from venice_video_generate. Must be an https Venice host. Required for VPS / Grok Imagine Private models: retrieve returns COMPLETED without a URL.',
+          'Queue-time download_url from venice_video_generate. Must be an https Venice host. Needed for VPS / Grok Imagine Private only when this process did not queue the job (retrieve returns COMPLETED without a URL).',
         ),
         delete_media_on_completion: z.boolean().optional(),
       },
@@ -694,7 +714,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             }
           }
           const resp = response.data
-          const url = resp.download_url ?? resp.url ?? trustedQueueDownloadUrl(queueDownloadUrl)
+          const url =
+            resp.download_url ??
+            resp.url ??
+            rememberedQueueDownloadUrl(args.queue_id) ??
+            trustedQueueDownloadUrl(queueDownloadUrl)
           if (resp.status === 'COMPLETED') {
             if (!url) {
               return fail(

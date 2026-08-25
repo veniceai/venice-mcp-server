@@ -605,6 +605,31 @@ describe('tool output shaping', () => {
     assert.equal(retrieveBody.model, 'grok-imagine-text-to-video-private')
   })
 
+  it('venice_video_status reuses a queue-time URL remembered from generate', async () => {
+    const stub = new StubClient({
+      '/v1/video/queue': () => ({
+        model: 'grok-imagine-text-to-video-private',
+        queue_id: 'vps-remember',
+        download_url: 'https://private-share.venice.ai/v1/share/read/remembered',
+      }),
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({
+      prompt: 'a gondola',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-remember',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    assert.equal(r.isError, undefined)
+    assert.equal(
+      (r.structuredContent as { url: string }).url,
+      'https://private-share.venice.ai/v1/share/read/remembered',
+    )
+  })
+
   it('venice_video_status ignores a caller download_url that is not a Venice host', async () => {
     const stub = new StubClient({
       '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
