@@ -173,7 +173,7 @@ export class VeniceClient {
    * Caller passes a pre-built `FormData` instance; this helper wires up auth
    * headers and surfaces the upstream response identically to `post`.
    */
-  async postMultipart<T = unknown>(path: string, form: FormData, opts: { timeoutMs?: number } = {}): Promise<T> {
+  async postMultipart<T = unknown>(path: string, form: FormData, opts: { timeoutMs?: number; maxBytes?: number } = {}): Promise<T> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       Accept: 'application/json',
@@ -201,6 +201,30 @@ export class VeniceClient {
     }
     clearTimeout(timeout)
 
+    if (opts.maxBytes !== undefined) {
+      const buffer = await readBoundedResponseBuffer(res, path, opts.maxBytes)
+      const contentType = res.headers.get('content-type') ?? ''
+      let body: unknown
+      const text = buffer.toString('utf8')
+      if (contentType.includes('application/json')) {
+        try {
+          body = text ? JSON.parse(text) : {}
+        } catch {
+          body = {}
+        }
+      } else {
+        body = text
+      }
+      if (!res.ok) {
+        throw new VeniceUpstreamError({
+          message: `Venice ${res.status} on ${path}`,
+          status: res.status,
+          body,
+          headers: responseHeaders(res),
+        })
+      }
+      return body as T
+    }
     return parseResponse<T>(res, path)
   }
 

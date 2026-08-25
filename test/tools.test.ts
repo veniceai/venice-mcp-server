@@ -811,6 +811,32 @@ describe('tool output shaping', () => {
     }
   })
 
+  it('venice_asr rejects an oversized timestamped transcription before echoing it', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })) as typeof fetch
+      const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => {
+          throw new VeniceResponseTooLargeError('/v1/audio/transcriptions', 1024 * 1024)
+        },
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        timestamps: true,
+      } as never)
+      assert.equal(r.isError, true)
+      assert.match((r.content[0] as { text: string }).text, /1 MiB/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('venice_list_models does not truncate a server-filtered catalog', async () => {
     const models = Array.from({ length: 101 }, (_, index) => ({ id: `video-${index}` }))
     const stub = new StubClient({

@@ -822,7 +822,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_asr',
       title: 'Venice ASR (Speech-to-Text)',
-      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload.${X402_OK}`,
+      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Timestamp arrays are paged in the MCP result. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory.${X402_OK}`,
       inputSchema: {
         audio_url: z.string().url(),
         model: z.string().optional(),
@@ -852,6 +852,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           >(
             '/v1/audio/transcriptions',
             form,
+            { maxBytes: 1024 * 1024 },
           )
           if (typeof resp === 'string') return ok(truncate(resp))
           const { text, structured } = boundAsrResult(
@@ -861,6 +862,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           )
           return ok(truncate(text), structured)
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) {
+            return fail(
+              'Transcription response exceeds 1 MiB. Disable timestamps or transcribe a shorter clip; timestamped word/character arrays are unbounded upstream.',
+            )
+          }
           return fail(formatToolError(err))
         }
       },
