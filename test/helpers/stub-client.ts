@@ -150,8 +150,17 @@ export class StubClient {
     }
   }
   /** Stub for postMultipart — returns canned JSON like normal POST. */
-  async postMultipart<T>(path: string): Promise<T> {
-    this.calls.push({ method: 'POST', path, body: '<FormData>', multipart: true })
+  async postMultipart<T>(path: string, form: FormData): Promise<T> {
+    this.calls.push({
+      method: 'POST',
+      path,
+      body: Object.fromEntries(form.entries()),
+      multipart: true,
+    })
+    const overrideKey = Object.keys(this.overrides).find((k) => path.startsWith(k))
+    if (overrideKey) {
+      return await this.overrides[overrideKey](this.calls.at(-1)!) as T
+    }
     return (defaultResponse(path, false) as T) ?? ({} as T)
   }
 
@@ -202,6 +211,29 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
   if (path.startsWith('/v1/augment/scrape')) return { markdown: '# stub' }
   if (path.startsWith('/v1/augment/text-parser')) return { text: 'parsed text' }
   if (path.startsWith('/v1/crypto/rpc')) return { jsonrpc: '2.0', result: '0x1', id: 1 }
+  if (path.startsWith('/v1/models/traits'))
+    return { data: { default: 'deepseek-v4-flash-0731' }, object: 'list', type: 'text' }
+  if (path.startsWith('/v1/models/compatibility_mapping'))
+    return { data: { 'gpt-4o': 'deepseek-v4-flash-0731' }, object: 'list', type: 'text' }
+  if (path.startsWith('/v1/models?type=tts'))
+    return {
+      data: [{
+        id: 'tts-live',
+        type: 'tts',
+        owned_by: 'venice.ai',
+        model_spec: {
+          name: 'Live TTS',
+          voices: ['voice-a', 'voice-b'],
+          default_voice: 'voice-a',
+          supports_custom_voice_id: true,
+          voice_cloning: { mode: 'persistent', accepted_formats: ['mp3'] },
+          supported_formats: ['mp3', 'wav'],
+          default_format: 'mp3',
+        },
+      }],
+      object: 'list',
+      type: 'tts',
+    }
   if (path.startsWith('/v1/models'))
     return {
       data: [

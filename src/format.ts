@@ -100,3 +100,72 @@ export function truncate(s: string, max = 8000): string {
   if (s.length <= max) return s
   return `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`
 }
+
+export const ASR_TIMESTAMP_DEFAULT_LIMIT = 200
+export const ASR_TIMESTAMP_MAX_LIMIT = 500
+
+const ASR_TIMESTAMP_ARRAY_KEYS = ['word', 'segment', 'char'] as const
+
+export interface AsrUpstreamBody {
+  text?: string
+  transcription?: string
+  duration?: number
+  timestamps?: unknown
+}
+
+/** Keep the transcript and a bounded page of timestamp arrays for MCP responses. */
+export function boundAsrResult(
+  resp: AsrUpstreamBody,
+  offset = 0,
+  limit = ASR_TIMESTAMP_DEFAULT_LIMIT,
+): { text: string; structured: Record<string, unknown> } {
+  const transcript = resp.text ?? resp.transcription ?? ''
+  const structured: Record<string, unknown> = {}
+  if (resp.text !== undefined) structured.text = truncate(resp.text)
+  else if (resp.transcription !== undefined) structured.text = truncate(resp.transcription)
+  if (resp.duration !== undefined) structured.duration = resp.duration
+  if (resp.timestamps !== undefined) Object.assign(structured, pageAsrTimestamps(resp.timestamps, offset, limit))
+  return { text: transcript || JSON.stringify(structured, null, 2), structured }
+}
+
+function pageAsrTimestamps(raw: unknown, offset: number, limit: number): Record<string, unknown> {
+  const meta = { timestamp_offset: offset, timestamp_limit: limit }
+
+  if (Array.isArray(raw)) {
+    return {
+      timestamps: raw.slice(offset, offset + limit),
+      ...meta,
+      timestamp_total: raw.length,
+      timestamps_truncated: offset > 0 || raw.length > offset + limit,
+    }
+  }
+
+  if (isObject(raw)) {
+    const timestamps: Record<string, unknown> = {}
+    const totals: Record<string, number> = {}
+    let pagedAny = false
+    let truncated = offset > 0
+
+    for (const key of ASR_TIMESTAMP_ARRAY_KEYS) {
+      const value = raw[key]
+      if (!Array.isArray(value)) continue
+      pagedAny = true
+      totals[key] = value.length
+      timestamps[key] = value.slice(offset, offset + limit)
+      if (value.length > offset + limit) truncated = true
+    }
+
+    if (pagedAny) {
+      return {
+        timestamps,
+        ...meta,
+        timestamp_total: totals,
+        timestamps_truncated: truncated,
+      }
+    }
+
+    return { ...meta, timestamps_omitted: true, timestamps_truncated: true }
+  }
+
+  return { ...meta, timestamps_omitted: true, timestamps_truncated: true }
+}
