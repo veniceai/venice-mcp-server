@@ -823,6 +823,39 @@ describe('tool output shaping', () => {
     assert.match((second.content[0] as { text: string }).text, /new challenge will not mint/)
   })
 
+  it('refuses a re-cased wallet address after an unknown mint outcome', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        throw new VeniceUpstreamError({
+          message: 'timeout',
+          status: 504,
+          body: { error: 'timeout' },
+        })
+      },
+    })
+    const mint = buildTools(stub.asClient(), cfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const first = await mint.handler({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'lost-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    const second = await mint.handler({
+      address: `0x${'A'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'fresh-challenge-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, true)
+    assert.equal(posts, 1)
+    assert.match((second.content[0] as { text: string }).text, /new challenge will not mint/)
+  })
+
   it('allows a corrected web3 mint after a definitive 4xx', async () => {
     resetWeb3MintAttemptStore()
     let posts = 0

@@ -32,8 +32,13 @@ export function isUnknownMintOutcome(err: unknown): boolean {
   return true
 }
 
+/** EVM addresses are case-insensitive, so a re-cased retry must not look like a different wallet. */
+function walletKey(address: string): string {
+  return address.startsWith('0x') ? address.toLowerCase() : address
+}
+
 function sameSigner(existing: MintRecord, address: string, signature: string): boolean {
-  return existing.address === address && existing.signature === signature
+  return existing.address === walletKey(address) && existing.signature === signature
 }
 
 export function getSucceededWeb3Mint(token: string, address: string, signature: string): unknown | undefined {
@@ -45,8 +50,9 @@ export function getSucceededWeb3Mint(token: string, address: string, signature: 
 
 export function addressHasUnknownMint(address: string): boolean {
   pruneExpiredAttempts()
+  const wallet = walletKey(address)
   for (const record of attempts.values()) {
-    if (record.address === address && record.status === 'unknown') return true
+    if (record.address === wallet && record.status === 'unknown') return true
   }
   return false
 }
@@ -65,7 +71,12 @@ export function beginWeb3MintAttempt(
     if (!sameSigner(existing, address, signature)) return 'mismatch'
     return existing.status
   }
-  attempts.set(token, { status: 'in_flight', expiresAt: Date.now() + MINT_ATTEMPT_TTL_MS, address, signature })
+  attempts.set(token, {
+    status: 'in_flight',
+    expiresAt: Date.now() + MINT_ATTEMPT_TTL_MS,
+    address: walletKey(address),
+    signature,
+  })
   return 'fresh'
 }
 
@@ -73,14 +84,19 @@ export function succeedWeb3MintAttempt(token: string, address: string, signature
   attempts.set(token, {
     status: 'succeeded',
     expiresAt: Date.now() + MINT_ATTEMPT_TTL_MS,
-    address,
+    address: walletKey(address),
     signature,
     response,
   })
 }
 
 export function markUnknownWeb3MintAttempt(token: string, address: string, signature: string): void {
-  attempts.set(token, { status: 'unknown', expiresAt: Date.now() + MINT_ATTEMPT_TTL_MS, address, signature })
+  attempts.set(token, {
+    status: 'unknown',
+    expiresAt: Date.now() + MINT_ATTEMPT_TTL_MS,
+    address: walletKey(address),
+    signature,
+  })
 }
 
 export function releaseWeb3MintAttempt(token: string): void {
