@@ -96,6 +96,25 @@ describe('remote upload fetch security', () => {
     )
   })
 
+  it('rejects local-use NAT64 /56, /64, and non-zero-u embeddings of private addresses', async () => {
+    // RFC 8215 lets operators carve /56 and /64 translators out of 64:ff9b:1::/48,
+    // so IPv4 can sit at a different offset than the /48 or last-32 layouts.
+    await assert.rejects(
+      validateRemoteUrl(new URL('http://[64:ff9b:1:aaaa:7f:0:100:0]/file.png'), publicLookup),
+      /private or local address/,
+    )
+    await assert.rejects(
+      validateRemoteUrl(new URL('http://[64:ff9b:1:7f00:100:100:5db8:d822]/file.png'), publicLookup),
+      /private or local address/,
+    )
+    // /56 layout carrying 10.0.0.1 while the /48 and /64 offsets read as 0.x and the
+    // last 32 bits are public, so only the /56 decode can catch it.
+    await assert.rejects(
+      validateRemoteUrl(new URL('https://internal.example/file.png'), async () => ['64:ff9b:1:a:0:1:5db8:d822']),
+      /private or local address/,
+    )
+  })
+
   it('rejects 6to4, Teredo, ISATAP, and site-local embeddings of private addresses', async () => {
     await assert.rejects(
       validateRemoteUrl(new URL('http://[2002:7f00:1::]/file.png'), publicLookup),
@@ -128,6 +147,9 @@ describe('remote upload fetch security', () => {
     await validateRemoteUrl(new URL('https://cdn.example/file.png'), async () => ['::5db8:d822'])
     await validateRemoteUrl(new URL('https://cdn.example/file.png'), async () => ['64:ff9b:1::5db8:d822'])
     await validateRemoteUrl(new URL('http://[2002:5db8:d822::]/file.png'), publicLookup)
+    // DNS64 through a /64 translator carved out of the local-use prefix: every layout
+    // decodes to a public address, so the extra offsets must not over-block.
+    await validateRemoteUrl(new URL('https://cdn.example/file.png'), async () => ['64:ff9b:1:aaaa:5d:b8d8:2200:0'])
   })
 
   it('revalidates redirect targets before following them', async () => {

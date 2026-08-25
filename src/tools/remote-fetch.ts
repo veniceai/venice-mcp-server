@@ -410,19 +410,27 @@ function ipv4sFromEmbeddings(address: string): string[] {
   }
   if (isLocalUseNat64) {
     found.add(last32)
-    const rfc6052 = ipv4FromRfc6052Prefix48(groups)
-    if (rfc6052) found.add(rfc6052)
-    if (![...found].some((ip) => !isBlockedIpv4(ip))) found.add('0.0.0.0')
+    for (const ipv4 of ipv4sFromRfc6052Layouts(groups)) found.add(ipv4)
   }
 
   return [...found]
 }
 
-/** RFC 6052 /48: prefix | v4(16) | u(8)=0 | v4(16) | suffix. */
-function ipv4FromRfc6052Prefix48(groups: number[]): string | undefined {
-  if (((groups[4] >> 8) & 0xff) !== 0) return undefined
-  const ipv4 = `${(groups[3] >> 8) & 0xff}.${groups[3] & 0xff}.${groups[4] & 0xff}.${(groups[5] >> 8) & 0xff}`
-  return ipv4 === '0.0.0.0' ? undefined : ipv4
+/**
+ * RFC 6052 puts IPv4 at a different offset per prefix length, and RFC 8215 reserves
+ * local-use 64:ff9b:1::/48 so operators can carve /56 and /64 translators out of it.
+ * Every layout is decoded and the u octet (bits 64-71) is not required to be zero, so
+ * a malformed address cannot carry a private destination past the check. A candidate
+ * starting at 0 means the wrong offset was read: 0.0.0.0/8 is never a real destination.
+ */
+function ipv4sFromRfc6052Layouts(groups: number[]): string[] {
+  const hi = (group: number) => (group >> 8) & 0xff
+  const lo = (group: number) => group & 0xff
+  return [
+    `${hi(groups[3])}.${lo(groups[3])}.${lo(groups[4])}.${hi(groups[5])}`, // /48
+    `${lo(groups[3])}.${lo(groups[4])}.${hi(groups[5])}.${lo(groups[5])}`, // /56
+    `${lo(groups[4])}.${hi(groups[5])}.${lo(groups[5])}.${hi(groups[6])}`, // /64
+  ].filter((ipv4) => !ipv4.startsWith('0.'))
 }
 
 function expandIpv6Groups(address: string): number[] | undefined {
