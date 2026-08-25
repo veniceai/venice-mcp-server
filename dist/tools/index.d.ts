@@ -13,18 +13,14 @@
  *      - crypto/rpc/:network
  *   ⚠️  API key only (no x402):
  *      - characters (list, get, reviews)
- *      - api_keys/rate_limits and rate_limits/log (INFERENCE or ADMIN)
- *      - billing/* and api_keys list/get require an ADMIN key
- *      - support-bot
+ *      - billing/* (balance, cost, usage, usage-analytics)
+ *      - api_keys/*, support-bot
  *   🔓 Auth-free:
  *      - models, models/card, models/traits
  *      - image/styles
  *      - audio/quote, video/quote
- *      - x402/top-up requirement discovery
- *      - api_keys/generate_web3_key challenge + signed submission
+ *      - x402/balance, x402/top-up, x402/transactions
  *      - tee/attestation, tee/signature
- *   👛 SIWX only:
- *      - x402/balance, x402/transactions
  */
 import { z } from 'zod';
 import type { VeniceClient } from '../venice-client.js';

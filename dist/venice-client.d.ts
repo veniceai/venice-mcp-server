@@ -8,32 +8,29 @@ export interface RequestInitJSON {
     /** Override request timeout for this call. */
     timeoutMs?: number;
     /** Override default API-key-first auth behavior for endpoint-specific requirements. */
-    auth?: 'default' | 'apiKey' | 'siwx' | 'none';
-    /** Observe response metadata without changing the existing body-only return type. */
-    onResponse?: (metadata: ResponseMetadata) => void;
-}
-export interface ResponseMetadata {
-    status: number;
-    headers: Record<string, string>;
+    auth?: 'default' | 'siwx' | 'none';
 }
 /**
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
- * - Otherwise adds the canonical `SIGN-IN-WITH-X` when a SIWX token is configured.
+ * - Otherwise adds `X-Sign-In-With-X` when a SIWX token is configured.
  * - Surfaces 402 responses as `VeniceUpstreamError(isPaymentRequired)` so tools
  *   can format a helpful top-up message back to the MCP host.
  *
- * We deliberately never set a payment header. Payment submission belongs only
- * on `/x402/top-up`, and this client currently exposes discovery—not settlement.
+ * We deliberately never set `X-402-Payment` on inference routes; Venice
+ * rejects that header outside `/x402/top-up`.
  */
 export declare class VeniceClient {
     private readonly cfg;
     constructor(cfg: Config);
     request<T = unknown>(path: string, init?: RequestInitJSON): Promise<T>;
     /** GET request returning JSON. */
-    get<T = unknown>(path: string, headers?: Record<string, string>, opts?: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse'>): Promise<T>;
+    get<T = unknown>(path: string, headers?: Record<string, string>, opts?: {
+        auth?: RequestInitJSON['auth'];
+        timeoutMs?: number;
+    }): Promise<T>;
     /** POST request with JSON body. */
-    post<T = unknown>(path: string, json: unknown, headers?: Record<string, string>, opts?: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse'>): Promise<T>;
+    post<T = unknown>(path: string, json: unknown, headers?: Record<string, string>): Promise<T>;
     /**
      * POST a multipart/form-data body. Used by endpoints that require file upload
      * (image/edit, image/upscale, image/multi-edit, image/background-remove,
