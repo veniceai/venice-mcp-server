@@ -630,6 +630,43 @@ describe('tool output shaping', () => {
     )
   })
 
+  it('venice_video_generate evicts the oldest remembered queue URL instead of growing forever', async () => {
+    let queued = 0
+    const stub = new StubClient({
+      '/v1/video/queue': () => {
+        queued += 1
+        return {
+          model: 'grok-imagine-text-to-video-private',
+          queue_id: `vps-bulk-${queued}`,
+          download_url: `https://private-share.venice.ai/v1/share/read/${queued}`,
+        }
+      },
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const generate = tools.find((t) => t.name === 'venice_video_generate')!
+    const status = tools.find((t) => t.name === 'venice_video_status')!
+    for (let i = 0; i < 1001; i += 1) {
+      await generate.handler({ prompt: 'a gondola', model: 'grok-imagine-text-to-video-private' } as never)
+    }
+
+    const evicted = await status.handler({
+      queue_id: 'vps-bulk-1',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    assert.equal(evicted.isError, true)
+
+    const newest = await status.handler({
+      queue_id: `vps-bulk-${queued}`,
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    assert.equal(newest.isError, undefined)
+    assert.equal(
+      (newest.structuredContent as { url: string }).url,
+      `https://private-share.venice.ai/v1/share/read/${queued}`,
+    )
+  })
+
   it('venice_video_status ignores a caller download_url that is not a Venice host', async () => {
     const stub = new StubClient({
       '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),

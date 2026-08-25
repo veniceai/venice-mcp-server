@@ -102,22 +102,31 @@ const fail = (text: string, structured?: Record<string, unknown>): ToolResult =>
 })
 
 const QUEUE_DOWNLOAD_URL_TTL_MS = 24 * 60 * 60 * 1000
+const QUEUE_DOWNLOAD_URL_MAX_ENTRIES = 1000
 const queueDownloadUrls = new Map<string, { url: string; expiresAt: number }>()
+
+function pruneQueueDownloadUrls(now = Date.now()): void {
+  for (const [queueId, entry] of queueDownloadUrls) {
+    if (entry.expiresAt <= now) queueDownloadUrls.delete(queueId)
+  }
+}
 
 function rememberQueueDownloadUrl(queueId: string, url: string | undefined): void {
   const trusted = trustedQueueDownloadUrl(url)
   if (!trusted) return
+  pruneQueueDownloadUrls()
+  // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
+  while (queueDownloadUrls.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
+    const oldest = queueDownloadUrls.keys().next()
+    if (oldest.done) break
+    queueDownloadUrls.delete(oldest.value)
+  }
   queueDownloadUrls.set(queueId, { url: trusted, expiresAt: Date.now() + QUEUE_DOWNLOAD_URL_TTL_MS })
 }
 
 function rememberedQueueDownloadUrl(queueId: string): string | undefined {
-  const entry = queueDownloadUrls.get(queueId)
-  if (!entry) return undefined
-  if (entry.expiresAt <= Date.now()) {
-    queueDownloadUrls.delete(queueId)
-    return undefined
-  }
-  return entry.url
+  pruneQueueDownloadUrls()
+  return queueDownloadUrls.get(queueId)?.url
 }
 
 /** Caller-supplied queue URLs must be Venice HTTPS hosts. Retrieve URLs come from Venice and are not re-checked here. */
