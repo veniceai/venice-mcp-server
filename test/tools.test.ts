@@ -554,6 +554,14 @@ describe('tool output shaping', () => {
     assert.equal(sendTransaction.isError, true)
     assert.equal(stub.calls.length, 0)
 
+    const userOp = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendUserOperation',
+      rpc_params: [{}, '0xentrypoint'],
+    } as never)
+    assert.equal(userOp.isError, true)
+    assert.equal(stub.calls.length, 0)
+
     const sent = await tool.handler({
       network: 'ethereum-mainnet',
       rpc_method: 'eth_sendRawTransaction',

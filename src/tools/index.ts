@@ -99,6 +99,7 @@ const CRYPTO_RPC_MAX_RESPONSE_BYTES = 256 * 1024
 const CRYPTO_RPC_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{1,255}$/
 const CRYPTO_RPC_BROADCAST_METHODS = new Set([
   'eth_sendrawtransaction',
+  'eth_senduseroperation',
   'starknet_addinvoketransaction',
   'starknet_adddeclaretransaction',
   'starknet_adddeployaccounttransaction',
@@ -118,7 +119,7 @@ const cryptoRpcIdempotencyKeySchema = z
   .string()
   .regex(CRYPTO_RPC_IDEMPOTENCY_KEY)
   .describe(
-    'Reuse the same key when retrying a request. Required for eth_sendRawTransaction and Starknet writes so a lost response is not broadcast again.',
+    'Reuse the same key when retrying a request. Required for eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes so a lost response is not broadcast again.',
   )
 
 function cryptoRpcMethodName(item: unknown): string {
@@ -133,7 +134,7 @@ function cryptoRpcMethods(body: unknown): string[] {
 function isBroadcastRpcMethod(method: string): boolean {
   const normalized = method.toLowerCase()
   if (CRYPTO_RPC_BROADCAST_METHODS.has(normalized)) return true
-  if (normalized.includes('sendrawtransaction') || normalized.includes('sendtransaction')) return true
+  if (normalized.includes('sendrawtransaction') || normalized.includes('sendtransaction') || normalized.includes('senduseroperation')) return true
   if (normalized.startsWith('starknet_add')) return true
   return false
 }
@@ -915,7 +916,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_crypto_rpc',
       title: 'Venice Crypto RPC Proxy',
-      description: `Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. Use venice_crypto_networks for the live network list. For a simple call, pass rpc_method/rpc_params; for complete request IDs or batches, pass request. Transaction broadcasts (eth_sendRawTransaction and Starknet writes) require idempotency_key; reuse the same key when retrying a relay. Responses larger than 256 KiB are rejected.${X402_OK}`,
+      description: `Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. Use venice_crypto_networks for the live network list. For a simple call, pass rpc_method/rpc_params; for complete request IDs or batches, pass request. Relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes) require idempotency_key; reuse the same key when retrying. Responses larger than 256 KiB are rejected.${X402_OK}`,
       inputSchema: {
         network: z.string().min(1).describe('Network slug returned by venice_crypto_networks.'),
         request: z
@@ -945,7 +946,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           if (cryptoRpcRequiresIdempotencyKey(body) && !args.idempotency_key) {
             return fail(
-              'idempotency_key is required for transaction broadcasts (eth_sendRawTransaction and Starknet writes). Reuse the same key when retrying so Venice can return the cached result instead of broadcasting again.',
+              'idempotency_key is required for transaction relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes). Reuse the same key when retrying so Venice can return the cached result instead of broadcasting again.',
             )
           }
           const headers = args.idempotency_key ? { 'Idempotency-Key': args.idempotency_key } : undefined
