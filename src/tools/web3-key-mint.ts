@@ -43,12 +43,23 @@ export function getSucceededWeb3Mint(token: string, address: string, signature: 
   return existing.response
 }
 
+export function addressHasUnknownMint(address: string): boolean {
+  pruneExpiredAttempts()
+  for (const record of attempts.values()) {
+    if (record.address === address && record.status === 'unknown') return true
+  }
+  return false
+}
+
 export function beginWeb3MintAttempt(
   token: string,
   address: string,
   signature: string,
-): 'fresh' | MintRecord['status'] | 'mismatch' {
+): 'fresh' | MintRecord['status'] | 'mismatch' | 'wallet_unknown' {
   pruneExpiredAttempts()
+  if (addressHasUnknownMint(address) && attempts.get(token)?.status !== 'unknown') {
+    return 'wallet_unknown'
+  }
   const existing = attempts.get(token)
   if (existing) {
     if (!sameSigner(existing, address, signature)) return 'mismatch'
@@ -77,12 +88,15 @@ export function releaseWeb3MintAttempt(token: string): void {
   if (existing?.status === 'in_flight') attempts.delete(token)
 }
 
-export function web3MintBlockedMessage(status: 'in_flight' | 'unknown' | 'mismatch'): string {
+export function web3MintBlockedMessage(status: 'in_flight' | 'unknown' | 'mismatch' | 'wallet_unknown'): string {
   if (status === 'in_flight') {
     return 'A mint for this challenge token is already in progress. Wait for that attempt; do not start a second mint.'
   }
   if (status === 'mismatch') {
     return 'This challenge token is already bound to a different wallet or signature. Do not retry with a different signer.'
+  }
+  if (status === 'wallet_unknown') {
+    return `${WEB3_MINT_RECOVERY_MESSAGE} A new challenge will not mint another key for this wallet until that unknown attempt expires.`
   }
   return WEB3_MINT_RECOVERY_MESSAGE
 }
