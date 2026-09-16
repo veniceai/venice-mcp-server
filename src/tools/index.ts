@@ -17,6 +17,7 @@
  *      - api_keys/*, support-bot
  *   🔓 Auth-free:
  *      - models, models/card, models/traits
+ *      - crypto/rpc/networks
  *      - image/styles
  *      - audio/quote, video/quote
  *      - x402/balance, x402/top-up, x402/transactions
@@ -94,6 +95,54 @@ const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API k
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
 
+const CRYPTO_RPC_MAX_RESPONSE_BYTES = 256 * 1024
+const CRYPTO_RPC_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{1,255}$/
+const CRYPTO_RPC_BROADCAST_METHODS = new Set([
+  'eth_sendrawtransaction',
+  'eth_senduseroperation',
+  'starknet_addinvoketransaction',
+  'starknet_adddeclaretransaction',
+  'starknet_adddeployaccounttransaction',
+])
+
+const cryptoRpcIdSchema = z.union([z.string(), z.number().int()])
+const cryptoRpcRequestSchema = z.object({
+  jsonrpc: z.literal('2.0').optional().describe('JSON-RPC version. Defaults to "2.0" when using rpc_method.'),
+  method: z.string().min(1).describe('JSON-RPC method name.'),
+  params: z.array(z.unknown()).optional().describe('Method parameters.'),
+  id: cryptoRpcIdSchema.optional().describe('Caller-supplied request ID. May be omitted for a single notification.'),
+})
+const cryptoRpcBatchRequestSchema = cryptoRpcRequestSchema.extend({
+  id: cryptoRpcIdSchema.describe('Required request ID used to correlate this batch item with its response.'),
+})
+const cryptoRpcIdempotencyKeySchema = z
+  .string()
+  .regex(CRYPTO_RPC_IDEMPOTENCY_KEY)
+  .describe(
+    'Reuse the same key when retrying a request. Required for eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes so a lost response is not broadcast again.',
+  )
+
+function cryptoRpcMethodName(item: unknown): string {
+  if (typeof item !== 'object' || item === null || !('method' in item)) return ''
+  return String((item as { method: unknown }).method)
+}
+
+function cryptoRpcMethods(body: unknown): string[] {
+  return Array.isArray(body) ? body.map(cryptoRpcMethodName) : [cryptoRpcMethodName(body)]
+}
+
+function isBroadcastRpcMethod(method: string): boolean {
+  const normalized = method.toLowerCase()
+  if (CRYPTO_RPC_BROADCAST_METHODS.has(normalized)) return true
+  if (normalized.includes('sendrawtransaction') || normalized.includes('sendtransaction') || normalized.includes('senduseroperation')) return true
+  if (normalized.startsWith('starknet_add')) return true
+  return false
+}
+
+function cryptoRpcRequiresIdempotencyKey(body: unknown): boolean {
+  return cryptoRpcMethods(body).some(isBroadcastRpcMethod)
+}
+
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
  * narrower set than `/chat/completions` and silently strips the rest, so the
@@ -148,6 +197,10 @@ const responsesVeniceParametersSchema = z
 
 export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
+  const requireCharacterApiKey = (): ToolResult | undefined =>
+    cfg.apiKey
+      ? undefined
+      : fail('VENICE_API_KEY is required for character discovery; x402 wallet authentication is not supported.')
 
   const tools: ToolDef[] = [
     // ========================================================================
@@ -841,21 +894,75 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     // ========================================================================
 
     {
+      name: 'venice_crypto_networks',
+      title: 'Venice Crypto RPC Networks',
+      description: `List the live, authoritative network slugs accepted by venice_crypto_rpc.${NO_AUTH}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<{ networks?: string[] }>(
+            '/v1/crypto/rpc/networks',
+            undefined,
+            { auth: 'none' },
+          )
+          const networks = resp.networks ?? []
+          return ok(JSON.stringify(networks, null, 2), { networks, count: networks.length })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
       name: 'venice_crypto_rpc',
       title: 'Venice Crypto RPC Proxy',
-      description: `Proxy a JSON-RPC call to a supported blockchain network (eth_call, eth_blockNumber, etc.). Networks include "base-mainnet", "ethereum-mainnet", "polygon-mainnet", "arbitrum-mainnet", "optimism-mainnet", and others. List all via GET /api/v1/crypto/rpc/networks.${X402_OK}`,
+      description: `Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. Use venice_crypto_networks for the live network list. For a simple call, pass rpc_method/rpc_params; for complete request IDs or batches, pass request. Relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes) require idempotency_key; reuse the same key when retrying. Responses larger than 256 KiB are rejected.${X402_OK}`,
       inputSchema: {
-        network: z.string().min(1).describe('Full network id, e.g. "base-mainnet" (NOT just "base"), "ethereum-mainnet", "polygon-mainnet".'),
-        rpc_method: z.string().min(1),
-        rpc_params: z.array(z.unknown()).optional(),
+        network: z.string().min(1).describe('Network slug returned by venice_crypto_networks.'),
+        request: z
+          .union([cryptoRpcRequestSchema, z.array(cryptoRpcBatchRequestSchema).min(1).max(100)])
+          .optional()
+          .describe('A single JSON-RPC request object (ID optional) or a non-empty batch of at most 100 request objects (ID required per item).'),
+        rpc_method: z.string().min(1).optional().describe('Convenience form for a single request. Do not combine with request.'),
+        rpc_params: z.array(z.unknown()).optional().describe('Parameters for rpc_method.'),
+        idempotency_key: cryptoRpcIdempotencyKeySchema.optional(),
       },
       handler: async (args) => {
         try {
+          if (args.request !== undefined && args.rpc_method !== undefined) {
+            return fail('Pass either request or rpc_method/rpc_params, not both.')
+          }
+          if (args.request === undefined && args.rpc_method === undefined) {
+            return fail('Either request or rpc_method is required.')
+          }
+          if (args.request !== undefined && args.rpc_params !== undefined) {
+            return fail('rpc_params can only be used with rpc_method.')
+          }
+          const body = args.request ?? {
+            jsonrpc: '2.0' as const,
+            method: args.rpc_method!,
+            params: args.rpc_params ?? [],
+            id: 1,
+          }
+          if (cryptoRpcRequiresIdempotencyKey(body) && !args.idempotency_key) {
+            return fail(
+              'idempotency_key is required for transaction relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes). Reuse the same key when retrying so Venice can return the cached result instead of broadcasting again.',
+            )
+          }
+          const headers = args.idempotency_key ? { 'Idempotency-Key': args.idempotency_key } : undefined
           const resp = await client.post<unknown>(
             `/v1/crypto/rpc/${encodeURIComponent(args.network)}`,
-            { jsonrpc: '2.0', method: args.rpc_method, params: args.rpc_params ?? [], id: 1 }
+            body,
+            headers,
+            { maxResponseBytes: CRYPTO_RPC_MAX_RESPONSE_BYTES },
           )
-          return ok(JSON.stringify(resp, null, 2))
+          const text = JSON.stringify(resp, null, 2)
+          if (Buffer.byteLength(text, 'utf8') > CRYPTO_RPC_MAX_RESPONSE_BYTES) {
+            return fail(
+              `Crypto RPC response exceeds ${CRYPTO_RPC_MAX_RESPONSE_BYTES} bytes. Narrow the query (smaller eth_getLogs range, fewer batch items, or avoid trace/replay methods).`,
+            )
+          }
+          return ok(text)
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -957,23 +1064,97 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `List public Venice characters.${API_KEY_ONLY}`,
       inputSchema: {
         search: z.string().optional(),
-        tag: z.string().optional(),
-        limit: z.number().int().min(1).max(50).optional(),
+        tag: z.string().optional().describe('Legacy singular tag filter. Prefer tags for multiple values.'),
+        tags: z.array(z.string().max(100)).max(20).optional(),
+        categories: z.array(z.string().max(100)).max(20).optional(),
+        isAdult: z.boolean().optional(),
+        isPro: z.boolean().optional(),
+        isWebEnabled: z.boolean().optional(),
+        modelId: z.array(z.string().max(200)).max(20).optional(),
+        sortBy: z
+          .enum(['featured', 'highestRating', 'highlyRated', 'highlyRatedAndRecent', 'imports', 'mostRecent', 'ratingCount'])
+          .optional(),
+        sortOrder: z.enum(['asc', 'desc']).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
         offset: z.number().int().min(0).optional(),
       },
       handler: async (args) => {
+        const authError = requireCharacterApiKey()
+        if (authError) return authError
         try {
           const params = new URLSearchParams()
           if (args.search) params.set('search', args.search)
           if (args.tag) params.set('tag', args.tag)
+          for (const tag of args.tags ?? []) params.append('tags', tag)
+          for (const category of args.categories ?? []) params.append('categories', category)
+          if (args.isAdult !== undefined) params.set('isAdult', String(args.isAdult))
+          if (args.isPro !== undefined) params.set('isPro', String(args.isPro))
+          if (args.isWebEnabled !== undefined) params.set('isWebEnabled', String(args.isWebEnabled))
+          for (const modelId of args.modelId ?? []) params.append('modelId', modelId)
+          if (args.sortBy) params.set('sortBy', args.sortBy)
+          if (args.sortOrder) params.set('sortOrder', args.sortOrder)
           if (args.limit !== undefined) params.set('limit', String(args.limit))
           if (args.offset !== undefined) params.set('offset', String(args.offset))
           const qs = params.toString()
           const resp = await client.get<{ data?: unknown[]; characters?: unknown[] }>(
-            `/v1/characters${qs ? `?${qs}` : ''}`
+            `/v1/characters${qs ? `?${qs}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
           )
           const list = resp.data ?? resp.characters ?? []
           return ok(JSON.stringify(list, null, 2), { count: list.length })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_get_character',
+      title: 'Venice Get Character',
+      description: `Get one public Venice character by slug.${API_KEY_ONLY}`,
+      inputSchema: {
+        slug: z.string().min(1).describe('Public character slug.'),
+      },
+      handler: async ({ slug }) => {
+        const authError = requireCharacterApiKey()
+        if (authError) return authError
+        try {
+          const resp = await client.get<unknown>(
+            `/v1/characters/${encodeURIComponent(slug)}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(JSON.stringify(resp, null, 2))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_character_reviews',
+      title: 'Venice Character Reviews',
+      description: `List paginated public reviews for a Venice character.${API_KEY_ONLY}`,
+      inputSchema: {
+        slug: z.string().min(1).describe('Public character slug.'),
+        page: z.number().int().min(1).optional(),
+        pageSize: z.number().int().min(1).max(100).optional(),
+      },
+      handler: async ({ slug, page, pageSize }) => {
+        const authError = requireCharacterApiKey()
+        if (authError) return authError
+        try {
+          const params = new URLSearchParams()
+          if (page !== undefined) params.set('page', String(page))
+          if (pageSize !== undefined) params.set('pageSize', String(pageSize))
+          const qs = params.toString()
+          const resp = await client.get<unknown>(
+            `/v1/characters/${encodeURIComponent(slug)}/reviews${qs ? `?${qs}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(JSON.stringify(resp, null, 2))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1044,17 +1225,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       name: 'venice_x402_top_up_info',
       title: 'Venice x402 Top-up Requirements',
       description:
-        `Fetch step-1 top-up requirements (network, USDC token address, receiver wallet, min amount). Steps 2 (sign USDC authorization) and 3 (POST signed payment) require a wallet and happen OUTSIDE this MCP server.`,
+        `Fetch step-1 top-up requirements for a wallet. The API accepts an empty POST; the address is validated locally for the caller's intended wallet. Signing and payment-header submission happen OUTSIDE this MCP server.`,
       inputSchema: {
         wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-        amount_usd: z.number().min(1).max(1_000_000).optional(),
       },
-      handler: async (args) => {
+      handler: async () => {
         try {
-          await client.post('/v1/x402/top-up', {
-            walletAddress: args.wallet_address,
-            amountUsd: args.amount_usd ?? 10,
-          })
+          await client.post('/v1/x402/top-up', {}, undefined, { auth: 'none' })
           return ok('Unexpected non-402 response. Top-up may already be processed.')
         } catch (err) {
           if (err instanceof Error && (err as { status?: number }).status === 402) {

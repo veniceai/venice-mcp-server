@@ -39,6 +39,7 @@ describe('VeniceClient', () => {
       },
       { match: 'POST /v1/server-error', reply: { __status: 503, __body: { error: 'down' } } },
       { match: 'POST /v1/text-only', reply: { __status: 200, __body: 'plain text', __headers: { 'content-type': 'text/plain' } } },
+      { match: 'POST /v1/huge', reply: { data: 'x'.repeat(8_000) } },
       {
         match: 'POST /v1/slow',
         reply: () =>
@@ -100,6 +101,32 @@ describe('VeniceClient', () => {
     assert.equal(last.headers['x-sign-in-with-x'], 'siwx_token_xyz')
   })
 
+  it('can suppress configured auth on demand', async () => {
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
+    await c.post('/v1/chat/completions', {}, undefined, { auth: 'none' })
+    const last = server.calls[server.calls.length - 1]
+    assert.equal(last.headers.authorization, undefined)
+    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+  })
+
+  it('forces Bearer-only auth for API-key-only endpoints', async () => {
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
+    await c.get('/v1/models', undefined, { auth: 'apiKey' })
+    const last = server.calls[server.calls.length - 1]
+    assert.equal(last.headers.authorization, 'Bearer vk_abc')
+    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+  })
+
+  it('fails API-key-only auth locally without contacting upstream', async () => {
+    const c = new VeniceClient(makeCfg({ siwxToken: 'siwx_token_xyz' }))
+    const callsBefore = server.calls.length
+    await assert.rejects(
+      () => c.get('/v1/models', undefined, { auth: 'apiKey' }),
+      /VENICE_API_KEY is required for this API-key-only endpoint/,
+    )
+    assert.equal(server.calls.length, callsBefore)
+  })
+
   it('surfaces 402 as VeniceUpstreamError with isPaymentRequired=true', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
@@ -139,6 +166,14 @@ describe('VeniceClient', () => {
     const c = new VeniceClient(makeCfg())
     const r = await c.post<string>('/v1/text-only', {})
     assert.equal(r, 'plain text')
+  })
+
+  it('rejects responses larger than maxResponseBytes', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.post('/v1/huge', {}, undefined, { maxResponseBytes: 64 }),
+      /larger than 64 bytes/,
+    )
   })
 
   it('aborts on timeout and surfaces a 504 VeniceUpstreamError', async () => {
