@@ -13,6 +13,7 @@ describe('loadConfig', () => {
     assert.equal(cfg.defaultTtsModel, 'tts-kokoro')
     assert.equal(cfg.defaultAsrModel, 'openai/whisper-large-v3')
     assert.equal(cfg.timeoutMs, 60_000)
+    assert.equal(cfg.maxVideoResponseBytes, 25 * 1024 * 1024)
     assert.equal(cfg.enableNsfw, true)
     assert.equal(cfg.serverName, '@veniceai/mcp-server')
   })
@@ -41,6 +42,17 @@ describe('loadConfig', () => {
     assert.equal(loadConfig({ VENICE_HTTP_TIMEOUT_MS: 'nope' }).timeoutMs, 60_000)
     assert.equal(loadConfig({ VENICE_HTTP_TIMEOUT_MS: '0' }).timeoutMs, 60_000)
     assert.equal(loadConfig({ VENICE_HTTP_TIMEOUT_MS: '-1' }).timeoutMs, 60_000)
+  })
+
+  it('parses the completed-video response byte limit', () => {
+    assert.equal(loadConfig({ VENICE_MAX_VIDEO_RESPONSE_BYTES: '12345' }).maxVideoResponseBytes, 12_345)
+  })
+
+  it('falls back to the video byte-limit default for invalid values', () => {
+    const fallback = 25 * 1024 * 1024
+    assert.equal(loadConfig({ VENICE_MAX_VIDEO_RESPONSE_BYTES: 'nope' }).maxVideoResponseBytes, fallback)
+    assert.equal(loadConfig({ VENICE_MAX_VIDEO_RESPONSE_BYTES: '0' }).maxVideoResponseBytes, fallback)
+    assert.equal(loadConfig({ VENICE_MAX_VIDEO_RESPONSE_BYTES: '1.5' }).maxVideoResponseBytes, fallback)
   })
 
   it('overrides default models from env', () => {

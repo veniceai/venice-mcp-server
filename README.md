@@ -51,9 +51,9 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_image_generate` | Generate an image. Supports Flux 2 Pro/Max, Lustify SDXL, Anime (WAI), Qwen Image, GPT Image, Nano Banana Pro and others. |
-| `venice_image_edit` | Edit an image with a prompt. Returns base64 PNG. |
-| `venice_image_multi_edit` | Edit multiple images together with a single prompt (multi-image composition / outpainting). |
+| `venice_image_generate` | Generate an image. Supports model-specific width/height or free-string `aspect_ratio`/`resolution`, quality tiers, prompt enhancement, style references, web search, variants, and output format. |
+| `venice_image_edit` | Edit an image with a prompt. Supports free-string sizing, quality, output format, and prompt enhancement; returns a base64 image. |
+| `venice_image_multi_edit` | Edit multiple images together with a single prompt (multi-image composition / outpainting), including free-string sizing, quality, output format, and prompt enhancement. |
 | `venice_image_upscale` | Upscale an image (2–4× scale, with a `creativity` control). Returns base64 PNG. |
 | `venice_image_remove_bg` | Remove image background; returns a transparent PNG. |
 | `venice_image_styles` | List image style presets available for `venice_image_generate`. |
@@ -62,8 +62,8 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, and reference image inputs depending on model. |
-| `venice_video_status` | Check status of a queued video job. Returns `PROCESSING` or `COMPLETED`. |
+| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs, and the Seedance consent attestation flow where applicable. |
+| `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link. Pass the queue-time `download_url` for VPS / Grok Imagine Private models. |
 | `venice_video_complete` | Mark a completed video as downloaded; deletes server-side media. |
 | `venice_video_transcriptions` | Transcribe a YouTube video URL. |
 | `venice_video_quote` | Get a price quote for a video generation BEFORE queuing. |
@@ -81,7 +81,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_music_generate` | Queue music generation. Models: ace-step-15, elevenlabs-music, minimax-music-v2/v25/v26, stable-audio-25, mmaudio-v2, elevenlabs-sound-effects-v2. |
+| `venice_music_generate` | Queue music generation. Uses the live QueueAudioRequest fields: `force_instrumental`, `lyrics_prompt`, `lyrics_optimizer`, `loop`, `voice`, `language_code`, `speed`, and model-specific `duration_seconds`. |
 | `venice_music_status` | Check status of a queued music job. |
 | `venice_music_complete` | Mark a completed music job as downloaded. |
 
@@ -99,6 +99,13 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 |---|---|
 | `venice_list_models` | List the live model catalog with capabilities and prices. |
 | `venice_list_characters` | List public Venice characters. |
+
+### Media API behavior
+
+- `venice_list_models` forwards a supplied `type` to `GET /v1/models?type=...`; video and music capabilities should be discovered from those server-filtered results.
+- Image `aspect_ratio` and `resolution` values remain free strings because supported values vary by model. Venice validates them. When `enhance_prompt` is applied, image generate/edit/multi-edit results include the URL-decoded `enhanced_prompt` returned in `x-venice-enhanced-prompt`.
+- Current public Seedance models may reject media containing detectable persons outright. Defensive support remains for compatible or legacy `needs_consent` responses: the tool returns Venice's policy text, affected media roles, and next step. The three `consents.seedance` flags are legal attestations and must only be set to `true` after the user explicitly confirms all three statements. Consent is never a content-policy bypass.
+- Completed videos may arrive as `video/mp4` or as JSON with a `download_url`. Binary completions are returned as an embedded MCP resource (`blob`, `mimeType: "video/mp4"`, synthetic `venice://video/...` URI), streamed into a bounded buffer that defaults to 25 MiB (`VENICE_MAX_VIDEO_RESPONSE_BYTES`). Oversized binary results remain queued and can be retried with the same queue ID after changing the limit. JSON completions return the `download_url` as an MCP resource link instead of fetching that URL. For VPS / Grok Imagine Private models, `download_url` is returned only on queue; pass that URL into `venice_video_status` so a `COMPLETED` retrieve without an inline URL still yields a resource link.
 
 ### ⛓️ Crypto
 
@@ -127,6 +134,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |
 | `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
+| `VENICE_MAX_VIDEO_RESPONSE_BYTES` | `26214400` (25 MiB) | Maximum completed MP4 bytes buffered and base64-embedded by `venice_video_status`. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
