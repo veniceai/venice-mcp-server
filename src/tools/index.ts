@@ -1319,7 +1319,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_web3_key_mint',
       title: 'Venice Web3 API Key Mint',
-      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit is required because the wallet signature covers only the challenge token. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. Never provide a private key. The returned apiKey is shown once—store it securely. Same-process retries reuse the cached secret for this token+wallet+signature only. After a timeout or unknown outcome, this wallet cannot mint again (even with a new challenge) until that attempt expires. If the response is lost, revoke any unexpected key with an ADMIN key first. A process restart still cannot recover a secret this server never saw.${NO_AUTH}`,
+      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit in usd or diem is required because the wallet signature covers only the challenge token; retired VCU limits are rejected because they are not enforced against current spending. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. Never provide a private key. The returned apiKey is shown once—store it securely. Same-process retries reuse the cached secret for this token+wallet+signature only. After a timeout or unknown outcome, this wallet cannot mint again (even with a new challenge) until that attempt expires. If the response is lost, revoke any unexpected key with an ADMIN key first. A process restart still cannot recover a secret this server never saw.${NO_AUTH}`,
       inputSchema: {
         address: evmAddressSchema,
         signature: z.string().min(1).max(4096).describe('Signature created by the caller wallet over the raw challenge token.'),
@@ -1337,13 +1337,21 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           .object({
             usd: z.number().min(0).max(9_999_999_999).nullable().optional(),
             diem: z.number().min(0).max(9_999_999_999).nullable().optional(),
-            vcu: z.number().min(0).max(9_999_999_999).nullable().optional(),
+            // Rejected rather than stripped: a silently dropped vcu cap would
+            // leave the caller believing the key is capped when it is not.
+            vcu: z
+              .never({
+                invalid_type_error:
+                  'VCU consumption limits are retired and are not enforced. Set a positive usd or diem cap instead.',
+              })
+              .optional()
+              .describe('Retired. VCU limits are rejected; set the cap in usd or diem.'),
           })
           .refine(
-            (limit) => [limit.usd, limit.diem, limit.vcu].some((value) => typeof value === 'number' && value > 0),
-            'At least one positive consumption limit (usd, diem, or vcu) is required.',
+            (limit) => [limit.usd, limit.diem].some((value) => typeof value === 'number' && value > 0),
+            'At least one positive consumption limit (usd or diem) is required.',
           )
-          .describe('Required spend cap. The challenge signature does not bind key type or limits.'),
+          .describe('Required spend cap in usd or diem. The challenge signature does not bind key type or limits.'),
         limit_period: z
           .enum(['EPOCH', 'MONTH', 'LIFETIME'])
           .optional()

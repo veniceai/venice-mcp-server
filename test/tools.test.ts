@@ -698,6 +698,40 @@ describe('tool output shaping', () => {
     }).success, false)
   })
 
+  it('rejects retired VCU consumption limits and requires a positive usd or diem cap', () => {
+    const { get } = setup()
+    const mint = get('venice_web3_key_mint')
+    const schema = z.object(mint.inputSchema)
+    const base = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+    }
+    const messagesOf = (result: ReturnType<typeof schema.safeParse>): string =>
+      result.success ? '' : result.error.issues.map((issue) => issue.message).join(' | ')
+
+    const vcuOnly = schema.safeParse({ ...base, consumption_limit: { vcu: 1 } })
+    assert.equal(vcuOnly.success, false)
+    assert.match(messagesOf(vcuOnly), /VCU consumption limits are retired/)
+
+    // A vcu value is rejected even when it rides along with a valid usd cap,
+    // so the caller never believes a retired currency was accepted.
+    const vcuWithUsd = schema.safeParse({ ...base, consumption_limit: { usd: 25, vcu: 1 } })
+    assert.equal(vcuWithUsd.success, false)
+    assert.match(messagesOf(vcuWithUsd), /VCU consumption limits are retired/)
+
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25 } }).success, true)
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { diem: 10 } }).success, true)
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: null, diem: 10 } }).success, true)
+
+    const noCap = schema.safeParse({ ...base, consumption_limit: { usd: 0, diem: null } })
+    assert.equal(noCap.success, false)
+    assert.match(messagesOf(noCap), /At least one positive consumption limit \(usd or diem\) is required/)
+
+    assert.match(mint.description, /consumption_limit in usd or diem is required/)
+    assert.match(mint.description, /VCU limits are rejected/)
+  })
+
   it('replays a successful web3 mint for the same challenge token without creating another key', async () => {
     resetWeb3MintAttemptStore()
     const stub = new StubClient({
