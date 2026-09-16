@@ -186,7 +186,7 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
   if (path.startsWith('/v1/video/queue')) return { model: 'veo3.1-fast-text-to-video', queue_id: 'vid-123' }
   if (path.startsWith('/v1/video/retrieve'))
     return { status: 'COMPLETED', download_url: 'https://stub/v.mp4', average_execution_time: 60_000, execution_duration: 30_000 }
-  if (path.startsWith('/v1/video/complete')) return { ok: true }
+  if (path.startsWith('/v1/video/complete')) return { success: true }
   // Real Venice video/transcriptions returns { transcript, lang }
   if (path.startsWith('/v1/video/transcriptions')) return { transcript: 'video transcript', lang: 'en' }
   if (path.startsWith('/v1/video/quote')) return { quote: 0.5, model: 'veo3.1-fast-text-to-video' }

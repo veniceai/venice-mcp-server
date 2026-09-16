@@ -729,6 +729,46 @@ describe('tool output shaping', () => {
     assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, true)
   })
 
+  it('venice_video_status reports cleanup failure when complete returns 200 { success: false }', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({
+        kind: 'binary',
+        buffer: Buffer.from('mock-mp4'),
+        contentType: 'video/mp4',
+      }),
+      '/v1/video/complete': () => ({ success: false }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'cleanup-refused',
+      model: 'm',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal((r.content[0] as { type: string }).type, 'resource')
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    assert.match((r.content[1] as { text: string }).text, /cleanup was not confirmed/)
+  })
+
+  it('venice_video_status does not claim deletion when complete omits success', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED', download_url: 'https://stub/v.mp4' }),
+      '/v1/video/complete': () => ({}),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'cleanup-silent',
+      model: 'm',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { url: string }).url, 'https://stub/v.mp4')
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    assert.match((r.content[1] as { text: string }).text, /cleanup was not confirmed/)
+  })
+
   it('venice_video_status returns PROCESSING progress when not ready', async () => {
     const stub = new StubClient({
       '/v1/video/retrieve': () => ({ status: 'PROCESSING', average_execution_time: 60_000, execution_duration: 12_000 }),

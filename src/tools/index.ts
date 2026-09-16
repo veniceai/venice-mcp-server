@@ -681,10 +681,20 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               return { deleted: false, cleanupNote: '' }
             }
             try {
-              await client.post('/v1/video/complete', {
+              // Venice answers HTTP 200 with { success: false } when the storage
+              // delete fails, so the status code alone cannot confirm cleanup.
+              const cleanup = await client.post<{ success?: boolean }>('/v1/video/complete', {
                 queue_id: args.queue_id,
                 model: args.model,
               })
+              if (cleanup?.success !== true) {
+                return {
+                  deleted: false,
+                  cleanupNote:
+                    ' Retrieval succeeded, but server-side cleanup was not confirmed: Venice did not report success.' +
+                    ' Assume the media is still stored server-side and retry with venice_video_complete.',
+                }
+              }
               return { deleted: true, cleanupNote: ` ${successNote}` }
             } catch (cleanupError) {
               return {
