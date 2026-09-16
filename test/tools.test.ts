@@ -2,10 +2,12 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
-import { resetWeb3MintAttemptStore } from '../src/tools/web3-key-mint.js'
+import { getSucceededWeb3Mint, resetWeb3MintAttemptStore } from '../src/tools/web3-key-mint.js'
 import { loadConfig } from '../src/config.js'
+import { VeniceClient } from '../src/venice-client.js'
 import { VeniceUpstreamError } from '../src/types.js'
 import { StubClient } from './helpers/stub-client.js'
+import { startMockVenice } from './helpers/mock-venice-server.js'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 
@@ -923,6 +925,106 @@ describe('tool output shaping', () => {
     assert.equal(posts, 2)
     assert.equal((stub.calls.at(-1)?.body as { expiresAt?: string }).expiresAt, '2026-08-01T12:00:00.123Z')
     assert.match((second.content[0] as { text: string }).text, /vk_after_400/)
+  })
+
+  it('treats a mint response without a readable API key as an unknown outcome', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        return { success: true, data: {} }
+      },
+    })
+    const mint = buildTools(stub.asClient(), cfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const address = `0x${'a'.repeat(40)}`
+    const args = {
+      address,
+      signature: 'signed-value',
+      token: 'empty-envelope-token',
+      consumption_limit: { usd: 25 },
+    } as never
+
+    const first = await mint.handler(args)
+    const firstText = (first.content[0] as { text: string }).text
+    assert.equal(first.isError, true)
+    assert.match(firstText, /Mint outcome is unknown/)
+    assert.match(firstText, /no readable API key/)
+    assert.doesNotMatch(firstText, /Store the newly minted API key/)
+    assert.equal(getSucceededWeb3Mint('empty-envelope-token', address, 'signed-value'), undefined)
+
+    // The wallet is not released for another mint: the key may exist upstream.
+    const retry = await mint.handler(args)
+    assert.equal(retry.isError, true)
+    assert.equal(posts, 1)
+  })
+
+  it('enters the unknown-outcome path when the HTTP client reads a truncated mint response', async () => {
+    resetWeb3MintAttemptStore()
+    const server = await startMockVenice([
+      {
+        match: 'GET /v1/api_keys/generate_web3_key',
+        reply: { success: true, data: { token: 'fresh-challenge-token' } },
+      },
+      {
+        match: 'POST /v1/api_keys/generate_web3_key',
+        reply: {
+          __status: 200,
+          __headers: { 'content-type': 'application/json' },
+          // Truncated JSON: the shared client parses this into {}.
+          __rawBody: '{"success":true,"data":{"apiKey":"vk_truncated',
+        },
+      },
+    ])
+    try {
+      const httpCfg = { ...loadConfig({}), baseUrl: server.url }
+      const tools = buildTools(new VeniceClient(httpCfg), httpCfg)
+      const mint = tools.find((tool) => tool.name === 'venice_web3_key_mint')!
+      const challenge = tools.find((tool) => tool.name === 'venice_web3_key_challenge')!
+      const address = `0x${'c'.repeat(40)}`
+      const mintPosts = () => server.calls.filter((call) => call.method === 'POST').length
+
+      const first = await mint.handler({
+        address,
+        signature: 'signed-value',
+        token: 'truncated-token',
+        consumption_limit: { usd: 25 },
+      } as never)
+      const firstText = (first.content[0] as { text: string }).text
+      assert.equal(first.isError, true)
+      assert.match(firstText, /Mint outcome is unknown/)
+      assert.match(firstText, /no readable API key/)
+      assert.doesNotMatch(firstText, /Store the newly minted API key/)
+      assert.doesNotMatch(firstText, /\{\}/)
+      assert.equal(getSucceededWeb3Mint('truncated-token', address, 'signed-value'), undefined)
+      assert.equal(mintPosts(), 1)
+
+      const retry = await mint.handler({
+        address,
+        signature: 'signed-value',
+        token: 'truncated-token',
+        consumption_limit: { usd: 25 },
+      } as never)
+      assert.equal(retry.isError, true)
+      assert.doesNotMatch((retry.content[0] as { text: string }).text, /Store the newly minted API key/)
+      assert.equal(mintPosts(), 1)
+
+      // A new challenge for the same wallet must not issue another mint POST.
+      const fresh = await challenge.handler({} as never)
+      assert.equal(fresh.isError, undefined)
+      const afterNewChallenge = await mint.handler({
+        address,
+        signature: 'signed-value',
+        token: 'fresh-challenge-token',
+        consumption_limit: { usd: 25 },
+      } as never)
+      assert.equal(afterNewChallenge.isError, true)
+      assert.match((afterNewChallenge.content[0] as { text: string }).text, /new challenge will not mint/)
+      assert.equal(mintPosts(), 1)
+    } finally {
+      await server.close()
+    }
   })
 
   it('accepts high-precision RFC3339 timestamps on usage-history filters', async () => {

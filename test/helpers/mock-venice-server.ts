@@ -7,6 +7,8 @@ export interface MockRoute {
   /**
    * Either a static response or a function that gets the parsed request and returns one.
    * Return a plain object → 200 JSON. Return { __status, __body, __headers } → custom.
+   * Use `__rawBody` instead of `__body` to write bytes verbatim, e.g. a truncated
+   * JSON payload served with a JSON content-type.
    */
   reply:
     | unknown
@@ -82,6 +84,7 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
         const r = reply as {
           __status: number
           __body?: unknown
+          __rawBody?: string
           __headers?: Record<string, string>
         }
         res.statusCode = r.__status
@@ -89,6 +92,10 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
           res.setHeader(k, v)
         }
         if (!res.hasHeader('content-type')) res.setHeader('content-type', 'application/json')
+        if (typeof r.__rawBody === 'string') {
+          res.end(r.__rawBody)
+          return
+        }
         const responseBody = r.__body ?? {}
         const contentType = String(res.getHeader('content-type') ?? '')
         res.end(

@@ -5,6 +5,9 @@ const MINT_ATTEMPT_TTL_MS = 15 * 60 * 1000
 export const WEB3_MINT_RECOVERY_MESSAGE =
   'Mint outcome is unknown. Do not retry venice_web3_key_mint — a live key may already exist and its secret cannot be recovered. Use an ADMIN API key with venice_list_api_keys to find and revoke any unexpected key, then request a new challenge only after revoking.'
 
+export const WEB3_MINT_UNREADABLE_RESPONSE_MESSAGE =
+  'Venice accepted the submission but the response carried no readable API key, so the secret was never captured by this server.'
+
 type MintRecord = {
   status: 'in_flight' | 'succeeded' | 'unknown'
   expiresAt: number
@@ -23,6 +26,25 @@ function pruneExpiredAttempts(now = Date.now()): void {
 
 export function resetWeb3MintAttemptStore(): void {
   attempts.clear()
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+/**
+ * A 2xx alone does not prove the secret arrived: the shared client turns a
+ * truncated or unreadable JSON body into `{}`. Only a success envelope that
+ * still carries the one-time secret and its key ID may be cached as a success.
+ */
+export function isMintedKeyResponse(resp: unknown): boolean {
+  if (typeof resp !== 'object' || resp === null || Array.isArray(resp)) return false
+  const envelope = resp as { success?: unknown; data?: unknown }
+  if (envelope.success === false) return false
+  const data = envelope.data
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return false
+  const { apiKey, id, apiKeyId } = data as { apiKey?: unknown; id?: unknown; apiKeyId?: unknown }
+  return isNonEmptyString(apiKey) && (isNonEmptyString(id) || isNonEmptyString(apiKeyId))
 }
 
 export function isUnknownMintOutcome(err: unknown): boolean {

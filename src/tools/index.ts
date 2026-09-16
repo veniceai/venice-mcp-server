@@ -34,11 +34,13 @@ import { fetchUploadSource } from './remote-fetch.js'
 import {
   beginWeb3MintAttempt,
   getSucceededWeb3Mint,
+  isMintedKeyResponse,
   isUnknownMintOutcome,
   markUnknownWeb3MintAttempt,
   releaseWeb3MintAttempt,
   succeedWeb3MintAttempt,
   WEB3_MINT_RECOVERY_MESSAGE,
+  WEB3_MINT_UNREADABLE_RESPONSE_MESSAGE,
   web3MintBlockedMessage,
 } from './web3-key-mint.js'
 
@@ -1384,6 +1386,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'none' },
           )
+          if (!isMintedKeyResponse(resp)) {
+            // The key may well be live upstream while its one-time secret is gone,
+            // so this is an unknown outcome — not a clean failure that would release
+            // the wallet to mint again, and never a cached empty "success".
+            markUnknownWeb3MintAttempt(args.token, args.address, args.signature)
+            return fail(`${WEB3_MINT_RECOVERY_MESSAGE} ${WEB3_MINT_UNREADABLE_RESPONSE_MESSAGE}`)
+          }
           succeedWeb3MintAttempt(args.token, args.address, args.signature, resp)
           // The secret must reach the caller, but it is never written to server logs
           // or duplicated in structuredContent.
