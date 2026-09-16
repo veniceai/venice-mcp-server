@@ -85,6 +85,34 @@ describe('E2EE contract helpers', () => {
     )
   })
 
+  it('rejects every response_format variant so no schema leaves the trust boundary as plaintext', () => {
+    const responseFormats = [
+      {
+        type: 'json_schema',
+        json_schema: {
+          name: 'confidential_extraction',
+          schema: {
+            type: 'object',
+            properties: { finding: { type: 'string', description: 'canary-do-not-forward' } },
+          },
+        },
+      },
+      { type: 'json_object' },
+      { type: 'text' },
+    ]
+    for (const response_format of responseFormats) {
+      assert.match(
+        validateE2eeChatRequest({
+          model: 'e2ee-qwen3-5-122b-a10b',
+          messages: [{ role: 'user', content: ciphertext }],
+          response_format,
+        }) ?? '',
+        /does not support structured output/,
+        `expected rejection for response_format.type=${response_format.type}`,
+      )
+    }
+  })
+
   it('rejects SSE content that is not valid ciphertext', () => {
     assert.match(
       validateE2eeSseContent(['{"choices":[{"delta":{"content":"plaintext"}}]}', '[DONE]']) ?? '',

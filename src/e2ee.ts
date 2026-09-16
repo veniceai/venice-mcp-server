@@ -25,6 +25,7 @@ export function validateE2eeChatRequest(args: {
   tools?: unknown
   tool_choice?: unknown
   parallel_tool_calls?: unknown
+  response_format?: unknown
   venice_parameters?: {
     enable_web_search?: 'auto' | 'on' | 'off'
     enable_web_citations?: boolean
@@ -39,6 +40,9 @@ export function validateE2eeChatRequest(args: {
   }
   if (args.tools !== undefined || args.tool_choice !== undefined || args.parallel_tool_calls !== undefined) {
     return 'E2EE does not support tools or function calling.'
+  }
+  if (args.response_format !== undefined) {
+    return 'E2EE does not support structured output; response_format is rejected in full, including json_object and text. A schema would travel to the API as plaintext outside the enclave trust boundary, and the E2EE request would not honour it.'
   }
 
   const venice = args.venice_parameters

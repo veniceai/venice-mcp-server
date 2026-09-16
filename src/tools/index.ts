@@ -321,7 +321,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. File, tool, and web features are rejected. Upstream SSE is returned unchanged in content[0].text only after ciphertext and error-envelope checks. This server does not decrypt, verify, or claim plaintext completion.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. File, tool, web, and structured-output features are rejected. Upstream SSE is returned unchanged in content[0].text only after ciphertext and error-envelope checks. This server does not decrypt, verify, or claim plaintext completion.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -380,7 +380,6 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               top_p: args.top_p,
               stop: args.stop,
               verbosity: args.verbosity,
-              response_format: args.response_format,
               prompt_cache_key: args.prompt_cache_key,
               prompt_cache_retention: args.prompt_cache_retention,
               reasoning: args.reasoning,

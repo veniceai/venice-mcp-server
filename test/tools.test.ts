@@ -619,6 +619,35 @@ describe('chat and responses request contracts', () => {
     }
   })
 
+  it('rejects an E2EE response_format schema without issuing any completion request', async () => {
+    const canary = 'canary-schema-must-not-be-forwarded'
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+    const result = await tool.handler({
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'confidential_extraction',
+          schema: {
+            type: 'object',
+            properties: { finding: { type: 'string', description: canary } },
+          },
+        },
+      },
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: E2EE_HEADERS,
+    } as never)
+
+    assert.equal(result.isError, true)
+    assert.match((result.content[0] as { text: string }).text, /does not support structured output/)
+    assert.equal((result.structuredContent as { encrypted?: boolean } | undefined)?.encrypted, undefined)
+    assert.equal(stub.callsTo('/v1/chat/completions').length, 0)
+    assert.equal(stub.calls.length, 0)
+    assert.doesNotMatch(JSON.stringify(stub.calls), new RegExp(canary))
+  })
+
   it('does not label a plaintext SSE payload as an encrypted E2EE result', async () => {
     const rawSse =
       'data: {"choices":[{"delta":{"content":"this is plaintext"}}]}\n\n' +
