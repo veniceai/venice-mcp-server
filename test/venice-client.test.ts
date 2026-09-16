@@ -1,6 +1,10 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { VeniceClient, VeniceResponseTooLargeError } from '../src/venice-client.js'
+import {
+  VeniceClient,
+  VeniceJsonResponseTooLargeError,
+  VeniceResponseTooLargeError,
+} from '../src/venice-client.js'
 import { loadConfig } from '../src/config.js'
 import { VeniceUpstreamError } from '../src/types.js'
 import { startMockVenice, type MockVeniceServer } from './helpers/mock-venice-server.js'
@@ -37,6 +41,16 @@ describe('VeniceClient', () => {
           },
         },
       },
+      {
+        match: 'POST /v1/oversized-payment',
+        reply: {
+          __status: 402,
+          __body: {
+            reason: 'insufficient_balance',
+            padding: 'x'.repeat(128 * 1024),
+          },
+        },
+      },
       { match: 'POST /v1/server-error', reply: { __status: 503, __body: { error: 'down' } } },
       { match: 'POST /v1/text-only', reply: { __status: 200, __body: 'plain text', __headers: { 'content-type': 'text/plain' } } },
       {
@@ -52,6 +66,16 @@ describe('VeniceClient', () => {
         reply: {
           __status: 200,
           __body: { status: 'PROCESSING', average_execution_time: 60_000, execution_duration: 10_000 },
+        },
+      },
+      {
+        match: 'POST /v1/video/oversized-processing',
+        reply: {
+          __status: 200,
+          __body: {
+            status: 'PROCESSING',
+            padding: 'x'.repeat(2 * 1024 * 1024),
+          },
         },
       },
       {
@@ -197,14 +221,31 @@ describe('VeniceClient', () => {
     assert.equal(r.headers['x-venice-enhanced-prompt'], 'detailed%20prompt')
   })
 
-  it('postMixed parses a JSON processing response', async () => {
+  it('postMixed does not apply a tiny binary limit to JSON processing responses', async () => {
     const c = new VeniceClient(makeCfg())
-    const r = await c.postMixed<{ status: string; execution_duration: number }>('/v1/video/processing', {})
+    const r = await c.postMixed<{ status: string; execution_duration: number }>(
+      '/v1/video/processing',
+      {},
+      { maxBytes: 8 },
+    )
     assert.equal(r.kind, 'json')
     if (r.kind === 'json') {
       assert.equal(r.data.status, 'PROCESSING')
       assert.equal(r.data.execution_duration, 10_000)
     }
+  })
+
+  it('postMixed rejects successful JSON above its fixed safety limit as JSON, not media', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMixed('/v1/video/oversized-processing', {}, { maxBytes: 8 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceJsonResponseTooLargeError)
+        assert.equal(err.maxBytes, 1024 * 1024)
+        assert.equal(err instanceof VeniceResponseTooLargeError, false)
+        return true
+      },
+    )
   })
 
   it('postMixed preserves a completed video/mp4 response as binary', async () => {
@@ -231,6 +272,25 @@ describe('VeniceClient', () => {
       (err: unknown) => {
         assert.ok(err instanceof VeniceResponseTooLargeError)
         assert.equal(err.maxBytes, 8)
+        return true
+      },
+    )
+  })
+
+  it('postMixed preserves oversized 402 semantics while bounding its error body', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMixed('/v1/oversized-payment', {}, { maxBytes: 8 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 402)
+        assert.equal(err.isPaymentRequired, true)
+        assert.deepEqual(err.body, {
+          error: 'upstream_error_body_truncated',
+          truncated: true,
+          max_bytes: 64 * 1024,
+        })
+        assert.equal(err instanceof VeniceResponseTooLargeError, false)
         return true
       },
     )

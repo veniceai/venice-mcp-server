@@ -127,6 +127,61 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
                 },
       },
       {
+        match: 'POST /v1/audio/retrieve',
+        reply: ({ body }) => {
+          const queueId = (body as { queue_id?: string }).queue_id
+          if (queueId === 'music-processing') {
+            return {
+              __status: 200,
+              __body: {
+                status: 'PROCESSING',
+                average_execution_time: 60_000,
+                execution_duration: 12_000,
+              },
+            }
+          }
+          if (queueId === 'music-wav') {
+            return {
+              __status: 200,
+              __body: Buffer.from('integration-wav'),
+              __headers: { 'content-type': 'audio/wav' },
+            }
+          }
+          if (queueId === 'music-flac') {
+            return {
+              __status: 200,
+              __body: Buffer.from('integration-flac'),
+              __headers: { 'content-type': 'audio/flac' },
+            }
+          }
+          if (queueId === 'music-m4a') {
+            return {
+              __status: 200,
+              __body: Buffer.from('integration-m4a'),
+              __headers: { 'content-type': 'audio/mp4' },
+            }
+          }
+          if (queueId === 'music-oversized') {
+            return {
+              __status: 200,
+              __body: Buffer.alloc(129, 1),
+              __headers: { 'content-type': 'audio/mpeg' },
+            }
+          }
+          return {
+            __status: 200,
+            __body: Buffer.from('integration-mp3'),
+            __headers: { 'content-type': 'audio/mpeg' },
+          }
+        },
+      },
+      {
+        match: 'POST /v1/audio/complete',
+        reply: ({ body }) => ({
+          success: (body as { queue_id?: string }).queue_id !== 'music-cleanup-fails',
+        }),
+      },
+      {
         match: 'POST /v1/insufficient',
         reply: {
           __status: 402,
@@ -168,6 +223,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
           ...process.env,
           VENICE_TEST_BASE_URL: venice.url,
           VENICE_API_KEY: 'vk_integration',
+          VENICE_MAX_AUDIO_RESPONSE_BYTES: '32',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       }
@@ -306,6 +362,170 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(jsonResult.structuredContent.status, 'COMPLETED')
     assert.equal(jsonResult.structuredContent.url, 'https://stub/v.mp4')
     assert.equal(jsonResult.content.find((item) => item.type === 'resource_link')?.uri, 'https://stub/v.mp4')
+  })
+
+  it('venice_music_status supports JSON processing and embedded audio responses', async () => {
+    const processing = (await rpc.request('tools/call', {
+      name: 'venice_music_status',
+      arguments: { queue_id: 'music-processing', model: 'mock-music-model' },
+    })) as RpcResult
+    const processingResult = processing.result as {
+      structuredContent: {
+        status: string
+        average_execution_time: number
+        execution_duration: number
+      }
+      content: Array<{ text?: string }>
+    }
+    assert.equal(processingResult.structuredContent.status, 'PROCESSING')
+    assert.equal(processingResult.structuredContent.average_execution_time, 60_000)
+    assert.equal(processingResult.structuredContent.execution_duration, 12_000)
+    assert.match(processingResult.content[0].text ?? '', /12s elapsed/)
+    assert.match(processingResult.content[0].text ?? '', /60s ETA/)
+
+    const mp3 = (await rpc.request('tools/call', {
+      name: 'venice_music_status',
+      arguments: { queue_id: 'music-mp3', model: 'mock-music-model' },
+    })) as RpcResult
+    const mp3Result = mp3.result as {
+      structuredContent: { status: string; mime_type: string; representation: string }
+      content: Array<{
+        type: string
+        resource?: { uri: string; mimeType?: string; blob?: string }
+      }>
+    }
+    assert.equal(mp3Result.structuredContent.status, 'COMPLETED')
+    assert.equal(mp3Result.structuredContent.mime_type, 'audio/mpeg')
+    assert.equal(mp3Result.structuredContent.representation, 'MCP embedded blob resource')
+    const mp3Resource = mp3Result.content.find((item) => item.type === 'resource')?.resource
+    assert.equal(mp3Resource?.uri, 'venice://music/music-mp3')
+    assert.equal(mp3Resource?.mimeType, 'audio/mpeg')
+    assert.equal(mp3Resource?.blob, Buffer.from('integration-mp3').toString('base64'))
+    assert.equal(mp3Result.content.some((item) => item.type === 'audio'), false)
+
+    const wav = (await rpc.request('tools/call', {
+      name: 'venice_music_status',
+      arguments: {
+        queue_id: 'music-wav',
+        model: 'mock-music-model',
+        delete_media_on_completion: true,
+      },
+    })) as RpcResult
+    const wavResult = wav.result as {
+      structuredContent: { status: string; mime_type: string; server_media_deleted: boolean }
+      content: Array<{ type: string; resource?: { mimeType?: string; blob?: string } }>
+    }
+    assert.equal(wavResult.structuredContent.status, 'COMPLETED')
+    assert.equal(wavResult.structuredContent.mime_type, 'audio/wav')
+    assert.equal(wavResult.structuredContent.server_media_deleted, true)
+    const wavResource = wavResult.content.find((item) => item.type === 'resource')?.resource
+    assert.equal(wavResource?.mimeType, 'audio/wav')
+    assert.equal(wavResource?.blob, Buffer.from('integration-wav').toString('base64'))
+    const wavRetrieve = venice.calls.find(
+      (call) =>
+        call.path === '/v1/audio/retrieve' &&
+        (call.body as { queue_id?: string }).queue_id === 'music-wav',
+    )
+    assert.equal(
+      (wavRetrieve?.body as { delete_media_on_completion?: boolean }).delete_media_on_completion,
+      false,
+    )
+    assert.ok(
+      venice.calls.some(
+        (call) =>
+          call.path === '/v1/audio/complete' &&
+          (call.body as { queue_id?: string }).queue_id === 'music-wav',
+      ),
+    )
+
+    for (const [queueId, mimeType] of [
+      ['music-flac', 'audio/flac'],
+      ['music-m4a', 'audio/mp4'],
+    ] as const) {
+      const response = (await rpc.request('tools/call', {
+        name: 'venice_music_status',
+        arguments: { queue_id: queueId, model: 'mock-music-model' },
+      })) as RpcResult
+      const result = response.result as {
+        content: Array<{ type: string; resource?: { mimeType?: string; blob?: string } }>
+      }
+      const resource = result.content.find((item) => item.type === 'resource')?.resource
+      assert.equal(resource?.mimeType, mimeType)
+      assert.equal(resource?.blob, Buffer.from(`integration-${queueId.slice(6)}`).toString('base64'))
+    }
+  })
+
+  it('venice_music_status preserves audio when HTTP 200 cleanup reports success=false', async () => {
+    const response = (await rpc.request('tools/call', {
+      name: 'venice_music_status',
+      arguments: {
+        queue_id: 'music-cleanup-fails',
+        model: 'mock-music-model',
+        delete_media_on_completion: true,
+      },
+    })) as RpcResult
+    const result = response.result as {
+      isError?: boolean
+      structuredContent: { status: string; server_media_deleted: boolean }
+      content: Array<{
+        type: string
+        resource?: { mimeType?: string; blob?: string }
+        text?: string
+      }>
+    }
+
+    assert.equal(result.isError, undefined)
+    assert.equal(result.structuredContent.status, 'COMPLETED')
+    assert.equal(result.structuredContent.server_media_deleted, false)
+    const resource = result.content.find((item) => item.type === 'resource')?.resource
+    assert.equal(resource?.mimeType, 'audio/mpeg')
+    assert.equal(resource?.blob, Buffer.from('integration-mp3').toString('base64'))
+    const text = result.content.find((item) => item.type === 'text')
+    assert.match(text?.text ?? '', /cleanup failed/)
+    assert.match(text?.text ?? '', /success=true/)
+  })
+
+  it('venice_music_status bounds completed audio without deleting the queued media', async () => {
+    const oversized = (await rpc.request('tools/call', {
+      name: 'venice_music_status',
+      arguments: {
+        queue_id: 'music-oversized',
+        model: 'mock-music-model',
+        delete_media_on_completion: true,
+      },
+    })) as RpcResult
+    const result = oversized.result as {
+      isError?: boolean
+      structuredContent: {
+        error: string
+        retry_safe: boolean
+        server_media_deleted: boolean
+      }
+      content: Array<{ text?: string }>
+    }
+    assert.equal(result.isError, true)
+    assert.equal(result.structuredContent.error, 'audio_response_too_large')
+    assert.equal(result.structuredContent.retry_safe, true)
+    assert.equal(result.structuredContent.server_media_deleted, false)
+    assert.match(result.content[0].text ?? '', /VENICE_MAX_AUDIO_RESPONSE_BYTES/)
+    const oversizedRetrieve = venice.calls.find(
+      (call) =>
+        call.path === '/v1/audio/retrieve' &&
+        (call.body as { queue_id?: string }).queue_id === 'music-oversized',
+    )
+    assert.equal(
+      (oversizedRetrieve?.body as { delete_media_on_completion?: boolean })
+        .delete_media_on_completion,
+      false,
+    )
+    assert.equal(
+      venice.calls.some(
+        (call) =>
+          call.path === '/v1/audio/complete' &&
+          (call.body as { queue_id?: string }).queue_id === 'music-oversized',
+      ),
+      false,
+    )
   })
 
   it('reads venice://models resource', async () => {
