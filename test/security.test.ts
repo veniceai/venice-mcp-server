@@ -115,6 +115,18 @@ describe('remote upload fetch security', () => {
     )
   })
 
+  it('rejects public local-use NAT64 embeddings whose alternative layouts decode as private', async () => {
+    // Intentional fail-closed false positive, not accidental behaviour. Under a /64
+    // translator this is public 93.184.216.34, but the /48 offset reads 10.0.93.184 and
+    // the address alone does not say which prefix length its translator used. Accepting
+    // it because one candidate is public would let a caller pick the layout, so the
+    // rejection is the documented cost of keeping the check fail-closed.
+    await assert.rejects(
+      validateRemoteUrl(new URL('http://[64:ff9b:1:a00:5d:b8d8:2200:0]/file.png'), publicLookup),
+      /private or local address/,
+    )
+  })
+
   it('rejects 6to4, Teredo, ISATAP, and site-local embeddings of private addresses', async () => {
     await assert.rejects(
       validateRemoteUrl(new URL('http://[2002:7f00:1::]/file.png'), publicLookup),

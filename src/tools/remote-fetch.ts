@@ -375,6 +375,7 @@ function ipv4FromHextets(high: number, low: number): string {
 /**
  * Decode IPv4 carried inside IPv6 translation / tunneling forms.
  * Public embeddings stay allowed; private extracted IPv4s are blocked by the caller.
+ * The one exception is the ambiguous local-use NAT64 space handled below.
  */
 function ipv4sFromEmbeddings(address: string): string[] {
   const found = new Set<string>()
@@ -419,9 +420,16 @@ function ipv4sFromEmbeddings(address: string): string[] {
 /**
  * RFC 6052 puts IPv4 at a different offset per prefix length, and RFC 8215 reserves
  * local-use 64:ff9b:1::/48 so operators can carve /56 and /64 translators out of it.
- * Every layout is decoded and the u octet (bits 64-71) is not required to be zero, so
- * a malformed address cannot carry a private destination past the check. A candidate
- * starting at 0 means the wrong offset was read: 0.0.0.0/8 is never a real destination.
+ * Nothing in the address says which prefix length its translator used, so every layout
+ * is decoded and the caller blocks the address if any candidate decodes to a private
+ * IPv4. That deliberately over-blocks a minority of public destinations inside the
+ * local-use prefix: 64:ff9b:1:a00:5d:b8d8:2200:0 is public 93.184.216.34 under /64 but
+ * reads as 10.0.93.184 under /48. Allowing an address because one candidate is public
+ * would let a caller choose the layout and walk a private destination through, so the
+ * check stays fail-closed.
+ * The u octet (bits 64-71) is not required to be zero, so a malformed address cannot
+ * carry a private destination past the check. A candidate starting at 0 means the wrong
+ * offset was read: 0.0.0.0/8 is never a real destination.
  */
 function ipv4sFromRfc6052Layouts(groups: number[]): string[] {
   const hi = (group: number) => (group >> 8) & 0xff
