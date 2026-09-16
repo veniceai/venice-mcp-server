@@ -923,14 +923,17 @@ describe('tool output shaping', () => {
     }
   })
 
-  it('venice_asr pages timestamp arrays instead of returning the full payload twice', async () => {
+  it('venice_asr pages a retained result without transcribing the clip twice', async () => {
     const originalFetch = globalThis.fetch
+    let fetchCalls = 0
     try {
-      globalThis.fetch = (async () =>
-        new Response('mock audio', {
+      globalThis.fetch = (async () => {
+        fetchCalls += 1
+        return new Response('mock audio', {
           status: 200,
           headers: { 'content-type': 'audio/wav' },
-        })) as typeof fetch
+        })
+      }) as typeof fetch
       const words = Array.from({ length: 250 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
       const stub = new StubClient({
         '/v1/audio/transcriptions': () => ({
@@ -948,29 +951,62 @@ describe('tool output shaping', () => {
         timestamp_total: { word: number }
         timestamps_truncated: boolean
         timestamp_limit: number
+        result_handle: string
       }
       assert.equal(structured.timestamps.word.length, 200)
       assert.deepEqual(structured.timestamps.word[0], words[0])
       assert.equal(structured.timestamp_total.word, 250)
       assert.equal(structured.timestamps_truncated, true)
       assert.equal(structured.timestamp_limit, 200)
+      assert.equal(typeof structured.result_handle, 'string')
       const text = (r.content[0] as { text: string }).text
       assert.equal(text, 'long transcript')
       assert.doesNotMatch(text, /w249/)
 
       const page = await tool.handler({
-        audio_url: 'https://93.184.216.34/audio.wav',
-        timestamps: true,
+        result_handle: structured.result_handle,
         timestamp_offset: 200,
         timestamp_limit: 50,
       } as never)
-      const paged = page.structuredContent as { timestamps: { word: unknown[] }; timestamp_offset: number }
+      const paged = page.structuredContent as {
+        timestamps: { word: unknown[] }
+        timestamp_offset: number
+        result_handle: string
+      }
       assert.equal(paged.timestamps.word.length, 50)
       assert.deepEqual(paged.timestamps.word[0], words[200])
       assert.equal(paged.timestamp_offset, 200)
+      assert.equal(paged.result_handle, structured.result_handle)
+      // The point of the handle: continuation must not pay for a second transcription.
+      assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 1)
+      assert.equal(fetchCalls, 1)
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('venice_asr refuses to re-transcribe when a result handle is unknown or expired', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+    const r = await tool.handler({
+      result_handle: 'missing-handle',
+      timestamp_offset: 200,
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /expired result_handle/)
+    assert.equal((r.structuredContent as { error: string }).error, 'asr_result_expired')
+    assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 0)
+  })
+
+  it('venice_asr requires audio_url when no result handle is supplied', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+    const r = await tool.handler({ timestamps: true } as never)
+
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /audio_url is required/)
+    assert.equal(stub.calls.length, 0)
   })
 
   it('venice_asr rejects an oversized timestamped transcription before echoing it', async () => {
