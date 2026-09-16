@@ -974,7 +974,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_music_status',
       title: 'Venice Music Retrieve / Status',
-      description: `Check status of a queued music job (POST endpoint with body {model, queue_id}).${X402_OK}`,
+      description: `Check status of a queued music job. Returns JSON progress while PROCESSING and completed audio as an embedded MCP blob resource. POST endpoint with body {model, queue_id}.${X402_OK}`,
       inputSchema: {
         queue_id: z.string().min(1),
         model: z.string().min(1),
@@ -982,24 +982,130 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
-          const resp = await client.post<{
+          const response = await client.postMixed<{
             status?: 'PROCESSING' | 'COMPLETED'
             download_url?: string
             url?: string
             average_execution_time?: number
-          }>('/v1/audio/retrieve', args)
+            execution_duration?: number
+          }>(
+            '/v1/audio/retrieve',
+            {
+              ...args,
+              // Keep the queued media until a supported response is safely buffered.
+              // This makes an oversized response retryable with a higher limit.
+              delete_media_on_completion: false,
+            },
+            { maxBytes: cfg.maxAudioResponseBytes },
+          )
+          const cleanupAfterSuccess = async (successNote: string) => {
+            if (!args.delete_media_on_completion) {
+              return { deleted: false, cleanupNote: '' }
+            }
+            try {
+              const completion = await client.post<{ success?: boolean }>('/v1/audio/complete', {
+                queue_id: args.queue_id,
+                model: args.model,
+              })
+              if (completion.success !== true) {
+                return {
+                  deleted: false,
+                  cleanupNote:
+                    ' Retrieval succeeded, but server-side cleanup failed: Venice did not confirm success=true.',
+                }
+              }
+              return { deleted: true, cleanupNote: ` ${successNote}` }
+            } catch (cleanupError) {
+              return {
+                deleted: false,
+                cleanupNote: ` Retrieval succeeded, but server-side cleanup failed: ${formatToolError(cleanupError)}`,
+              }
+            }
+          }
+          if (response.kind === 'binary') {
+            const mimeType = response.contentType.split(';', 1)[0].trim().toLowerCase()
+            if (!mimeType.startsWith('audio/') || mimeType.length === 'audio/'.length) {
+              return fail(
+                `Venice returned unsupported completed music content type: ${response.contentType || '(missing)'}. ` +
+                  'Expected an audio/* response. The queued media was not deleted.',
+                {
+                  status: 'COMPLETED',
+                  error: 'unsupported_audio_content_type',
+                  content_type: response.contentType,
+                  server_media_deleted: false,
+                  queue_id: args.queue_id,
+                },
+              )
+            }
+            const blob = response.buffer.toString('base64')
+            const { deleted, cleanupNote } = await cleanupAfterSuccess(
+              'Server-side media was deleted after the audio was buffered.',
+            )
+            return {
+              content: [
+                {
+                  type: 'resource',
+                  resource: {
+                    uri: `venice://music/${encodeURIComponent(args.queue_id)}`,
+                    mimeType,
+                    blob,
+                  },
+                },
+                {
+                  type: 'text',
+                  text: `Completed music (${response.buffer.length} bytes, embedded as a base64 ${mimeType} resource).${cleanupNote}`,
+                },
+              ],
+              structuredContent: {
+                status: 'COMPLETED',
+                mime_type: mimeType,
+                byte_length: response.buffer.length,
+                representation: 'MCP embedded blob resource',
+                server_media_deleted: deleted,
+              },
+            }
+          }
+          const resp = response.data
           const url = resp.download_url ?? resp.url
           if (resp.status === 'COMPLETED' && url) {
+            const { deleted, cleanupNote } = await cleanupAfterSuccess(
+              'Server-side media was deleted after the download URL was captured.',
+            )
             return {
               content: [
                 { type: 'resource_link', uri: url, name: 'music', mimeType: 'audio/mpeg' },
-                { type: 'text', text: url },
+                { type: 'text', text: `${url}${cleanupNote}` },
               ],
-              structuredContent: { status: resp.status, url },
+              structuredContent: {
+                status: resp.status,
+                url,
+                representation: 'download_url resource link',
+                server_media_deleted: deleted,
+              },
             }
           }
-          return ok(`Status: ${resp.status ?? 'unknown'}`, { status: resp.status })
+          const eta = resp.average_execution_time ? `${Math.round(resp.average_execution_time / 1000)}s ETA` : ''
+          const dur = resp.execution_duration ? `${Math.round(resp.execution_duration / 1000)}s elapsed` : ''
+          return ok(`Status: ${resp.status ?? 'unknown'} ${dur} ${eta}`.trim(), {
+            status: resp.status,
+            average_execution_time: resp.average_execution_time,
+            execution_duration: resp.execution_duration,
+          })
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) {
+            return fail(
+              `Completed music exceeds the configured ${err.maxBytes}-byte MCP response limit. ` +
+                'The queued media was not deleted. Raise VENICE_MAX_AUDIO_RESPONSE_BYTES, restart the server, and retry venice_music_status with the same queue_id; alternatively, create a new shorter generation.',
+              {
+                status: 'COMPLETED',
+                error: 'audio_response_too_large',
+                max_bytes: err.maxBytes,
+                retry_safe: true,
+                queue_id: args.queue_id,
+                server_media_deleted: false,
+              },
+            )
+          }
           return fail(formatToolError(err))
         }
       },

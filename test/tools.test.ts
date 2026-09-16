@@ -797,6 +797,266 @@ describe('tool output shaping', () => {
     assert.equal(parsed.lyrics_prompt, longLyrics)
   })
 
+  it('venice_music_status preserves PROCESSING status and timing', async () => {
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({
+        status: 'PROCESSING',
+        average_execution_time: 60_000,
+        execution_duration: 12_000,
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'processing-music',
+      model: 'music-model',
+    } as never)
+
+    assert.equal((r.structuredContent as { status: string }).status, 'PROCESSING')
+    assert.equal(
+      (r.structuredContent as { average_execution_time: number }).average_execution_time,
+      60_000,
+    )
+    assert.equal((r.structuredContent as { execution_duration: number }).execution_duration, 12_000)
+    assert.match((r.content[0] as { text: string }).text, /12s elapsed/)
+    assert.match((r.content[0] as { text: string }).text, /60s ETA/)
+    assert.equal(
+      (stub.callsTo('/v1/audio/retrieve')[0].body as { delete_media_on_completion: boolean })
+        .delete_media_on_completion,
+      false,
+    )
+  })
+
+  it('venice_music_status does not classify oversized JSON as completed audio', async () => {
+    const { VeniceJsonResponseTooLargeError } = await import('../src/venice-client.js')
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => {
+        throw new VeniceJsonResponseTooLargeError('/v1/audio/retrieve', 1024 * 1024)
+      },
+    })
+    const tools = buildTools(stub.asClient(), { ...cfg, maxAudioResponseBytes: 8 })
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'oversized-json',
+      model: 'music-model',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal(r.structuredContent, undefined)
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /JSON response/)
+    assert.doesNotMatch(text, /Completed music|audio_response_too_large/)
+    assert.equal(stub.callsTo('/v1/audio/complete').length, 0)
+  })
+
+  it('venice_music_status preserves oversized 402 responses as payment errors', async () => {
+    const { VeniceUpstreamError } = await import('../src/types.js')
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => {
+        throw new VeniceUpstreamError({
+          message: 'Venice 402 on /v1/audio/retrieve',
+          status: 402,
+          body: { error: 'upstream_error_body_truncated', truncated: true },
+        })
+      },
+    })
+    const tools = buildTools(stub.asClient(), { ...cfg, maxAudioResponseBytes: 8 })
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'oversized-payment-error',
+      model: 'music-model',
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal(r.structuredContent, undefined)
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /402 Payment Required/)
+    assert.doesNotMatch(text, /Completed music|audio_response_too_large/)
+  })
+
+  it('venice_music_status returns completed MP3 bytes as an embedded MCP resource', async () => {
+    const mp3 = Buffer.from('mock-mp3-bytes')
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({
+        kind: 'binary',
+        buffer: mp3,
+        contentType: 'audio/mpeg',
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'completed-mp3',
+      model: 'music-model',
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { status: string }).status, 'COMPLETED')
+    assert.equal(
+      (r.structuredContent as { representation: string }).representation,
+      'MCP embedded blob resource',
+    )
+    const resource = r.content.find((item) => item.type === 'resource') as
+      | {
+          type: 'resource'
+          resource: { uri: string; mimeType?: string; blob: string }
+        }
+      | undefined
+    assert.equal(resource?.resource.uri, 'venice://music/completed-mp3')
+    assert.equal(resource?.resource.mimeType, 'audio/mpeg')
+    assert.equal(resource?.resource.blob, mp3.toString('base64'))
+    assert.equal(r.content.some((item) => item.type === 'audio'), false)
+  })
+
+  it('venice_music_status returns a WAV resource before requested server cleanup', async () => {
+    const wav = Buffer.from('mock-wav-bytes')
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({
+        kind: 'binary',
+        buffer: wav,
+        contentType: 'audio/wav; charset=binary',
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'completed-wav',
+      model: 'music-model',
+      delete_media_on_completion: true,
+    } as never)
+
+    const resource = r.content.find((item) => item.type === 'resource') as
+      | {
+          type: 'resource'
+          resource: { mimeType?: string; blob: string }
+        }
+      | undefined
+    assert.equal(resource?.resource.mimeType, 'audio/wav')
+    assert.equal(resource?.resource.blob, wav.toString('base64'))
+    assert.equal(
+      (stub.callsTo('/v1/audio/retrieve')[0].body as { delete_media_on_completion: boolean })
+        .delete_media_on_completion,
+      false,
+    )
+    assert.equal(stub.callsTo('/v1/audio/complete').length, 1)
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, true)
+  })
+
+  it('venice_music_status accepts completed FLAC and M4A audio resources', async () => {
+    for (const [queueId, mimeType] of [
+      ['completed-flac', 'audio/flac'],
+      ['completed-m4a', 'audio/mp4'],
+    ] as const) {
+      const bytes = Buffer.from(queueId)
+      const stub = new StubClient({
+        '/v1/audio/retrieve': () => ({
+          kind: 'binary',
+          buffer: bytes,
+          contentType: mimeType,
+        }),
+      })
+      const tools = buildTools(stub.asClient(), cfg)
+      const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+        queue_id: queueId,
+        model: 'music-model',
+      } as never)
+
+      assert.equal(r.isError, undefined)
+      const resource = r.content.find((item) => item.type === 'resource') as
+        | {
+            type: 'resource'
+            resource: { uri: string; mimeType?: string; blob: string }
+          }
+        | undefined
+      assert.equal(resource?.resource.uri, `venice://music/${queueId}`)
+      assert.equal(resource?.resource.mimeType, mimeType)
+      assert.equal(resource?.resource.blob, bytes.toString('base64'))
+    }
+  })
+
+  it('venice_music_status keeps retrieved audio when cleanup returns success=false', async () => {
+    const mp3 = Buffer.from('cleanup-failed-mp3')
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({
+        kind: 'binary',
+        buffer: mp3,
+        contentType: 'audio/mpeg',
+      }),
+      '/v1/audio/complete': () => ({ success: false }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'cleanup-failed',
+      model: 'music-model',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    const resource = r.content.find((item) => item.type === 'resource') as
+      | {
+          type: 'resource'
+          resource: { blob: string }
+        }
+      | undefined
+    assert.equal(resource?.resource.blob, mp3.toString('base64'))
+    assert.equal(stub.callsTo('/v1/audio/complete').length, 1)
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    const text = r.content.find((item) => item.type === 'text') as { text: string }
+    assert.match(text.text, /cleanup failed/)
+    assert.match(text.text, /success=true/)
+  })
+
+  it('venice_music_status rejects unsupported completed content without deleting it', async () => {
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({
+        kind: 'binary',
+        buffer: Buffer.from('not-audio'),
+        contentType: 'application/octet-stream',
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'unsupported-music',
+      model: 'music-model',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal(
+      (r.structuredContent as { error: string }).error,
+      'unsupported_audio_content_type',
+    )
+    assert.match((r.content[0] as { text: string }).text, /application\/octet-stream/)
+    assert.match((r.content[0] as { text: string }).text, /not deleted/)
+    assert.equal(stub.callsTo('/v1/audio/complete').length, 0)
+  })
+
+  it('venice_music_status returns retry-safe guidance for oversized audio without deleting it', async () => {
+    const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => {
+        throw new VeniceResponseTooLargeError('/v1/audio/retrieve', 1024)
+      },
+    })
+    const tools = buildTools(stub.asClient(), { ...cfg, maxAudioResponseBytes: 1024 })
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'oversized-music',
+      model: 'music-model',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal((r.structuredContent as { error: string }).error, 'audio_response_too_large')
+    assert.equal((r.structuredContent as { retry_safe: boolean }).retry_safe, true)
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    assert.equal(
+      (stub.callsTo('/v1/audio/retrieve')[0].body as { delete_media_on_completion: boolean })
+        .delete_media_on_completion,
+      false,
+    )
+    assert.equal(stub.callsTo('/v1/audio/complete').length, 0)
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /same queue_id/)
+    assert.match(text, /VENICE_MAX_AUDIO_RESPONSE_BYTES/)
+    assert.match(text, /not deleted/)
+  })
+
   it('venice_video_status returns retry-safe guidance for an oversized MP4', async () => {
     const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
     const stub = new StubClient({

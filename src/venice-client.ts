@@ -31,6 +31,9 @@ export type VeniceMixedResponse<T> =
   | ({ kind: 'json' } & VeniceResponse<T>)
   | ({ kind: 'binary' } & VeniceBinaryResponse)
 
+const MAX_MIXED_JSON_RESPONSE_BYTES = 1024 * 1024
+const MAX_UPSTREAM_ERROR_RESPONSE_BYTES = 64 * 1024
+
 export class VeniceResponseTooLargeError extends Error {
   constructor(
     readonly path: string,
@@ -38,6 +41,16 @@ export class VeniceResponseTooLargeError extends Error {
   ) {
     super(`Venice response on ${path} exceeds the configured ${maxBytes}-byte limit`)
     this.name = 'VeniceResponseTooLargeError'
+  }
+}
+
+export class VeniceJsonResponseTooLargeError extends Error {
+  constructor(
+    readonly path: string,
+    readonly maxBytes: number,
+  ) {
+    super(`Venice JSON response on ${path} exceeds the fixed ${maxBytes}-byte safety limit`)
+    this.name = 'VeniceJsonResponseTooLargeError'
   }
 }
 
@@ -215,6 +228,39 @@ export class VeniceClient {
     init: RequestInitJSON | { form: FormData },
     opts: { timeoutMs?: number; maxBytes?: number } = {},
   ): Promise<VeniceBinaryResponse> {
+    return this.postBuffered(path, init, opts, false)
+  }
+
+  /**
+   * POST to an endpoint whose success response may be JSON or binary. Venice's
+   * media retrieval endpoints use JSON while processing and binary when done.
+   * Successful JSON and error responses use separate fixed safety limits so
+   * the configured media limit applies only to a successful binary response.
+   */
+  async postMixed<T = unknown>(
+    path: string,
+    json: unknown,
+    opts: { timeoutMs?: number; maxBytes?: number } = {},
+  ): Promise<VeniceMixedResponse<T>> {
+    const response = await this.postBuffered(path, { method: 'POST', json }, opts, true)
+    if (response.contentType.includes('application/json')) {
+      return {
+        kind: 'json',
+        data: JSON.parse(response.buffer.toString('utf8')) as T,
+        status: response.status,
+        contentType: response.contentType,
+        headers: response.headers,
+      }
+    }
+    return { kind: 'binary', ...response }
+  }
+
+  private async postBuffered(
+    path: string,
+    init: RequestInitJSON | { form: FormData },
+    opts: { timeoutMs?: number; maxBytes?: number },
+    mixedResponse: boolean,
+  ): Promise<VeniceBinaryResponse> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
@@ -236,28 +282,53 @@ export class VeniceClient {
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
       const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal })
-
+      const contentType = res.headers.get('content-type') ?? 'application/octet-stream'
       if (!res.ok) {
-        // For errors, still parse as JSON so we get a useful error body
-        const ct = res.headers.get('content-type') ?? ''
+        const { buffer, truncated } = await readTruncatedResponseBuffer(
+          res,
+          MAX_UPSTREAM_ERROR_RESPONSE_BYTES,
+        )
         let errBody: unknown
-        if (ct.includes('application/json')) errBody = await res.json().catch(() => ({}))
-        else errBody = await res.text().catch(() => '')
-        const headerObj: Record<string, string> = {}
-        res.headers.forEach((v, k) => (headerObj[k] = v))
+        if (truncated) {
+          errBody = {
+            error: 'upstream_error_body_truncated',
+            truncated: true,
+            max_bytes: MAX_UPSTREAM_ERROR_RESPONSE_BYTES,
+          }
+        } else if (contentType.includes('application/json')) {
+          try {
+            errBody = JSON.parse(buffer.toString('utf8'))
+          } catch {
+            errBody = {}
+          }
+        } else {
+          errBody = buffer.toString('utf8')
+        }
         throw new VeniceUpstreamError({
           message: `Venice ${res.status} on ${path}`,
           status: res.status,
           body: errBody,
-          headers: headerObj,
+          headers: responseHeaders(res),
         })
       }
-
-      const buffer = await readBoundedResponseBuffer(res, path, opts.maxBytes)
+      const jsonSuccess = mixedResponse && contentType.includes('application/json')
+      let buffer: Buffer
+      try {
+        buffer = await readBoundedResponseBuffer(
+          res,
+          path,
+          jsonSuccess ? MAX_MIXED_JSON_RESPONSE_BYTES : opts.maxBytes,
+        )
+      } catch (err) {
+        if (jsonSuccess && err instanceof VeniceResponseTooLargeError) {
+          throw new VeniceJsonResponseTooLargeError(path, MAX_MIXED_JSON_RESPONSE_BYTES)
+        }
+        throw err
+      }
       return {
         buffer,
         status: res.status,
-        contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+        contentType,
         headers: responseHeaders(res),
       }
     } catch (err) {
@@ -272,28 +343,6 @@ export class VeniceClient {
     } finally {
       clearTimeout(timeout)
     }
-  }
-
-  /**
-   * POST to an endpoint whose success response may be JSON or binary. Venice's
-   * video retrieval endpoint uses JSON while processing and video/mp4 when done.
-   */
-  async postMixed<T = unknown>(
-    path: string,
-    json: unknown,
-    opts: { timeoutMs?: number; maxBytes?: number } = {},
-  ): Promise<VeniceMixedResponse<T>> {
-    const response = await this.postBinary(path, { method: 'POST', json }, opts)
-    if (response.contentType.includes('application/json')) {
-      return {
-        kind: 'json',
-        data: JSON.parse(response.buffer.toString('utf8')) as T,
-        status: response.status,
-        contentType: response.contentType,
-        headers: response.headers,
-      }
-    }
-    return { kind: 'binary', ...response }
   }
 }
 
@@ -332,6 +381,50 @@ async function readBoundedResponseBuffer(
     reader.releaseLock()
   }
   return Buffer.concat(chunks, total)
+}
+
+async function readTruncatedResponseBuffer(
+  res: Response,
+  maxBytes: number,
+): Promise<{ buffer: Buffer; truncated: boolean }> {
+  const contentLength = res.headers.get('content-length')
+  if (contentLength !== null) {
+    const declaredBytes = Number(contentLength)
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      await res.body?.cancel()
+      return { buffer: Buffer.alloc(0), truncated: true }
+    }
+  }
+
+  if (!res.body) return { buffer: Buffer.alloc(0), truncated: false }
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) return { buffer: Buffer.concat(chunks, total), truncated: false }
+
+      const remaining = maxBytes - total
+      if (value.byteLength > remaining) {
+        if (remaining > 0) chunks.push(value.subarray(0, remaining))
+        total = maxBytes
+        await reader.cancel()
+        return { buffer: Buffer.concat(chunks, total), truncated: true }
+      }
+
+      chunks.push(value)
+      total += value.byteLength
+      if (total === maxBytes) {
+        const next = await reader.read()
+        if (next.done) return { buffer: Buffer.concat(chunks, total), truncated: false }
+        await reader.cancel()
+        return { buffer: Buffer.concat(chunks, total), truncated: true }
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 function responseHeaders(res: Response): Record<string, string> {

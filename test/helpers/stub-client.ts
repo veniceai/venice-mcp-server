@@ -196,7 +196,7 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
   if (path.startsWith('/v1/audio/queue')) return { model: 'elevenlabs-music', queue_id: 'mus-123' }
   if (path.startsWith('/v1/audio/retrieve'))
     return { status: 'COMPLETED', download_url: 'https://stub/m.mp3' }
-  if (path.startsWith('/v1/audio/complete')) return { ok: true }
+  if (path.startsWith('/v1/audio/complete')) return { success: true }
   if (path.startsWith('/v1/audio/quote')) return { quote: 0.1 }
   if (path.startsWith('/v1/augment/search')) return { results: [{ url: 'https://x', snippet: 's' }] }
   if (path.startsWith('/v1/augment/scrape')) return { markdown: '# stub' }
