@@ -16,7 +16,7 @@
  *      - billing/* (balance, cost, usage, usage-analytics)
  *      - api_keys/*, support-bot
  *   🔓 Auth-free:
- *      - models, models/card, models/traits
+ *      - models, models/traits
  *      - image/styles
  *      - audio/quote, video/quote
  *      - x402/balance, x402/top-up, x402/transactions
@@ -93,6 +93,17 @@ const fail = (text: string): ToolResult => ({
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
+const MODEL_DETAIL_TYPES = [
+  'asr',
+  'embedding',
+  'image',
+  'inpaint',
+  'music',
+  'text',
+  'tts',
+  'upscale',
+  'video',
+] as const
 
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
@@ -440,12 +451,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_generate',
       title: 'Venice Video Queue',
-      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a string enum like '4s' / '6s' / '8s' (model-specific, see model card).`,
+      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details.`,
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See GET /v1/models/:id/card.'),
-        aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see GET /v1/models/:id/card.'),
+        duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See venice_model_details.'),
+        aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see venice_model_details.'),
         seed: z.number().int().optional(),
         image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
         end_image_url: z.string().url().optional().describe('For models that support end frames or transitions. URL or data URL.'),
@@ -461,7 +472,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         })).max(4).optional().describe('For Kling O3 R2V and similar: up to 4 character/object elements. Reference in prompt as @Element1, @Element2, etc.'),
         scene_image_urls: z.array(z.string().url()).max(4).optional().describe('For models with advanced element support: up to 4 scene reference images. Reference in prompt as @Image1, @Image2, etc.'),
         negative_prompt: z.string().max(4096).optional().describe('Negative prompt (what to avoid). Supported by Seedance and other models.'),
-        resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see model card.'),
+        resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see venice_model_details.'),
         upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple.'),
         audio: z.boolean().optional().describe('Enable or disable audio generation for models that support it. Defaults to true.'),
       },
@@ -889,6 +900,33 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             count: filtered.length,
             total: all.length,
           })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_model_details',
+      title: 'Venice Model Details',
+      description: `Get one exact model's full catalog row, including model_spec constraints, capabilities, and pricing when available. Requires a concrete type to keep the upstream catalog response bounded.${NO_AUTH}`,
+      inputSchema: {
+        model_id: z.string().trim().min(1).describe('Exact model id from venice_list_models.'),
+        type: z.enum(MODEL_DETAIL_TYPES).describe('Concrete API model type from venice_list_models. "all" and "code" are intentionally excluded.'),
+      },
+      handler: async ({ model_id, type }) => {
+        try {
+          const query = new URLSearchParams({ type }).toString()
+          const resp = await client.get<{ data?: unknown[] }>(`/v1/models?${query}`)
+          const model = (resp.data ?? [])
+            .filter((candidate): candidate is Record<string, unknown> =>
+              typeof candidate === 'object' && candidate !== null
+            )
+            .find((candidate) => candidate.id === model_id)
+          if (!model) {
+            return fail(`Model "${model_id}" was not found in the "${type}" catalog.`)
+          }
+          return ok(JSON.stringify(model, null, 2), model)
         } catch (err) {
           return fail(formatToolError(err))
         }

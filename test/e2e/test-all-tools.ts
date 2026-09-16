@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * COMPREHENSIVE end-to-end test of all 31 MCP tools against live Venice API.
+ * COMPREHENSIVE end-to-end test of all 32 MCP tools against live Venice API.
  *
  * Runs the same test plan twice — once with API key auth, once with x402 SIWX wallet auth —
  * and produces a side-by-side report showing which tools work in which mode.
@@ -65,6 +65,15 @@ function buildPlan(walletAddr: string): CallSpec[] {
       name: 'venice_list_models',
       args: { type: 'text' },
       validate: r => (r?.structuredContent?.count > 0 ? null : 'expected count > 0'),
+    },
+    {
+      name: 'venice_model_details',
+      args: { model_id: 'flux-2-pro', type: 'image' },
+      validate: r =>
+        r?.structuredContent?.id === 'flux-2-pro' &&
+        r?.structuredContent?.model_spec?.constraints
+          ? null
+          : 'expected full model details',
     },
     {
       name: 'venice_image_styles',
@@ -418,7 +427,7 @@ function summary(mode: string, results: ToolResult[]) {
 async function main() {
   const arg = process.argv[2] || 'both'
   const wallet = loadOrCreateWallet()
-  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 31 tools × auth modes ═══${COLORS.reset}`)
+  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 32 tools × auth modes ═══${COLORS.reset}`)
   console.log(`Venice base:   ${BASE_URL}`)
   console.log(`Test wallet:   ${wallet.address}\n`)
 
