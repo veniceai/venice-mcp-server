@@ -115,6 +115,29 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
   if (path.startsWith('/v1/augment/scrape')) return { markdown: '# stub' }
   if (path.startsWith('/v1/augment/text-parser')) return { text: 'parsed text' }
   if (path.startsWith('/v1/crypto/rpc')) return { jsonrpc: '2.0', result: '0x1', id: 1 }
+  if (path === '/v1/models?type=image')
+    return {
+      data: [{
+        created: 1764086377,
+        id: 'flux-2-pro',
+        model_spec: {
+          pricing: { generation: { usd: 0.03, diem: 0.03 } },
+          constraints: {
+            promptCharacterLimit: 3000,
+            aspectRatios: ['1:1', '16:9'],
+            steps: { default: 20, max: 50 },
+          },
+          supportsWebSearch: false,
+          name: 'Flux 2 Pro',
+          privacy: 'anonymized',
+        },
+        object: 'model',
+        owned_by: 'venice.ai',
+        type: 'image',
+      }],
+      object: 'list',
+      type: 'image',
+    }
   if (path.startsWith('/v1/models'))
     return {
       data: [
