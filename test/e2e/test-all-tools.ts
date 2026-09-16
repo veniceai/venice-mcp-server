@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * COMPREHENSIVE end-to-end test of all 31 MCP tools against live Venice API.
+ * COMPREHENSIVE end-to-end test of all 33 MCP tools against live Venice API.
  *
  * Runs the same test plan twice — once with API key auth, once with x402 SIWX wallet auth —
  * and produces a side-by-side report showing which tools work in which mode.
@@ -80,6 +80,20 @@ function buildPlan(walletAddr: string): CallSpec[] {
       name: 'venice_video_quote',
       args: { model: 'veo3.1-fast-text-to-video', duration: '4s' },
       validate: r => (typeof r?.content?.[0]?.text === 'string' ? null : 'no text content'),
+    },
+    {
+      name: 'venice_tee_attestation',
+      args: {
+        model: 'e2ee-qwen3-5-122b-a10b',
+        nonce: '0123456789abcdef'.repeat(4),
+      },
+      validate: r => (r?.structuredContent?.verified === true ? null : 'attestation was not verified'),
+    },
+    {
+      name: 'venice_tee_signature',
+      args: { model: 'e2ee-qwen3-5-122b-a10b', request_id: 'chatcmpl-invalid-e2e-probe' },
+      expectIn: { apikey: false, x402: false },
+      validate: () => null,
     },
 
     // ============ CHEAP GENERATION — both modes ============
@@ -418,7 +432,7 @@ function summary(mode: string, results: ToolResult[]) {
 async function main() {
   const arg = process.argv[2] || 'both'
   const wallet = loadOrCreateWallet()
-  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 31 tools × auth modes ═══${COLORS.reset}`)
+  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 33 tools × auth modes ═══${COLORS.reset}`)
   console.log(`Venice base:   ${BASE_URL}`)
   console.log(`Test wallet:   ${wallet.address}\n`)
 

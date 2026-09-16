@@ -6,7 +6,7 @@ export interface MockRoute {
   match: string
   /**
    * Either a static response or a function that gets the parsed request and returns one.
-   * Return a plain object → 200 JSON. Return { __status, __body, __headers } → custom.
+   * Return a plain object → 200 JSON. Return { __status, __body, __rawBody, __headers } → custom.
    */
   reply:
     | unknown
@@ -82,14 +82,22 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
         const r = reply as {
           __status: number
           __body?: unknown
+          __rawBody?: string
           __headers?: Record<string, string>
         }
         res.statusCode = r.__status
         for (const [k, v] of Object.entries(r.__headers ?? {})) {
           res.setHeader(k, v)
         }
-        res.setHeader('content-type', 'application/json')
-        res.end(JSON.stringify(r.__body ?? {}))
+        if (!res.hasHeader('content-type')) res.setHeader('content-type', 'application/json')
+        const responseContentType = String(res.getHeader('content-type') ?? '')
+        const responseBody =
+          r.__rawBody !== undefined
+            ? r.__rawBody
+            : !responseContentType.includes('application/json') && typeof r.__body === 'string'
+              ? r.__body
+              : JSON.stringify(r.__body ?? {})
+        res.end(responseBody)
         return
       }
 

@@ -29,7 +29,7 @@
     "start": "node dist/cli.js",
     "start:http": "node dist/cli.js --http",
     "test": "tsx --test test/*.test.ts",
-    "test:unit": "tsx --test test/config.test.ts test/format.test.ts test/venice-client.test.ts test/tools.test.ts",
+    "test:unit": "tsx --test test/config.test.ts test/format.test.ts test/e2ee.test.ts test/venice-client.test.ts test/tools.test.ts",
     "test:integration": "tsx --test test/integration.test.ts",
     "test:e2e": "npm run build && tsx test/e2e/run.ts",
     "test:e2e:create": "VENICE_E2E_PHASE=create npm run test:e2e",
