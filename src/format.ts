@@ -47,8 +47,8 @@ function format402(err: VeniceUpstreamError): string {
     lines.push('To top up:')
     if (body.topUpInstructions) {
       lines.push(`  1. ${body.topUpInstructions.step1 ?? 'POST /api/v1/x402/top-up with no payment header to get requirements'}`)
-      lines.push(`  2. ${body.topUpInstructions.step2 ?? 'Sign a USDC transfer authorization with the x402 SDK'}`)
-      lines.push(`  3. ${body.topUpInstructions.step3 ?? 'POST /api/v1/x402/top-up with X-402-Payment header'}`)
+      lines.push(`  2. ${body.topUpInstructions.step2 ?? 'Sign a Base or Solana USDC payment with the x402 SDK'}`)
+      lines.push(`  3. ${body.topUpInstructions.step3 ?? 'POST /api/v1/x402/top-up with PAYMENT-SIGNATURE header'}`)
       if (body.topUpInstructions.receiverWallet) {
         lines.push(`  Receiver: ${body.topUpInstructions.receiverWallet}`)
       }
@@ -70,7 +70,7 @@ function format402(err: VeniceUpstreamError): string {
     }
     lines.push('')
     lines.push('Option B — x402 wallet (no account)')
-    lines.push('  1. Generate a SIWE message + signature with your wallet.')
+    lines.push('  1. Generate a signed EVM SIWE or Solana SIWX payload with your wallet.')
     lines.push('  2. Set VENICE_SIWX_TOKEN in this MCP server\'s env.')
     lines.push('  3. Top up via POST /api/v1/x402/top-up (the venice_x402_balance')
     lines.push('     and venice_x402_top_up_info tools can help).')

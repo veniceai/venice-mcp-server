@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **31 tools across all modalities, one config block.**
+Plug Venice's chat, image, video, audio, music, billing, and operator APIs into any agent in 30 seconds. **40 tools, one config block.**
 
 ## Quick start
 
@@ -36,7 +36,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**31 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**40 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
 
 ### 💬 Chat & embeddings
 
@@ -106,6 +106,31 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 |---|---|
 | `venice_crypto_rpc` | Proxy a JSON-RPC call to a supported blockchain network (`eth_call`, `eth_blockNumber`, …). Supports Base, Ethereum, Polygon, Arbitrum, Optimism. |
 
+### 💰 Billing (ADMIN API key only)
+
+| Tool | Description |
+|---|---|
+| `venice_billing_balance` | Get current USD, DIEM, and bundled-credit availability. |
+| `venice_billing_usage_analytics` | Get beta aggregate usage by date, model, and API key using a lookback or custom date range. |
+| `venice_billing_usage_history` | Walk detailed usage with cursor pagination, first-page filters, and JSON or CSV output. |
+
+Usage-history continuation calls must send `cursor` without the original filters. CSV pages return a `csv:`-prefixed `nextCursor` so a cursor-only follow-up stays on `text/csv`. The deprecated `/billing/usage` route is not wrapped. Billing tools require an ADMIN `VENICE_API_KEY` and fail locally instead of falling back to SIWX. Inference keys, including keys minted through MCP, cannot call these endpoints.
+
+### 🔑 API keys
+
+| Tool | Description |
+|---|---|
+| `venice_list_api_keys` | List active key metadata without full key secrets. ADMIN API key only. |
+| `venice_get_api_key` | Get one key's metadata, usage, balances, and rate limits. ADMIN API key only. |
+| `venice_api_key_rate_limits` | Get current balances, access status, tier, and model limits. API key only. |
+| `venice_api_key_rate_limit_logs` | Get the last 50 exceeded rate-limit events. API key only; experimental upstream. |
+| `venice_web3_key_challenge` | Get the unauthenticated 15-minute Web3 mint challenge. |
+| `venice_web3_key_mint` | Submit a caller-signed EVM challenge and receive a one-time INFERENCE API-key secret. ADMIN minting is rejected; a positive consumption limit is required; omitted `limit_period` defaults to `LIFETIME`. |
+
+Web3 minting currently requires an EVM wallet with staked VVV on Base. Signing stays in the caller's wallet: this server accepts an address, signature, and challenge token, but never a private key. MCP minting is limited to `INFERENCE` keys with a required positive `consumption_limit`, because the wallet signature covers only the challenge token. Omitted `limit_period` is sent as `LIFETIME` so a dollar cap is a permanent cap rather than the upstream daily `EPOCH` default. The secret is shown once. If the mint times out or the response is lost, do not retry — use an ADMIN key to list and revoke any unexpected key, then start a new challenge. Minted secrets are returned only to the MCP caller and are not written to server logs. Create/update/delete key mutations are intentionally not exposed.
+
+List and get require an ADMIN `VENICE_API_KEY`. Rate-limit reads accept an INFERENCE or ADMIN key. These tools never forward `SIGN-IN-WITH-X`.
+
 ### 💳 x402 wallet helpers
 
 > Optional — only needed if you authenticate with a wallet via **x402** instead of an API key. See [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required).
@@ -157,7 +182,7 @@ Or run from source — see [Development](#development) below.
 
 > Skip this section if you're using `VENICE_API_KEY`. Everything below is optional and only matters if you specifically want to pay with a crypto wallet instead of a Venice account.
 
-Venice supports authenticating with a **SIWE-signed wallet token** (a.k.a. SIWX) backed by **prepaid USDC credit on Base mainnet**, in addition to the normal API key flow. This lets you use Venice with no email, phone, or KYC — your wallet is the only identity.
+Venice supports **EVM SIWE or Solana SIWX wallet authentication** backed by prepaid USDC credit on **Base or Solana mainnet**, in addition to the normal API key flow. This lets you use Venice with no email, phone, or KYC — your wallet is the only identity.
 
 ### Two-line config
 
@@ -167,33 +192,33 @@ Venice supports authenticating with a **SIWE-signed wallet token** (a.k.a. SIWX)
     "venice": {
       "command": "npx",
       "args": ["-y", "@veniceai/mcp-server@0.2.0"],
-      "env": { "VENICE_SIWX_TOKEN": "<base64 SIWE payload>" }
+      "env": { "VENICE_SIWX_TOKEN": "<base64 signed SIWX payload>" }
     }
   }
 }
 ```
 
-The MCP server forwards `VENICE_SIWX_TOKEN` as the `X-Sign-In-With-X` header on every Venice API call.
+The MCP server forwards the existing `VENICE_SIWX_TOKEN` env format using Venice's preferred `SIGN-IN-WITH-X` header.
 
 ### How it works
 
 ```
 ONE-TIME SETUP (per wallet)
-  Sign a SIWE message → produces a SIWX token (base64 JSON)
+  Sign an EVM SIWE or Solana SIWX message → produces a SIWX token (base64 JSON)
   Set VENICE_SIWX_TOKEN in this MCP server's env
 
 TOP UP (when balance is low)
   POST /api/v1/x402/top-up  (no payment header)  →  402 + payment requirements
-  Sign a USDC EIP-3009 transferWithAuthorization in your wallet
-  POST /api/v1/x402/top-up with X-402-Payment: <signed>  →  Venice settles via
-  Coinbase CDP facilitator and credits your prepaid balance
+  Choose a Base or Solana USDC option and sign it in your wallet
+  POST /api/v1/x402/top-up with PAYMENT-SIGNATURE: <signed>  →  Venice settles
+  the payment and credits your prepaid balance
 
 EVERY INFERENCE CALL
-  MCP server sends X-Sign-In-With-X: <SIWX token>
+  MCP server sends SIGN-IN-WITH-X: <SIWX token>
   Venice → wallet → credit account → debits and runs inference
 ```
 
-This MCP server **never sees your private key**. SIWE signing and USDC authorization happen in your wallet (MetaMask, Coinbase Wallet, viem script, etc.) — the server is purely a header forwarder.
+This MCP server **never sees your private key**. EVM/Solana SIWX signing and USDC payment signing happen in your wallet — the server forwards only the signed SIWX token. The top-up helper discovers requirements but does not accept or submit payment signatures.
 
 The helper tools `venice_x402_balance`, `venice_x402_top_up_info`, and `venice_x402_transactions` make balance + top-up flow inspectable from inside the agent.
 
@@ -207,7 +232,7 @@ The helper tools `venice_x402_balance`, `venice_x402_top_up_info`, and `venice_x
 
 ### Per-call HTTP 402 — not supported
 
-Venice rejects `X-402-Payment` on inference routes. The header is only accepted on `/api/v1/x402/top-up`. This is by design — Venice settles top-ups in batches via the Coinbase CDP facilitator, then debits a fast off-chain credit account on inference. If you need per-call settlement semantics, you'll need a separate proxy that pays the credit account on demand.
+Venice rejects payment headers on inference routes. The preferred `PAYMENT-SIGNATURE` header is only used when submitting a signed payment to `/api/v1/x402/top-up`; this MCP server does not submit payments. After an external top-up, Venice debits the wallet's off-chain credit account on inference.
 
 ### Auth-mode coverage notes
 
@@ -231,7 +256,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 31 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 40 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -239,7 +264,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
                                                               │ HTTPS
                                                               │   Authorization: Bearer ***
                                                               │   OR
-                                                              │   X-Sign-In-With-X: <SIWX>
+                                                              │   SIGN-IN-WITH-X: <SIWX>
                                                               ▼
                                                  ┌────────────────────────┐
                                                  │  Venice API            │
@@ -295,7 +320,26 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_list_characters` | `GET /v1/characters` |
 | `venice_chat_with_character` | `POST /v1/chat/completions` (with `character_slug`) |
 
-### x402 wallet helpers (SIWX only)
+### Billing and API-key reads (ADMIN API key only, except rate-limit tools)
+
+| Tool | Endpoint |
+|---|---|
+| `venice_billing_balance` | `GET /v1/billing/balance` |
+| `venice_billing_usage_analytics` | `GET /v1/billing/usage-analytics` |
+| `venice_billing_usage_history` | `GET /v1/billing/usage-history` |
+| `venice_list_api_keys` | `GET /v1/api_keys` |
+| `venice_get_api_key` | `GET /v1/api_keys/:id` |
+| `venice_api_key_rate_limits` | `GET /v1/api_keys/rate_limits` (INFERENCE or ADMIN) |
+| `venice_api_key_rate_limit_logs` | `GET /v1/api_keys/rate_limits/log` (INFERENCE or ADMIN) |
+
+### Web3 API-key mint (auth-free)
+
+| Tool | Endpoint |
+|---|---|
+| `venice_web3_key_challenge` | `GET /v1/api_keys/generate_web3_key` |
+| `venice_web3_key_mint` | `POST /v1/api_keys/generate_web3_key` |
+
+### x402 wallet helpers (SIWX reads + auth-free discovery)
 
 | Tool | Endpoint |
 |---|---|
@@ -310,7 +354,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```bash
 npm install
 npm run build
-npm test                  # full suite (71 tests across 10 suites, ~3s)
+npm test                  # full suite (108 tests across 12 suites, ~3s)
 npm run test:unit         # unit tests only
 npm run test:integration  # spawns dist/cli.js + a mock Venice over real stdio JSON-RPC
 npm start                 # stdio mode
@@ -324,7 +368,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # 31 tool registry + endpoint+method+body mappings
+├── tools.test.ts              # 40-tool registry + endpoint/method/body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub
@@ -333,9 +377,9 @@ test/
 
 The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/stdout, exercising `initialize` → `tools/list` → `tools/call` → `resources/list` → `resources/read` against a real HTTP mock Venice in three auth scenarios (API key only, SIWX only, no auth).
 
-### End-to-end with live Venice + Base mainnet
+### End-to-end with live Venice + Base EVM harness
 
-`test/e2e/` is a phased harness against the **real** Venice API and **real** Base mainnet — not a mock. It generates a throwaway wallet, signs SIWE + EIP-3009 payloads with `viem`, and drives the MCP server via JSON-RPC over stdio. The wallet is persisted at `.e2e-wallet.json` (chmod 600, gitignored — **never commit**).
+`test/e2e/` currently exercises the EVM rail against the **real** Venice API and **real** Base mainnet—not a mock. Venice and the MCP x402 helpers support both Base and Solana, but this harness generates a throwaway EVM wallet and signs SIWE + EIP-3009 payloads with `viem`. The wallet is persisted at `.e2e-wallet.json` (chmod 600, gitignored—**never commit**).
 
 | Phase | npm script | Cost | What it tests |
 |---|---|---|---|
@@ -347,7 +391,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 31 tools × both auth modes, side-by-side report
+# Comprehensive — all 40 tools × applicable auth modes, side-by-side report
 VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 
@@ -357,7 +401,7 @@ VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 No. The simple path is `VENICE_API_KEY` + a normal Venice account. x402 is an *option* for users who want a wallet-only flow.
 
 **Where does the wallet's private key live?**
-Not in this server. You sign the SIWE message + USDC top-up authorizations in your own wallet (MetaMask, Coinbase Wallet, viem-script, etc.). The server only sees the resulting SIWX token and never sees a private key.
+Not in this server. You sign the EVM SIWE or Solana SIWX message and any USDC top-up payment in your own wallet. The server only sees signed payloads and never accepts a private key.
 
 
 **Minimum top-up?**
