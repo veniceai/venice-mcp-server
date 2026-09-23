@@ -19,7 +19,7 @@ function setup() {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented set (31 tools)', () => {
+  it('registers exactly the documented set (33 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
@@ -40,6 +40,7 @@ describe('tools registry', () => {
       'venice_music_complete',
       'venice_music_generate',
       'venice_music_status',
+      'venice_music_wait',
       'venice_responses',
       'venice_text_parser',
       'venice_tts',
@@ -47,6 +48,7 @@ describe('tools registry', () => {
       'venice_video_generate',
       'venice_video_quote',
       'venice_video_status',
+      'venice_video_wait',
       'venice_video_transcriptions',
       'venice_voice_clone',
       'venice_web_scrape',
@@ -56,7 +58,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 31)
+    assert.equal(tools.length, 33)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -80,6 +82,7 @@ describe('tools registry', () => {
       'venice_image_remove_bg',
       'venice_video_generate',
       'venice_video_status',
+      'venice_video_wait',
       'venice_video_complete',
       'venice_video_transcriptions',
       'venice_tts',
@@ -87,6 +90,7 @@ describe('tools registry', () => {
       'venice_voice_clone',
       'venice_music_generate',
       'venice_music_status',
+      'venice_music_wait',
       'venice_music_complete',
       'venice_web_search',
       'venice_web_scrape',
