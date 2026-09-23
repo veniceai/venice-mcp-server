@@ -70,6 +70,34 @@ describe('formatToolError', () => {
     assert.doesNotMatch(out, /upstream-down/)
   })
 
+  it('lists 400 zod validation issues by field with the expected values, and nothing else from the body', () => {
+    const err = new VeniceUpstreamError({
+      message: '',
+      status: 400,
+      body: {
+        error: 'Invalid request parameters',
+        internal_trace: 'do-not-leak',
+        details: { aspect_ratio: { _errors: ['Required'] } },
+        issues: [
+          { expected: "'16:9' | '9:16'", received: 'undefined', code: 'invalid_type', path: ['aspect_ratio'], message: 'Required' },
+          { code: 'too_big', path: ['reference_image_urls', 2], message: 'Too many images' },
+        ],
+      },
+    })
+    const out = formatToolError(err)
+    assert.match(out, /Venice API error 400: Invalid request parameters:/)
+    assert.match(out, /- aspect_ratio: Required \(expected '16:9' \| '9:16'\)/)
+    assert.match(out, /- reference_image_urls\.2: Too many images/)
+    assert.doesNotMatch(out, /do-not-leak/)
+    assert.doesNotMatch(out, /_errors/)
+  })
+
+  it('keeps the generic 400 message when the body has no issues array', () => {
+    const err = new VeniceUpstreamError({ message: '', status: 400, body: { error: 'bad', secret: 'x' } })
+    const out = formatToolError(err)
+    assert.equal(out, 'Venice API error 400: upstream request failed.')
+  })
+
   it('formats native Error objects', () => {
     assert.match(formatToolError(new Error('boom')), /Error: boom/)
   })
