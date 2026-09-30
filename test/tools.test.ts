@@ -329,7 +329,6 @@ const MAPPINGS: Mapping[] = [
     tool: 'venice_list_characters',
     args: {
       search: 'guide',
-      tag: 'legacy',
       tags: ['helpful', 'productivity'],
       categories: ['roleplay', 'philosophy'],
       isAdult: false,
@@ -342,13 +341,13 @@ const MAPPINGS: Mapping[] = [
       offset: 20,
     },
     expectMethod: 'GET',
-    expectPath: '/v1/characters?search=guide&tag=legacy&tags=helpful&tags=productivity&categories=roleplay&categories=philosophy&isAdult=false&isPro=true&isWebEnabled=false&modelId=model%2Fa&modelId=model-b&sortBy=highestRating&sortOrder=asc&limit=100&offset=20',
+    expectPath: '/v1/characters?search=guide&tags=helpful&tags=productivity&categories=roleplay&categories=philosophy&isAdult=false&isPro=true&isWebEnabled=false&modelId=model%2Fa&modelId=model-b&sortBy=highestRating&sortOrder=asc&limit=100&offset=20',
   },
   {
     tool: 'venice_get_character',
-    args: { slug: 'alan watts/teacher' },
+    args: { slug: 'alan-watts' },
     expectMethod: 'GET',
-    expectPath: '/v1/characters/alan%20watts%2Fteacher',
+    expectPath: '/v1/characters/alan-watts',
   },
   {
     tool: 'venice_character_reviews',
@@ -425,6 +424,8 @@ describe('tools endpoint + method mapping', () => {
     })
   }
 })
+
+const UNSAFE_PATH_SEGMENTS = ['..', '.', '%2e%2e', '%2E%2E', '../reviews', 'a/b', 'a\\b', '/', '', 'a.b', 'a b', 'a?b', 'a#b']
 
 describe('tool output shaping', () => {
   it('venice_crypto_networks disables auth and returns structured network data', async () => {
@@ -586,6 +587,55 @@ describe('tool output shaping', () => {
     assert.equal(result.isError, true)
     assert.match((result.content[0] as { text: string }).text, /exceeds 262144 bytes/)
     assert.doesNotMatch((result.content[0] as { text: string }).text, /aaaaaa/)
+  })
+
+  it('character tools reject slugs that URL normalisation could resolve', () => {
+    const { get } = setup()
+    for (const name of ['venice_get_character', 'venice_character_reviews']) {
+      const schema = z.object(get(name).inputSchema)
+      for (const slug of UNSAFE_PATH_SEGMENTS) {
+        assert.equal(schema.safeParse({ slug }).success, false, `${name} should reject slug ${JSON.stringify(slug)}`)
+      }
+      for (const slug of ['alan-watts', 'venice', 'Some_Public-ID9']) {
+        assert.equal(schema.safeParse({ slug }).success, true, `${name} should accept slug ${slug}`)
+      }
+      assert.equal(schema.safeParse({ slug: 'a'.repeat(201) }).success, false)
+    }
+  })
+
+  it('venice_list_characters validates search length and drops the unsupported tag filter', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_list_characters')
+    const schema = z.object(tool.inputSchema)
+    assert.equal(schema.safeParse({ search: 'a'.repeat(200) }).success, true)
+    assert.equal(schema.safeParse({ search: 'a'.repeat(201) }).success, false)
+    assert.equal('tag' in tool.inputSchema, false)
+
+    const parsed = schema.parse({ tag: 'legacy' })
+    await tool.handler(parsed as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/characters')
+  })
+
+  it('truncates large character outputs', async () => {
+    const description = 'd'.repeat(500)
+    const stub = new StubClient({
+      '/v1/characters/alan-watts/reviews': () => ({ data: Array.from({ length: 100 }, () => ({ body: description })) }),
+      '/v1/characters/alan-watts': () => ({ data: { slug: 'alan-watts', description: description.repeat(40) } }),
+      '/v1/characters': () => ({ data: Array.from({ length: 100 }, (_, i) => ({ slug: `c${i}`, description })) }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const run = (name: string, args: unknown) => tools.find((t) => t.name === name)!.handler(args as never)
+
+    const list = await run('venice_list_characters', { limit: 100 })
+    assert.match((list.content[0] as { text: string }).text, /…\[truncated \d+ chars\]$/)
+    assert.equal(list.structuredContent?.count, 100)
+    for (const [name, args] of [
+      ['venice_get_character', { slug: 'alan-watts' }],
+      ['venice_character_reviews', { slug: 'alan-watts', pageSize: 100 }],
+    ] as const) {
+      const result = await run(name, args)
+      assert.match((result.content[0] as { text: string }).text, /…\[truncated \d+ chars\]$/, name)
+    }
   })
 
   it('venice_crypto_rpc rejects ambiguous or missing request forms without calling upstream', async () => {

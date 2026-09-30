@@ -97,6 +97,8 @@ const NO_AUTH = ' No authentication required.'
 
 const CRYPTO_RPC_MAX_RESPONSE_BYTES = 256 * 1024
 const CRYPTO_RPC_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{1,255}$/
+// Path segments must not be able to form "." or "..", which URL normalisation would resolve.
+const CHARACTER_SLUG = /^[A-Za-z0-9_-]{1,200}$/
 const CRYPTO_RPC_BROADCAST_METHODS = new Set([
   'eth_sendrawtransaction',
   'eth_senduseroperation',
@@ -1063,8 +1065,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice List Characters',
       description: `List public Venice characters.${API_KEY_ONLY}`,
       inputSchema: {
-        search: z.string().optional(),
-        tag: z.string().optional().describe('Legacy singular tag filter. Prefer tags for multiple values.'),
+        search: z.string().max(200).optional(),
         tags: z.array(z.string().max(100)).max(20).optional(),
         categories: z.array(z.string().max(100)).max(20).optional(),
         isAdult: z.boolean().optional(),
@@ -1084,7 +1085,6 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         try {
           const params = new URLSearchParams()
           if (args.search) params.set('search', args.search)
-          if (args.tag) params.set('tag', args.tag)
           for (const tag of args.tags ?? []) params.append('tags', tag)
           for (const category of args.categories ?? []) params.append('categories', category)
           if (args.isAdult !== undefined) params.set('isAdult', String(args.isAdult))
@@ -1102,7 +1102,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             { auth: 'apiKey' },
           )
           const list = resp.data ?? resp.characters ?? []
-          return ok(JSON.stringify(list, null, 2), { count: list.length })
+          return ok(truncate(JSON.stringify(list, null, 2)), { count: list.length })
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1114,7 +1114,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Get Character',
       description: `Get one public Venice character by slug.${API_KEY_ONLY}`,
       inputSchema: {
-        slug: z.string().min(1).describe('Public character slug.'),
+        slug: z.string().regex(CHARACTER_SLUG).describe('Public character slug, e.g. "alan-watts".'),
       },
       handler: async ({ slug }) => {
         const authError = requireCharacterApiKey()
@@ -1125,7 +1125,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'apiKey' },
           )
-          return ok(JSON.stringify(resp, null, 2))
+          return ok(truncate(JSON.stringify(resp, null, 2)))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1137,7 +1137,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Character Reviews',
       description: `List paginated public reviews for a Venice character.${API_KEY_ONLY}`,
       inputSchema: {
-        slug: z.string().min(1).describe('Public character slug.'),
+        slug: z.string().regex(CHARACTER_SLUG).describe('Public character slug, e.g. "alan-watts".'),
         page: z.number().int().min(1).optional(),
         pageSize: z.number().int().min(1).max(100).optional(),
       },
@@ -1154,7 +1154,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'apiKey' },
           )
-          return ok(JSON.stringify(resp, null, 2))
+          return ok(truncate(JSON.stringify(resp, null, 2)))
         } catch (err) {
           return fail(formatToolError(err))
         }
