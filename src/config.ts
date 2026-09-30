@@ -49,15 +49,57 @@ export interface Config {
   maxImageResponseBytes: number
   /** Whether to advertise NSFW capability in tool descriptions. */
   enableNsfw: boolean
+  /**
+   * When set, generated media (images, video, music, speech) is written to
+   * this directory and tools return a file:// resource link plus a JSON
+   * sidecar instead of inline base64. Intended for NLE / timeline-editor
+   * workflows (DaVinci Resolve, Premiere, etc.) that import files from disk.
+   */
+  mediaDir: string | undefined
+  /** Maximum bytes read from a local file passed as a media input. */
+  maxLocalInputBytes: number
+  /** Toolset filter. `undefined` = all tools. */
+  toolsets: Set<Toolset> | undefined
   /** Server name advertised to MCP clients. */
   serverName: string
   /** Server version advertised. */
   serverVersion: string
 }
 
+export const TOOLSETS = ['chat', 'image', 'video', 'audio', 'music', 'augment', 'catalog', 'crypto', 'x402'] as const
+export type Toolset = (typeof TOOLSETS)[number]
+
+/** Named bundles resolvable from VENICE_TOOLSETS. */
+const TOOLSET_ALIASES: Record<string, readonly Toolset[]> = {
+  media: ['image', 'video', 'audio', 'music', 'catalog'],
+}
+
 const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 25 * 1024 * 1024
 const DEFAULT_MAX_AUDIO_RESPONSE_BYTES = 25 * 1024 * 1024
+const DEFAULT_MAX_LOCAL_INPUT_BYTES = 50 * 1024 * 1024
+
+export function parseToolsets(value: string | undefined): Set<Toolset> | undefined {
+  const raw = value?.trim()
+  if (!raw) return undefined
+  const out = new Set<Toolset>()
+  for (const token of raw.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean)) {
+    if (token === 'all') return undefined
+    const alias = TOOLSET_ALIASES[token]
+    if (alias) {
+      for (const t of alias) out.add(t)
+      continue
+    }
+    if ((TOOLSETS as readonly string[]).includes(token)) {
+      out.add(token as Toolset)
+      continue
+    }
+    throw new Error(
+      `Unknown VENICE_TOOLSETS entry "${token}". Valid: all, ${Object.keys(TOOLSET_ALIASES).join(', ')}, ${TOOLSETS.join(', ')}`,
+    )
+  }
+  return out.size > 0 ? out : undefined
+}
 const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 
 function parseTimeoutMs(value: string | undefined): number {
@@ -88,12 +130,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxAudioResponseBytes: parsePositiveInteger(
       env.VENICE_MAX_AUDIO_RESPONSE_BYTES,
       DEFAULT_MAX_AUDIO_RESPONSE_BYTES,
-      ),
+    ),
     maxImageResponseBytes: parsePositiveInteger(
       env.VENICE_MAX_IMAGE_RESPONSE_BYTES,
       DEFAULT_MAX_IMAGE_RESPONSE_BYTES,
     ),
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
+    mediaDir: env.VENICE_MEDIA_DIR?.trim() || undefined,
+    maxLocalInputBytes: parsePositiveInteger(env.VENICE_MAX_LOCAL_INPUT_BYTES, DEFAULT_MAX_LOCAL_INPUT_BYTES),
+    toolsets: parseToolsets(env.VENICE_TOOLSETS),
     serverName: '@veniceai/mcp-server',
     serverVersion: '0.2.0',
   }

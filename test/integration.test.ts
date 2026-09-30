@@ -250,10 +250,10 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 31 tools over JSON-RPC', async () => {
+  it('lists 33 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 31)
+    assert.equal(list.length, 33)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))

@@ -85,10 +85,41 @@ function format402(err: VeniceUpstreamError): string {
   return lines.join('\n')
 }
 
+interface ValidationIssue {
+  path?: Array<string | number>
+  message?: string
+  expected?: unknown
+  received?: unknown
+}
+
+const MAX_VALIDATION_ISSUES = 8
+
+/**
+ * Venice validates request bodies with zod and returns `{ error, issues[] }`
+ * on 400. Those issues are the agent's only way to self-correct a bad
+ * parameter (e.g. a required aspect_ratio), so they are reflected verbatim.
+ * Other body fields stay hidden to avoid leaking implementation details.
+ */
+function formatValidationIssues(body: unknown): string | undefined {
+  if (!isObject(body) || !Array.isArray(body.issues) || body.issues.length === 0) return undefined
+  const lines = (body.issues as ValidationIssue[]).slice(0, MAX_VALIDATION_ISSUES).map((issue) => {
+    const path = Array.isArray(issue.path) && issue.path.length > 0 ? issue.path.join('.') : '(body)'
+    const expected = issue.expected !== undefined ? ` (expected ${typeof issue.expected === 'string' ? issue.expected : JSON.stringify(issue.expected)})` : ''
+    return `  - ${path}: ${issue.message ?? 'invalid'}${expected}`
+  })
+  const more = body.issues.length > MAX_VALIDATION_ISSUES ? `\n  …and ${body.issues.length - MAX_VALIDATION_ISSUES} more` : ''
+  const summary = typeof body.error === 'string' ? body.error : 'Invalid request parameters'
+  return `${summary}:\n${lines.join('\n')}${more}`
+}
+
 /** Convert any thrown error into a structured MCP-tool error string. */
 export function formatToolError(err: unknown): string {
   if (err instanceof VeniceUpstreamError) {
     if (err.isPaymentRequired) return format402(err)
+    if (err.status === 400) {
+      const validation = formatValidationIssues(err.body)
+      if (validation) return `Venice API error 400: ${validation}`
+    }
     return `Venice API error ${err.status}: upstream request failed.`
   }
   if (err instanceof Error) return `Error: ${err.message}`

@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **31 tools across all modalities, one config block.**
+Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **33 tools across all modalities, one config block.**
 
 ## Quick start
 
@@ -36,7 +36,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**31 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**33 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
 
 ### 💬 Chat & embeddings
 
@@ -62,8 +62,9 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs, and the Seedance consent attestation flow where applicable. |
-| `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link. Pass the queue-time `download_url` for VPS / Grok Imagine Private models. |
+| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs (URLs or local file paths), and the Seedance consent attestation flow where applicable. Returns `estimated_cost_usd` from the quote endpoint. |
+| `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link (or a local file when `VENICE_MEDIA_DIR` is set). Pass the queue-time `download_url` for VPS / Grok Imagine Private models. |
+| `venice_video_wait` | Block until the job completes, polling `venice_video_status` with backoff (default 300 s timeout). On timeout returns `PROCESSING` with the `queue_id` so you can call again. |
 | `venice_video_complete` | Mark a completed video as downloaded; deletes server-side media. |
 | `venice_video_transcriptions` | Transcribe a YouTube video URL. |
 | `venice_video_quote` | Get a price quote for a video generation BEFORE queuing. |
@@ -82,7 +83,8 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | Tool | Description |
 |---|---|
 | `venice_music_generate` | Queue music generation. Uses the live QueueAudioRequest fields: `force_instrumental`, `lyrics_prompt`, `lyrics_optimizer`, `loop`, `voice`, `language_code`, `speed`, and model-specific `duration_seconds`. Deprecated `instrumental` / `lyrics` are still accepted as aliases. |
-| `venice_music_status` | Check status of a queued music job. |
+| `venice_music_status` | Check status of a queued music job; returns the completed track as an embedded resource or a local file when `VENICE_MEDIA_DIR` is set. |
+| `venice_music_wait` | Block until the job completes, polling `venice_music_status` with backoff (default 300 s timeout). |
 | `venice_music_complete` | Mark a completed music job as downloaded. |
 
 ### 🌐 Web augment
@@ -99,6 +101,40 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 |---|---|
 | `venice_list_models` | List the live model catalog with capabilities and prices. |
 | `venice_list_characters` | List public Venice characters. |
+
+### 🎞️ Timeline editors (DaVinci Resolve, Premiere, Final Cut, …)
+
+Set `VENICE_MEDIA_DIR` and every media tool writes its result to disk instead of returning inline base64:
+
+```
+<VENICE_MEDIA_DIR>/
+  image/  2026-09-23_14-05-11-neon-skyline.png      + .json sidecar
+  video/  2026-09-23_14-07-40-slow-dolly-in.mp4     + .json sidecar
+  music/  2026-09-23_14-09-02-rainy-lofi.wav        + .json sidecar
+  speech/ 2026-09-23_14-09-30-hello-there.mp3       + .json sidecar
+```
+
+Tools return a `file://` resource link plus `structuredContent.path`, and the sidecar records the prompt, model, parameters, `queue_id`, and `estimated_cost_usd` that produced the file. Any `*_url` input also accepts a local absolute path (for example a frame you exported from your timeline), which is inlined as a `data:` URL.
+
+Editors do not host MCP servers themselves; pair this server with your editor's MCP server inside one host (Claude Code, Claude Desktop, Codex, Cursor). DaVinci Resolve Studio 21.1+ ships a native MCP server (`File > Setup AI Assistants…`) whose `run_script` tool can call `MediaPool.ImportMedia([path])` and `AppendToTimeline`; community servers such as [samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp) expose named import tools. For editors without an MCP server, point `VENICE_MEDIA_DIR` at a watch folder or drag the files in.
+
+```json
+{
+  "mcpServers": {
+    "venice": {
+      "command": "npx",
+      "args": ["-y", "@veniceai/mcp-server@0.2.0"],
+      "env": {
+        "VENICE_API_KEY": "<your-venice-api-key>",
+        "VENICE_MEDIA_DIR": "~/Movies/Venice",
+        "VENICE_TOOLSETS": "media"
+      }
+    }
+  }
+}
+```
+
+Example prompt once both servers are connected: *"Generate a 4 s 16:9 establishing shot of a rainy Tokyo street with `veo3.1-fast-text-to-video`, wait for it, then import the file into the Media Pool and append it at the playhead."*
 
 ### Media API behavior
 
@@ -136,6 +172,9 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
 | `VENICE_MAX_VIDEO_RESPONSE_BYTES` | `26214400` (25 MiB) | Maximum completed MP4 bytes buffered and base64-embedded by `venice_video_status`. |
 | `VENICE_MAX_AUDIO_RESPONSE_BYTES` | `26214400` (25 MiB) | Maximum completed audio bytes buffered and base64-embedded by `venice_music_status`. |
+| `VENICE_MEDIA_DIR` | _(none)_ | Write generated images, video, music, and speech to `<dir>/<kind>/` with JSON sidecars and return `file://` links instead of inline base64. `~` is expanded. See [Timeline editors](#️-timeline-editors-davinci-resolve-premiere-final-cut-). |
+| `VENICE_MAX_LOCAL_INPUT_BYTES` | `52428800` (50 MiB) | Maximum size of a local file passed as a `*_url` input. |
+| `VENICE_TOOLSETS` | `all` | Comma-separated subset of tools to register: `media` (image, video, audio, music, catalog) or any of `chat`, `image`, `video`, `audio`, `music`, `augment`, `catalog`, `crypto`, `x402`. Smaller tool lists save host context. |
 | `VENICE_MAX_IMAGE_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum response bytes buffered by `venice_image_generate`, `venice_image_edit`, and `venice_image_multi_edit`. Larger results are discarded with an error. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
@@ -241,7 +280,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 31 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 33 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -276,6 +315,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_image_remove_bg` | `POST /v1/image/background-remove` |
 | `venice_video_generate` | `POST /v1/video/queue` |
 | `venice_video_status` | `POST /v1/video/retrieve` |
+| `venice_video_wait` | `POST /v1/video/retrieve` (polled) |
 | `venice_video_complete` | `POST /v1/video/complete` |
 | `venice_video_transcriptions` | `POST /v1/video/transcriptions` |
 | `venice_tts` | `POST /v1/audio/speech` |
@@ -283,6 +323,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_voice_clone` | `POST /v1/audio/voices` |
 | `venice_music_generate` | `POST /v1/audio/queue` |
 | `venice_music_status` | `POST /v1/audio/retrieve` |
+| `venice_music_wait` | `POST /v1/audio/retrieve` (polled) |
 | `venice_music_complete` | `POST /v1/audio/complete` |
 | `venice_web_search` | `POST /v1/augment/search` |
 | `venice_web_scrape` | `POST /v1/augment/scrape` |
@@ -357,7 +398,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 31 tools × both auth modes, side-by-side report
+# Comprehensive — all 33 tools × both auth modes, side-by-side report
 VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 
