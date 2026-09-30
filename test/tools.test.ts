@@ -138,11 +138,16 @@ const MAPPINGS: Mapping[] = [
   },
   {
     tool: 'venice_embeddings',
-    args: { input: 'foo' },
+    args: {
+      input: 'foo',
+      model: 'text-embedding-bge-m3',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/embeddings',
+    expectBodyContains: {
+      model: 'text-embedding-bge-m3',
+    },
   },
-
   // image
   {
     tool: 'venice_image_generate',
@@ -485,7 +490,20 @@ describe('tool output shaping', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
-  })  
+  })
+
+  it('requires model for venice_embeddings', () => {
+    const { get } = setup()
+    const tool = get('venice_embeddings')
+
+    const modelSchema = tool.inputSchema.model
+
+    assert.equal(
+      modelSchema.isOptional(),
+      false,
+      'venice_embeddings.model should be required'
+    )
+  })
 })
 
 describe('video tool schemas', () => {

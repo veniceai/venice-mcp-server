@@ -231,7 +231,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Compute embeddings for text input (OpenAI-compatible).${X402_OK}`,
       inputSchema: {
         input: z.union([z.string(), z.array(z.string())]).describe('Text or array of texts.'),
-        model: z.string().optional().describe('Embedding model id.'),
+        model: z.string().min(1).describe('Embedding model id.'),
         encoding_format: z.enum(['float', 'base64']).optional(),
       },
       handler: async (args) => {
