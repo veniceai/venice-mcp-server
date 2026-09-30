@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
+import { z } from 'zod'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 
@@ -138,11 +139,16 @@ const MAPPINGS: Mapping[] = [
   },
   {
     tool: 'venice_embeddings',
-    args: { input: 'foo' },
+    args: {
+      input: 'foo',
+      model: 'text-embedding-bge-m3',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/embeddings',
+    expectBodyContains: {
+      model: 'text-embedding-bge-m3',
+    },
   },
-
   // image
   {
     tool: 'venice_image_generate',
@@ -243,6 +249,7 @@ const MAPPINGS: Mapping[] = [
     args: {
       prompt: 'a sunset',
       model: 'seedance-2-0-reference-to-video',
+      duration: '8s',
       consents: {
         seedance: {
           confirmed_terms_and_privacy: true,
@@ -254,6 +261,8 @@ const MAPPINGS: Mapping[] = [
     expectMethod: 'POST',
     expectPath: '/v1/video/queue',
     expectBodyContains: {
+      model: 'seedance-2-0-reference-to-video',
+      duration: '8s',
       consents: {
         seedance: {
           confirmed_terms_and_privacy: true,
@@ -1151,5 +1160,68 @@ describe('tool output shaping', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('requires model for venice_embeddings', () => {
+    const { get } = setup()
+    const tool = get('venice_embeddings')
+
+    const modelSchema = tool.inputSchema.model
+
+    assert.equal(
+      modelSchema.isOptional(),
+      false,
+      'venice_embeddings.model should be required'
+    )
+  })
+})
+
+describe('video tool schemas', () => {
+  it('venice_video_generate requires duration', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+
+    const result = schema.safeParse({
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+    })
+
+    assert.equal(result.success, false)
+  })
+
+  it('venice_video_quote requires duration', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+
+    const result = schema.safeParse({
+      model: 'veo3.1-fast-text-to-video',
+    })
+
+    assert.equal(result.success, false)
+  })
+
+  it('accepts duration for venice_video_generate', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+
+    const result = schema.safeParse({
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    })
+
+    assert.equal(result.success, true)
+  })
+
+  it('accepts duration for venice_video_quote', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+
+    const result = schema.safeParse({
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    })
+
+    assert.equal(result.success, true)
   })
 })
