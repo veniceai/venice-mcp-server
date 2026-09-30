@@ -127,21 +127,130 @@ export function validateE2eeSseContent(dataEvents: readonly string[]): string | 
       }
       continue
     }
-    if (!parsed || typeof parsed !== 'object') {
-      return 'E2EE response contained plaintext or invalid ciphertext; refusing to label the result encrypted.'
-    }
-    const contents = collectMessageContents(parsed as Record<string, unknown>)
-    if (contents === undefined) {
-      return 'E2EE response contained plaintext or invalid ciphertext; refusing to label the result encrypted.'
-    }
-    for (const content of contents) {
-      if (content === '') continue
-      if (!isValidEncryptedHex(content)) {
-        return 'E2EE response contained plaintext or invalid ciphertext; refusing to label the result encrypted.'
+    const eventError = validateE2eeChunk(parsed)
+    if (eventError) return eventError
+  }
+  return undefined
+}
+
+const INVALID_CIPHERTEXT = 'E2EE response contained plaintext or invalid ciphertext; refusing to label the result encrypted.'
+const FINISH_REASONS = new Set(['stop', 'length', 'content_filter'])
+
+function unexpectedField(path: string): string {
+  return `E2EE response event contained an unexpected field "${path}"; only chunk metadata and ciphertext delta content are accepted, so the result is not labelled encrypted.`
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+/** Allowlist of streamed chat.completion.chunk fields; anything else could carry plaintext. */
+function validateE2eeChunk(chunk: unknown): string | undefined {
+  if (!isRecord(chunk)) return INVALID_CIPHERTEXT
+  for (const [key, value] of Object.entries(chunk)) {
+    switch (key) {
+      case 'id':
+      case 'object':
+      case 'model':
+        if (typeof value !== 'string') return unexpectedField(key)
+        break
+      case 'system_fingerprint':
+        if (value !== null && typeof value !== 'string') return unexpectedField(key)
+        break
+      case 'created':
+        if (typeof value !== 'number') return unexpectedField(key)
+        break
+      case 'usage':
+      case 'cost':
+        if (value !== null && !isNumericTree(value)) return unexpectedField(key)
+        break
+      case 'prompt_logprobs':
+        if (value !== null) return unexpectedField(key)
+        break
+      case 'venice_parameters':
+        if (value !== null && !isTextFreeVeniceParameters(value)) return unexpectedField(key)
+        break
+      case 'choices': {
+        if (!Array.isArray(value)) return unexpectedField(key)
+        for (const choice of value) {
+          const choiceError = validateE2eeChoice(choice)
+          if (choiceError) return choiceError
+        }
+        break
       }
+      default:
+        return unexpectedField(key)
     }
   }
   return undefined
+}
+
+function validateE2eeChoice(choice: unknown): string | undefined {
+  if (!isRecord(choice)) return unexpectedField('choices[]')
+  for (const [key, value] of Object.entries(choice)) {
+    switch (key) {
+      case 'index':
+        if (typeof value !== 'number') return unexpectedField(`choices[].${key}`)
+        break
+      case 'finish_reason':
+        if (value !== null && !(typeof value === 'string' && FINISH_REASONS.has(value))) {
+          return unexpectedField(`choices[].${key}`)
+        }
+        break
+      case 'stop_reason':
+        if (value !== null && typeof value !== 'number') return unexpectedField(`choices[].${key}`)
+        break
+      case 'logprobs':
+        if (value !== null) return unexpectedField(`choices[].${key}`)
+        break
+      case 'delta': {
+        if (!isRecord(value)) return unexpectedField(`choices[].${key}`)
+        const deltaError = validateE2eeDelta(value)
+        if (deltaError) return deltaError
+        break
+      }
+      default:
+        return unexpectedField(`choices[].${key}`)
+    }
+  }
+  return undefined
+}
+
+function validateE2eeDelta(delta: Record<string, unknown>): string | undefined {
+  for (const [key, value] of Object.entries(delta)) {
+    switch (key) {
+      case 'role':
+        if (value !== null && value !== 'assistant') return unexpectedField(`choices[].delta.${key}`)
+        break
+      case 'content':
+      case 'reasoning_content':
+        if (value === null || value === '') break
+        if (typeof value !== 'string' || !isValidEncryptedHex(value)) return INVALID_CIPHERTEXT
+        break
+      default:
+        return unexpectedField(`choices[].delta.${key}`)
+    }
+  }
+  return undefined
+}
+
+function isNumericTree(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return Object.values(value).every(
+    (entry) => entry === null || typeof entry === 'number' || (isRecord(entry) && Object.values(entry).every(
+      (leaf) => leaf === null || typeof leaf === 'number',
+    )),
+  )
+}
+
+/** Echoed venice_parameters may only hold flags; citations or other strings are text. */
+function isTextFreeVeniceParameters(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  return Object.entries(value).every(([key, entry]) => {
+    if (entry === null || typeof entry === 'boolean') return true
+    if (key === 'enable_web_search') return entry === 'off'
+    return Array.isArray(entry) && entry.length === 0
+  })
 }
 
 function validateE2eeMessage(message: unknown): string | undefined {
@@ -182,29 +291,6 @@ function validateE2eeMessage(message: unknown): string | undefined {
   }
 
   return 'E2EE messages must use the user, system, developer, or assistant role.'
-}
-
-function collectMessageContents(payload: Record<string, unknown>): string[] | undefined {
-  const choices = payload.choices
-  if (!Array.isArray(choices)) return []
-  const contents: string[] = []
-  for (const choice of choices) {
-    if (!choice || typeof choice !== 'object') continue
-    const record = choice as Record<string, unknown>
-    for (const container of [record.delta, record.message]) {
-      if (!container || typeof container !== 'object') continue
-      const fields = container as Record<string, unknown>
-      if (fields.content !== undefined && fields.content !== null && typeof fields.content !== 'string') {
-        return undefined
-      }
-      if (typeof fields.content === 'string') contents.push(fields.content)
-      if (fields.reasoning_content !== undefined && fields.reasoning_content !== null && fields.reasoning_content !== '') {
-        if (typeof fields.reasoning_content !== 'string') return undefined
-        contents.push(fields.reasoning_content)
-      }
-    }
-  }
-  return contents
 }
 
 function extractCatalogModels(catalog: unknown): Array<{

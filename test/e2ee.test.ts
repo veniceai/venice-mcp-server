@@ -219,4 +219,50 @@ describe('E2EE contract helpers', () => {
       /non-JSON data event/,
     )
   })
+
+  it('accepts documented chunk metadata around ciphertext deltas', () => {
+    const meta = { id: 'chatcmpl-1', object: 'chat.completion.chunk', created: 1, model: 'e2ee-qwen3-5-122b-a10b' }
+    const events = [
+      { ...meta, system_fingerprint: null, choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null, logprobs: null }] },
+      { ...meta, choices: [{ index: 0, delta: { content: ciphertext, reasoning_content: ciphertext } }] },
+      { ...meta, choices: [{ index: 0, delta: {}, finish_reason: 'stop', stop_reason: null }] },
+      {
+        ...meta,
+        choices: [],
+        usage: { prompt_tokens: 3, completion_tokens: 5, total_tokens: 8, completion_tokens_details: { reasoning_tokens: 2 } },
+        cost: { usd: 0.001, diem: 0 },
+        venice_parameters: { enable_e2ee: true, enable_web_search: 'off', web_search_citations: [] },
+      },
+    ].map((event) => JSON.stringify(event))
+    assert.equal(validateE2eeSseContent([...events, '[DONE]']), undefined)
+  })
+
+  it('rejects chunk fields outside the allowlist instead of labelling them encrypted', () => {
+    const cases: Array<[string, unknown]> = [
+      ['leak', { leak: 'plaintext secret', choices: [] }],
+      ['choices[].delta.refusal', { choices: [{ delta: { refusal: 'I cannot help with that' } }] }],
+      ['choices[].delta.tool_calls', {
+        choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'f', arguments: '{"secret":1}' } }] } }],
+      }],
+      ['choices[].delta.reasoning', { choices: [{ delta: { reasoning: 'thinking out loud' } }] }],
+      ['choices[].message', { choices: [{ message: { content: ciphertext } }] }],
+      ['choices[].logprobs', { choices: [{ delta: { content: ciphertext }, logprobs: { content: [{ token: 'hi' }] } }] }],
+      ['choices[].finish_reason', { choices: [{ delta: {}, finish_reason: 'tool_calls' }] }],
+      ['choices[].stop_reason', { choices: [{ delta: {}, stop_reason: 'PLAIN STOP' }] }],
+      ['usage', { choices: [], usage: { note: 'text' } }],
+      ['venice_parameters', {
+        choices: [],
+        venice_parameters: { web_search_citations: [{ title: 'leak', url: 'https://example.com' }] },
+      }],
+      ['model', { model: { name: 'x' }, choices: [] }],
+    ]
+    for (const [field, event] of cases) {
+      assert.match(
+        validateE2eeSseContent([JSON.stringify(event), '[DONE]']) ?? '',
+        new RegExp(`unexpected field "${field.replace(/[[\]().]/g, '\\$&')}"`),
+        field,
+      )
+    }
+    assert.match(validateE2eeSseContent(['42', '[DONE]']) ?? '', /plaintext or invalid ciphertext/)
+  })
 })
