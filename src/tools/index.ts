@@ -153,6 +153,14 @@ function decodeEnhancedPrompt(headers: Record<string, string>): string | undefin
   }
 }
 
+function imageResponseTooLarge(err: VeniceResponseTooLargeError): ToolResult {
+  return fail(
+    `Image response exceeds the configured ${err.maxBytes}-byte MCP response limit and was discarded. ` +
+      'Venice may still charge for the generation. Retry with fewer variants, a lower resolution, or jpeg/webp output, or raise VENICE_MAX_IMAGE_RESPONSE_BYTES and restart the server.',
+    { error: 'image_response_too_large', max_bytes: err.maxBytes, retry_safe: false },
+  )
+}
+
 interface NeedsConsentBody {
   error?: { code?: string; message?: string }
   consent_flow?: string
@@ -369,7 +377,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             model: args.model ?? cfg.defaultImageModel,
             safe_mode: args.safe_mode ?? false,
             return_binary: false,
-          })
+          }, undefined, { maxBytes: cfg.maxImageResponseBytes })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
           // Default Venice response: { id, images: [<base64>, ...] }
           const images = resp.images?.filter((image): image is string =>
@@ -417,6 +425,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           return fail('Venice returned no usable image payload.')
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },
@@ -450,7 +459,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               resolution: args.resolution,
               output_format: args.output_format,
             },
-          })
+          }, { maxBytes: cfg.maxImageResponseBytes })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
           return {
             content: [
@@ -460,6 +469,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             structuredContent: enhancedPrompt ? { enhanced_prompt: enhancedPrompt } : undefined,
           }
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },
@@ -495,7 +505,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               output_format: args.output_format,
               quality: args.quality,
             },
-          })
+          }, { maxBytes: cfg.maxImageResponseBytes })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
           return {
             content: [
@@ -505,6 +515,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             structuredContent: enhancedPrompt ? { enhanced_prompt: enhancedPrompt } : undefined,
           }
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },

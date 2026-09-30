@@ -14,6 +14,7 @@ describe('loadConfig', () => {
     assert.equal(cfg.defaultAsrModel, 'openai/whisper-large-v3')
     assert.equal(cfg.timeoutMs, 60_000)
     assert.equal(cfg.maxVideoResponseBytes, 8 * 1024 * 1024)
+    assert.equal(cfg.maxImageResponseBytes, 32 * 1024 * 1024)
     assert.equal(cfg.enableNsfw, true)
     assert.equal(cfg.serverName, '@veniceai/mcp-server')
   })
@@ -53,6 +54,11 @@ describe('loadConfig', () => {
     assert.equal(loadConfig({ VENICE_MAX_VIDEO_RESPONSE_BYTES: 'nope' }).maxVideoResponseBytes, fallback)
     assert.equal(loadConfig({ VENICE_MAX_VIDEO_RESPONSE_BYTES: '0' }).maxVideoResponseBytes, fallback)
     assert.equal(loadConfig({ VENICE_MAX_VIDEO_RESPONSE_BYTES: '1.5' }).maxVideoResponseBytes, fallback)
+  })
+
+  it('parses the image response byte limit with a fallback for invalid values', () => {
+    assert.equal(loadConfig({ VENICE_MAX_IMAGE_RESPONSE_BYTES: '4096' }).maxImageResponseBytes, 4096)
+    assert.equal(loadConfig({ VENICE_MAX_IMAGE_RESPONSE_BYTES: '-1' }).maxImageResponseBytes, 32 * 1024 * 1024)
   })
 
   it('overrides default models from env', () => {

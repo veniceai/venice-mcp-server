@@ -102,7 +102,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ### Media API behavior
 
-- Image `aspect_ratio` and `resolution` values remain free strings because supported values vary by model. Venice validates them. When `enhance_prompt` is applied, image generate/edit/multi-edit results include the URL-decoded `enhanced_prompt` returned in `x-venice-enhanced-prompt`.
+- Image `aspect_ratio` and `resolution` values remain free strings because supported values vary by model. Venice validates them. When `enhance_prompt` is applied, image generate/edit/multi-edit results include the URL-decoded `enhanced_prompt` returned in `x-venice-enhanced-prompt`. Image responses are capped at `VENICE_MAX_IMAGE_RESPONSE_BYTES` (default 32 MiB). Unlike an oversized video, an oversized image result cannot be retried for free, so request fewer variants, a lower resolution, or jpeg/webp output for large batches.
 - Current public Seedance models may reject media containing detectable persons outright. Defensive support remains for compatible or legacy `needs_consent` responses: the tool returns Venice's policy text, affected media roles, and next step. The three `consents.seedance` flags are legal attestations and must only be set to `true` after the user explicitly confirms all three statements. Consent is never a content-policy bypass.
 - Completed videos may arrive as `video/mp4` or as JSON with a `download_url`. Binary completions are returned as an embedded MCP resource (`blob`, `mimeType: "video/mp4"`, synthetic `venice://video/...` URI), streamed into a bounded buffer that defaults to 8 MiB (`VENICE_MAX_VIDEO_RESPONSE_BYTES`). Oversized binary results remain queued and can be retried with the same queue ID after changing the limit. JSON completions return the `download_url` as an MCP resource link instead of fetching that URL. Because that link stops working once the stored media is removed, `delete_media_on_completion` is not applied to `download_url` results: download the file first, then call `venice_video_complete` (and optionally send an HTTP `DELETE` to the link to revoke it). For VPS / Grok Imagine Private models, `download_url` is returned only on queue; pass that URL into `venice_video_status` so a `COMPLETED` retrieve without an inline URL still yields a resource link.
 
@@ -134,6 +134,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
 | `VENICE_MAX_VIDEO_RESPONSE_BYTES` | `8388608` (8 MiB) | Maximum completed MP4 bytes buffered and base64-embedded by `venice_video_status`. |
+| `VENICE_MAX_IMAGE_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum response bytes buffered by `venice_image_generate`, `venice_image_edit`, and `venice_image_multi_edit`. Larger results are discarded with an error. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |

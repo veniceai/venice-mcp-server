@@ -11,6 +11,8 @@ export interface RequestInitJSON {
   timeoutMs?: number
   /** Override default API-key-first auth behavior for endpoint-specific requirements. */
   auth?: 'default' | 'siwx' | 'none'
+  /** Reject a successful response body larger than this many bytes. */
+  maxBytes?: number
 }
 
 export interface VeniceResponse<T> {
@@ -111,7 +113,10 @@ export class VeniceClient {
 
     const contentType = res.headers.get('content-type') ?? ''
     let body: unknown
-    if (contentType.includes('application/json')) {
+    if (res.ok && init.maxBytes !== undefined) {
+      const text = (await readBoundedResponseBuffer(res, path, init.maxBytes)).toString('utf8')
+      body = contentType.includes('application/json') ? parseJsonOrEmpty(text) : text
+    } else if (contentType.includes('application/json')) {
       body = await res.json().catch(() => ({}))
     } else {
       body = await res.text().catch(() => '')
@@ -156,8 +161,9 @@ export class VeniceClient {
     path: string,
     json: unknown,
     headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'maxBytes'> = {},
   ): Promise<VeniceResponse<T>> {
-    return this.requestWithMetadata<T>(path, { method: 'POST', json, headers })
+    return this.requestWithMetadata<T>(path, { method: 'POST', json, headers, ...opts })
   }
 
   /**
@@ -327,6 +333,14 @@ async function readBoundedResponseBuffer(
     reader.releaseLock()
   }
   return Buffer.concat(chunks, total)
+}
+
+function parseJsonOrEmpty(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return {}
+  }
 }
 
 function responseHeaders(res: Response): Record<string, string> {

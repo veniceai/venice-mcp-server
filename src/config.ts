@@ -43,6 +43,8 @@ export interface Config {
   timeoutMs: number
   /** Maximum completed video response bytes buffered for an MCP result. */
   maxVideoResponseBytes: number
+  /** Maximum image generate/edit response bytes buffered for an MCP result. */
+  maxImageResponseBytes: number
   /** Whether to advertise NSFW capability in tool descriptions. */
   enableNsfw: boolean
   /** Server name advertised to MCP clients. */
@@ -53,6 +55,7 @@ export interface Config {
 
 const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 8 * 1024 * 1024
+const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 
 function parseTimeoutMs(value: string | undefined): number {
   const parsed = Number(value ?? DEFAULT_TIMEOUT_MS)
@@ -78,6 +81,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxVideoResponseBytes: parsePositiveInteger(
       env.VENICE_MAX_VIDEO_RESPONSE_BYTES,
       DEFAULT_MAX_VIDEO_RESPONSE_BYTES,
+    ),
+    maxImageResponseBytes: parsePositiveInteger(
+      env.VENICE_MAX_IMAGE_RESPONSE_BYTES,
+      DEFAULT_MAX_IMAGE_RESPONSE_BYTES,
     ),
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     serverName: '@veniceai/mcp-server',

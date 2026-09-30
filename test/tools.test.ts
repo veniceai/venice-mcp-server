@@ -845,6 +845,39 @@ describe('tool output shaping', () => {
     assert.equal(parsed.lyrics_prompt, longLyrics)
   })
 
+  it('image generate/edit/multi-edit cap response bytes and explain an oversized result', async () => {
+    const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+    const imageCfg = { ...cfg, maxImageResponseBytes: 2048 }
+    const tooLarge = (path: string) => () => {
+      throw new VeniceResponseTooLargeError(path, 2048)
+    }
+    const stub = new StubClient({
+      '/v1/image/generate': tooLarge('/v1/image/generate'),
+      '/v1/image/edit': tooLarge('/v1/image/edit'),
+      '/v1/image/multi-edit': tooLarge('/v1/image/multi-edit'),
+    })
+    const tools = buildTools(stub.asClient(), imageCfg)
+    const get = (name: string) => tools.find((t) => t.name === name)!
+    const results = [
+      await get('venice_image_generate').handler({ prompt: 'four 4K scenes', variants: 4, resolution: '4K' } as never),
+      await get('venice_image_edit').handler({ image_url: 'https://x/img.png', prompt: 'winter' } as never),
+      await get('venice_image_multi_edit').handler({ image_urls: ['https://x/a.png'], prompt: 'winter' } as never),
+    ]
+
+    for (const path of ['/v1/image/generate', '/v1/image/edit', '/v1/image/multi-edit']) {
+      assert.equal(stub.calls.find((call) => call.path === path)?.maxBytes, 2048)
+    }
+    for (const r of results) {
+      assert.equal(r.isError, true)
+      assert.equal((r.structuredContent as { error: string }).error, 'image_response_too_large')
+      assert.equal((r.structuredContent as { max_bytes: number }).max_bytes, 2048)
+      const text = (r.content[0] as { text: string }).text
+      assert.match(text, /2048-byte/)
+      assert.match(text, /fewer variants/)
+      assert.match(text, /VENICE_MAX_IMAGE_RESPONSE_BYTES/)
+    }
+  })
+
   it('venice_image_edit does not send quality, which EditImageRequest rejects', async () => {
     const { stub, get } = setup()
     const tool = get('venice_image_edit')
