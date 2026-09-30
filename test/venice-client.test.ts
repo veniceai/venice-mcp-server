@@ -72,6 +72,10 @@ describe('VeniceClient', () => {
             setTimeout(() => resolve({ ok: true }), 500)
           }) as unknown,
       },
+      {
+        match: 'POST /v1/stalled-body',
+        reply: { __status: 200, __stallBody: '{"success":true,"data":' },
+      },
     ])
   })
 
@@ -236,6 +240,18 @@ describe('VeniceClient', () => {
         assert.equal(e.status, 504)
         return true
       }
+    )
+  })
+
+  it('times out a 200 whose body stalls after the headers arrive', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 50 }))
+    await assert.rejects(
+      () => c.post('/v1/stalled-body', {}),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 504)
+        return true
+      },
     )
   })
 
