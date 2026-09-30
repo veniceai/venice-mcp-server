@@ -10,6 +10,8 @@ export interface StubCall {
   multipart?: boolean
   /** Whether this call went through postBinary (binary response expected). */
   binary?: boolean
+  /** Response byte cap requested by the tool, if any. */
+  maxBytes?: number
 }
 
 export type StubHandler = (call: StubCall) => unknown | Promise<unknown>
@@ -37,17 +39,22 @@ export class StubClient {
   get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
     return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
-  post<T>(path: string, json: unknown, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
-    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
+  post<T>(path: string, json: unknown) {
+    return this.dispatch<T>({ method: 'POST', path, body: json })
   }
-  async postWithMetadata<T>(path: string, json: unknown) {
+  async postWithMetadata<T>(
+    path: string,
+    json: unknown,
+    _headers?: Record<string, string>,
+    opts: { maxBytes?: number } = {},
+  ) {
     const output = await this.dispatch<T | {
       __stubResponse: true
       data: T
       headers?: Record<string, string>
       contentType?: string
       status?: number
-    }>({ method: 'POST', path, body: json })
+    }>({ method: 'POST', path, body: json, maxBytes: opts.maxBytes })
     if (output && typeof output === 'object' && '__stubResponse' in output) {
       return {
         data: output.data,
@@ -70,6 +77,7 @@ export class StubClient {
   async postBinary(
     path: string,
     init: { json?: unknown; method?: string; form?: unknown },
+    opts: { maxBytes?: number } = {},
   ): Promise<{ buffer: Buffer; status: number; contentType: string; headers: Record<string, string> }> {
     const body = (init as { json?: unknown }).json
     const isMultipart = (init as { form?: unknown }).form !== undefined
@@ -79,6 +87,7 @@ export class StubClient {
       body: isMultipart ? '<FormData>' : body,
       multipart: isMultipart,
       binary: true,
+      maxBytes: opts.maxBytes,
     })
     const matchKey = Object.keys(this.overrides).find((k) => path.startsWith(k))
     if (matchKey) {
