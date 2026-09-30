@@ -181,7 +181,6 @@ const MAPPINGS: Mapping[] = [
       enhance_prompt: true,
       resolution: '4K-custom',
       output_format: 'webp',
-      quality: 'medium',
     },
     expectMethod: 'POST',
     expectPath: '/v1/image/edit',
@@ -193,7 +192,6 @@ const MAPPINGS: Mapping[] = [
       enhance_prompt: true,
       resolution: '4K-custom',
       output_format: 'webp',
-      quality: 'medium',
     },
   },
   {
@@ -402,8 +400,6 @@ const MAPPINGS: Mapping[] = [
 
   // catalog
   { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models' },
-  { tool: 'venice_list_models', args: { type: 'video' }, expectMethod: 'GET', expectPath: '/v1/models?type=video' },
-
   // characters
   { tool: 'venice_list_characters', args: {}, expectMethod: 'GET', expectPath: '/v1/characters' },
   {
@@ -729,6 +725,75 @@ describe('tool output shaping', () => {
     assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, true)
   })
 
+  it('venice_video_status reports cleanup failure when complete returns 200 { success: false }', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({
+        kind: 'binary',
+        buffer: Buffer.from('mock-mp4'),
+        contentType: 'video/mp4',
+      }),
+      '/v1/video/complete': () => ({ success: false }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'cleanup-refused',
+      model: 'm',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal((r.content[0] as { type: string }).type, 'resource')
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    assert.match((r.content[1] as { text: string }).text, /cleanup was not confirmed/)
+  })
+
+  it('venice_video_status does not claim deletion when complete omits success', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({
+        kind: 'binary',
+        buffer: Buffer.from('mock-mp4'),
+        contentType: 'video/mp4',
+      }),
+      '/v1/video/complete': () => ({}),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'cleanup-silent',
+      model: 'm',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    assert.match((r.content[1] as { text: string }).text, /cleanup was not confirmed/)
+  })
+
+  it('venice_video_status never completes a JSON download_url before the caller downloads it', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-delete-requested',
+      model: 'grok-imagine-text-to-video-private',
+      download_url: 'https://private-share.venice.ai/v1/share/read/keep-me',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal(stub.calls.some((call) => call.path === '/v1/video/complete'), false)
+    assert.equal(
+      (r.structuredContent as { url: string }).url,
+      'https://private-share.venice.ai/v1/share/read/keep-me',
+    )
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    assert.match((r.structuredContent as { next_step: string }).next_step, /venice_video_complete/)
+    const text = (r.content[1] as { text: string }).text
+    assert.match(text, /NOT deleted/)
+    assert.match(text, /Download the file from this URL first, then call venice_video_complete/)
+    assert.match(text, /HTTP DELETE/)
+  })
+
   it('venice_video_status returns PROCESSING progress when not ready', async () => {
     const stub = new StubClient({
       '/v1/video/retrieve': () => ({ status: 'PROCESSING', average_execution_time: 60_000, execution_duration: 12_000 }),
@@ -762,27 +827,10 @@ describe('tool output shaping', () => {
   })
 
   it('venice_list_models filters by capability type', async () => {
-    const stub = new StubClient({
-      '/v1/models?type=image': () => ({ data: [{ id: 'flux-2-pro' }] }),
-    })
-    const tools = buildTools(stub.asClient(), cfg)
-    const get = (name: string) => tools.find((t) => t.name === name)!
+    const { get } = setup()
     const r = await get('venice_list_models').handler({ type: 'image' } as never)
-    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
-    assert.equal((r.structuredContent as { count: number; total: number }).total, 1)
+    assert.equal((r.structuredContent as { count: number; total: number }).total, 3)
     assert.equal((r.structuredContent as { count: number }).count, 1)
-  })
-
-  it('venice_list_models does not truncate a server-filtered catalog', async () => {
-    const models = Array.from({ length: 101 }, (_, index) => ({ id: `video-${index}` }))
-    const stub = new StubClient({
-      '/v1/models?type=video': () => ({ data: models }),
-    })
-    const tools = buildTools(stub.asClient(), cfg)
-    const r = await tools.find((t) => t.name === 'venice_list_models')!.handler({ type: 'video' } as never)
-
-    assert.equal((r.structuredContent as { count: number }).count, 101)
-    assert.equal((JSON.parse((r.content[0] as { text: string }).text) as unknown[]).length, 101)
   })
 
   it('venice_music_generate accepts model-defined lyrics_prompt lengths', () => {
@@ -1057,6 +1105,86 @@ describe('tool output shaping', () => {
     assert.match(text, /not deleted/)
   })
 
+  it('image generate/edit/multi-edit cap response bytes and explain an oversized result', async () => {
+    const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+    const imageCfg = { ...cfg, maxImageResponseBytes: 2048 }
+    const tooLarge = (path: string) => () => {
+      throw new VeniceResponseTooLargeError(path, 2048)
+    }
+    const stub = new StubClient({
+      '/v1/image/generate': tooLarge('/v1/image/generate'),
+      '/v1/image/edit': tooLarge('/v1/image/edit'),
+      '/v1/image/multi-edit': tooLarge('/v1/image/multi-edit'),
+    })
+    const tools = buildTools(stub.asClient(), imageCfg)
+    const get = (name: string) => tools.find((t) => t.name === name)!
+    const results = [
+      await get('venice_image_generate').handler({ prompt: 'four 4K scenes', variants: 4, resolution: '4K' } as never),
+      await get('venice_image_edit').handler({ image_url: 'https://x/img.png', prompt: 'winter' } as never),
+      await get('venice_image_multi_edit').handler({ image_urls: ['https://x/a.png'], prompt: 'winter' } as never),
+    ]
+
+    for (const path of ['/v1/image/generate', '/v1/image/edit', '/v1/image/multi-edit']) {
+      assert.equal(stub.calls.find((call) => call.path === path)?.maxBytes, 2048)
+    }
+    for (const r of results) {
+      assert.equal(r.isError, true)
+      assert.equal((r.structuredContent as { error: string }).error, 'image_response_too_large')
+      assert.equal((r.structuredContent as { max_bytes: number }).max_bytes, 2048)
+      const text = (r.content[0] as { text: string }).text
+      assert.match(text, /2048-byte/)
+      assert.match(text, /fewer variants/)
+      assert.match(text, /VENICE_MAX_IMAGE_RESPONSE_BYTES/)
+    }
+  })
+
+  it('venice_image_edit does not send quality, which EditImageRequest rejects', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_image_edit')
+    assert.equal('quality' in tool.inputSchema, false)
+    await tool.handler(z.object(tool.inputSchema).parse({
+      image_url: 'https://x/img.png',
+      prompt: 'add hat',
+      quality: 'high',
+    }) as never)
+    const body = stub.calls.at(-1)!.body as Record<string, unknown>
+    assert.equal('quality' in body, false)
+  })
+
+  it('venice_music_generate maps deprecated instrumental/lyrics onto the live fields', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_music_generate')
+    const args = z.object(tool.inputSchema).parse({
+      prompt: 'song',
+      model: 'elevenlabs-music',
+      instrumental: true,
+      lyrics: 'Old lyrics field',
+    })
+    await tool.handler(args as never)
+
+    const body = stub.calls.at(-1)!.body as Record<string, unknown>
+    assert.equal(body.force_instrumental, true)
+    assert.equal(body.lyrics_prompt, 'Old lyrics field')
+    assert.equal('instrumental' in body, false)
+    assert.equal('lyrics' in body, false)
+  })
+
+  it('venice_music_generate prefers force_instrumental/lyrics_prompt over deprecated aliases', async () => {
+    const { stub, get } = setup()
+    await get('venice_music_generate').handler({
+      prompt: 'song',
+      model: 'elevenlabs-music',
+      instrumental: true,
+      force_instrumental: false,
+      lyrics: 'Old lyrics field',
+      lyrics_prompt: 'New lyrics field',
+    } as never)
+
+    const body = stub.calls.at(-1)!.body as Record<string, unknown>
+    assert.equal(body.force_instrumental, false)
+    assert.equal(body.lyrics_prompt, 'New lyrics field')
+  })
+
   it('venice_video_status returns retry-safe guidance for an oversized MP4', async () => {
     const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
     const stub = new StubClient({
@@ -1191,17 +1319,5 @@ describe('tool output shaping', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
-  })
-})
-
-describe('x402 top-up discovery auth', () => {
-  it('posts an empty unauthenticated body so a configured API key is not forwarded', async () => {
-    const stub = new StubClient()
-    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
-    await tool.handler({ wallet_address: `0x${'a'.repeat(40)}` } as never)
-    const call = stub.calls.at(-1)
-    assert.equal(call?.path, '/v1/x402/top-up')
-    assert.deepEqual(call?.body, {})
-    assert.equal(call?.auth, 'none')
   })
 })

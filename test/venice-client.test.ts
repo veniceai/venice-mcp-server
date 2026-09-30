@@ -221,6 +221,21 @@ describe('VeniceClient', () => {
     assert.equal(r.headers['x-venice-enhanced-prompt'], 'detailed%20prompt')
   })
 
+  it('postWithMetadata rejects a JSON body over its byte limit', async () => {
+    const c = new VeniceClient(makeCfg())
+    const ok = await c.postWithMetadata<{ ok: boolean }>('/v1/metadata', {}, undefined, { maxBytes: 1024 })
+    assert.equal(ok.data.ok, true)
+    assert.equal(ok.headers['x-venice-enhanced-prompt'], 'detailed%20prompt')
+    await assert.rejects(
+      () => c.postWithMetadata('/v1/metadata', {}, undefined, { maxBytes: 4 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceResponseTooLargeError)
+        assert.equal(err.maxBytes, 4)
+        return true
+      },
+    )
+  })
+
   it('postMixed does not apply a tiny binary limit to JSON processing responses', async () => {
     const c = new VeniceClient(makeCfg())
     const r = await c.postMixed<{ status: string; execution_duration: number }>(
