@@ -500,6 +500,71 @@ describe('tools endpoint + method mapping', () => {
   }
 })
 
+describe('billing input validation and output size', () => {
+  it('rejects impossible calendar dates and timestamps', () => {
+    const { get } = setup()
+    const analytics = z.object(get('venice_billing_usage_analytics').inputSchema)
+    for (const date of ['2026-13-45', '2026-02-30', '2026-00-10', '2025-02-29']) {
+      assert.equal(analytics.safeParse({ start_date: date, end_date: '2026-12-31' }).success, false, date)
+    }
+    assert.equal(analytics.safeParse({ start_date: '2028-02-29', end_date: '2028-03-01' }).success, true)
+
+    const history = z.object(get('venice_billing_usage_history').inputSchema)
+    for (const ts of ['2026-02-30T00:00:00Z', '2026-01-01T25:00:00Z', '2026-13-01T00:00:00Z']) {
+      assert.equal(history.safeParse({ start_timestamp: ts }).success, false, ts)
+    }
+  })
+
+  it('rejects an analytics start_date later than end_date', async () => {
+    const { get, stub } = setup()
+    const analytics = get('venice_billing_usage_analytics')
+    const reversed = await analytics.handler({ start_date: '2026-08-02', end_date: '2026-08-01' } as never)
+    assert.equal(reversed.isError, true)
+    assert.match((reversed.content[0] as { text: string }).text, /start_date cannot be later than end_date/)
+    assert.equal(stub.calls.length, 0)
+    const sameDay = await analytics.handler({ start_date: '2026-08-01', end_date: '2026-08-01' } as never)
+    assert.equal(sameDay.isError, undefined)
+  })
+
+  it('caps plain cursors at 512 characters and allows the csv: prefix on top', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_billing_usage_history').inputSchema)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(512) }).success, true)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(513) }).success, false)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(516) }).success, false)
+    assert.equal(schema.safeParse({ cursor: `csv:${'a'.repeat(512)}` }).success, true)
+    assert.equal(schema.safeParse({ cursor: `csv:${'a'.repeat(513)}` }).success, false)
+    assert.equal(schema.safeParse({ cursor: 'csv:' }).success, false)
+    assert.equal(schema.safeParse({ cursor: '' }).success, false)
+  })
+
+  it('truncates oversized usage-history pages and flags them', async () => {
+    const rows = Array.from({ length: 1000 }, (_, i) => ({ timestamp: `2026-08-01T00:00:${i}Z`, amount: -0.1, sku: 'x'.repeat(40) }))
+    const jsonStub = new StubClient({ '/v1/billing/usage-history': () => ({ data: rows, nextCursor: 'next' }) })
+    const jsonTool = buildTools(jsonStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const json = await jsonTool.handler({ page_size: 1000 } as never)
+    const jsonText = (json.content[0] as { text: string }).text
+    assert.ok(jsonText.length < 8500, `json text length ${jsonText.length}`)
+    assert.match(jsonText, /truncated/)
+    assert.match(jsonText, /smaller page_size/)
+    assert.deepEqual(json.structuredContent, { format: 'json', count: 1000, nextCursor: 'next', truncated: true })
+
+    const csvBody = `timestamp,amount\n${rows.map((r) => `${r.timestamp},${r.amount}`).join('\n')}`.repeat(2)
+    const csvStub = new StubClient({ '/v1/billing/usage-history': () => csvBody })
+    const csvTool = buildTools(csvStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const csv = await csvTool.handler({ format: 'csv', page_size: 1000 } as never)
+    const csvText = (csv.content[0] as { text: string }).text
+    assert.ok(csvText.length < 8500, `csv text length ${csvText.length}`)
+    assert.equal(csv.structuredContent?.truncated, true)
+
+    const smallStub = new StubClient({ '/v1/billing/usage-history': () => 'timestamp,amount\n1,2' })
+    const smallTool = buildTools(smallStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const untruncated = await smallTool.handler({ format: 'csv' } as never)
+    assert.equal(untruncated.structuredContent?.truncated, false)
+    assert.equal((untruncated.content[0] as { text: string }).text, 'timestamp,amount\n1,2')
+  })
+})
+
 describe('tool output shaping', () => {
   it('venice_image_generate returns base64 image content + structuredContent.id', async () => {
     const { get } = setup()

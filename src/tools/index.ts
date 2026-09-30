@@ -120,13 +120,27 @@ const walletAddressSchema = z
 const evmAddressSchema = z
   .string()
   .regex(/^0x[a-fA-F0-9]{40}$/, 'Web3 API-key minting currently requires an EVM wallet address.')
-const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must use YYYY-MM-DD format.')
+function isCalendarDate(value: string): boolean {
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+const dateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Must use YYYY-MM-DD format.')
+  .refine(isCalendarDate, 'Must be a real calendar date.')
 const utcTimestampSchema = z
   .string()
   .max(40)
   .regex(
     /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/,
     'Must be an ISO 8601 UTC timestamp with a Z suffix.',
+  )
+  // Date.parse rolls impossible days such as Feb 30 into the next month.
+  .refine(
+    (value) => isCalendarDate(value) && Number.isFinite(Date.parse(value)),
+    'Must be a real calendar date and time.',
   )
 
 function normalizeExpiresAt(value: string | undefined): string | undefined {
@@ -155,6 +169,16 @@ function redactSecretFields(value: unknown): unknown {
 
 function safeJson(value: unknown): string {
   return JSON.stringify(redactSecretFields(value), null, 2)
+}
+
+/** nextCursor resumes after the whole page, so rows cut here are skipped by a continuation. */
+function truncateUsagePage(raw: string): { text: string; truncated: boolean } {
+  const text = truncate(raw)
+  if (text === raw) return { text, truncated: false }
+  return {
+    text: `${text}\nThis page was too large to return in full, so rows are missing. Repeat the first-page request with a smaller page_size instead of following nextCursor.`,
+    truncated: true,
+  }
 }
 
 /**
@@ -1119,6 +1143,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if ((args.start_date && !args.end_date) || (!args.start_date && args.end_date)) {
             return fail('start_date and end_date must be provided together.')
           }
+          if (args.start_date && args.end_date && args.start_date > args.end_date) {
+            return fail('start_date cannot be later than end_date.')
+          }
           if (args.lookback && Number(args.lookback.slice(0, -1)) > 90) {
             return fail('lookback cannot exceed 90d.')
           }
@@ -1132,7 +1159,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'apiKey' },
           )
-          return ok(JSON.stringify(resp, null, 2))
+          return ok(truncate(JSON.stringify(resp, null, 2)))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1147,9 +1174,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         currency: z.enum(['USD', 'DIEM', 'BUNDLED_CREDITS']).optional(),
         cursor: z
           .string()
-          .min(1)
-          .max(516)
-          .regex(/^(csv:)?[A-Za-z0-9_-]+$/)
+          .regex(
+            /^(?:csv:)?[A-Za-z0-9_-]{1,512}$/,
+            'Must be a nextCursor from a previous page: up to 512 URL-safe characters, optionally prefixed with csv:.',
+          )
           .optional()
           .describe('Opaque nextCursor from the previous page. CSV pages return a csv: prefix so continuation stays on text/csv. Cannot be combined with filters or page_size.'),
         start_timestamp: utcTimestampSchema
@@ -1204,9 +1232,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                 },
               },
             )
-            return ok(csv, {
+            const page = truncateUsagePage(csv)
+            return ok(page.text, {
               format: 'csv',
               nextCursor: nextCursor ? `${CSV_CURSOR_PREFIX}${nextCursor}` : null,
+              truncated: page.truncated,
             })
           }
           const resp = await client.get<{ data?: unknown[]; nextCursor?: string | null }>(
@@ -1214,10 +1244,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'apiKey' },
           )
-          return ok(JSON.stringify(resp, null, 2), {
+          const page = truncateUsagePage(JSON.stringify(resp, null, 2))
+          return ok(page.text, {
             format: 'json',
             count: resp.data?.length ?? 0,
             nextCursor: resp.nextCursor ?? null,
+            truncated: page.truncated,
           })
         } catch (err) {
           return fail(formatToolError(err))
