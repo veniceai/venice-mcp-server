@@ -87,6 +87,20 @@ describe('VeniceClient', () => {
           __stallBody: true,
         },
       },
+      { match: 'POST /v1/multipart/ok', reply: { text: 'hello' } },
+      { match: 'POST /v1/multipart/over-limit', reply: { text: 'x'.repeat(2048) } },
+      {
+        match: 'POST /v1/multipart/stalled-body',
+        reply: { __status: 200, __body: '{"text":"par', __stallBody: true },
+      },
+      {
+        match: 'POST /v1/multipart/invalid-json',
+        reply: { __status: 200, __body: '{"text": "trunc', __headers: { 'content-type': 'application/json' } },
+      },
+      {
+        match: 'POST /v1/multipart/oversized-error',
+        reply: { __status: 500, __body: { error: 'x'.repeat(2048) } },
+      },
       {
         match: 'POST /v1/slow',
         reply: () =>
@@ -259,6 +273,76 @@ describe('VeniceClient', () => {
         assert.ok(err instanceof VeniceUpstreamError)
         assert.equal(err.status, 504)
         assert.match(err.message, /timed out after 30ms/)
+        return true
+      },
+    )
+  })
+
+  function form(): FormData {
+    const f = new FormData()
+    f.set('file', new Blob(['audio'], { type: 'audio/wav' }), 'audio.wav')
+    return f
+  }
+
+  it('postMultipart enforces its byte limit on a successful response', async () => {
+    const c = new VeniceClient(makeCfg())
+    const r = await c.postMultipart<{ text: string }>('/v1/multipart/ok', form(), { maxBytes: 1024 })
+    assert.equal(r.text, 'hello')
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/over-limit', form(), { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceResponseTooLargeError)
+        assert.equal(err.maxBytes, 1024)
+        return true
+      },
+    )
+  })
+
+  it('postMultipart times out when headers arrive but the bounded body stalls', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/stalled-body', form(), { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 504)
+        assert.match(err.message, /timed out after 30ms/)
+        return true
+      },
+    )
+  })
+
+  it('postMultipart times out when an unbounded body stalls', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/stalled-body', form()),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 504)
+        return true
+      },
+    )
+  })
+
+  it('postMultipart rejects malformed JSON on a 2xx instead of returning an empty object', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/invalid-json', form(), { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 502)
+        assert.deepEqual(err.body, { error: 'invalid_json' })
+        return true
+      },
+    )
+  })
+
+  it('postMultipart reports an oversized error body as the upstream status, not a size-limit error', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/oversized-error', form(), { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 500)
         return true
       },
     )

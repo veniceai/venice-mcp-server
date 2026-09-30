@@ -185,38 +185,26 @@ export class VeniceClient {
     // NOTE: don't set Content-Type — fetch sets the boundary automatically.
 
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), opts.timeoutMs ?? this.cfg.timeoutMs)
-    let res: Response
+    const timeoutMs = opts.timeoutMs ?? this.cfg.timeoutMs
+    // The timer stays armed until the body is consumed so a stalled body cannot hang the call.
+    const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
-      res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal })
-    } catch (err) {
-      clearTimeout(timeout)
-      if ((err as Error).name === 'AbortError') {
-        throw new VeniceUpstreamError({
-          message: `Upstream request timed out after ${opts.timeoutMs ?? this.cfg.timeoutMs}ms`,
-          status: 504,
-          body: { error: 'timeout' },
-        })
+      const res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal })
+      if (opts.maxBytes === undefined) {
+        const body = await parseResponse<T>(res, path)
+        if (ac.signal.aborted) throw timeoutError(timeoutMs)
+        return body
       }
-      throw err
-    }
-    clearTimeout(timeout)
 
-    if (opts.maxBytes !== undefined) {
-      const buffer = await readBoundedResponseBuffer(res, path, opts.maxBytes)
       const contentType = res.headers.get('content-type') ?? ''
-      let body: unknown
-      const text = buffer.toString('utf8')
-      if (contentType.includes('application/json')) {
-        try {
-          body = text ? JSON.parse(text) : {}
-        } catch {
-          body = {}
-        }
-      } else {
-        body = text
-      }
       if (!res.ok) {
+        let body: unknown = {}
+        try {
+          const text = (await readBoundedResponseBuffer(res, path, opts.maxBytes)).toString('utf8')
+          body = contentType.includes('application/json') ? parseJsonOrEmpty(text) : text
+        } catch (err) {
+          if (!(err instanceof VeniceResponseTooLargeError)) throw err
+        }
         throw new VeniceUpstreamError({
           message: `Venice ${res.status} on ${path}`,
           status: res.status,
@@ -224,9 +212,26 @@ export class VeniceClient {
           headers: responseHeaders(res),
         })
       }
-      return body as T
+
+      const text = (await readBoundedResponseBuffer(res, path, opts.maxBytes)).toString('utf8')
+      if (!contentType.includes('application/json')) return text as T
+      if (!text) return {} as T
+      try {
+        return JSON.parse(text) as T
+      } catch {
+        throw new VeniceUpstreamError({
+          message: `Venice returned malformed JSON on ${path}`,
+          status: 502,
+          body: { error: 'invalid_json' },
+          headers: responseHeaders(res),
+        })
+      }
+    } catch (err) {
+      if (ac.signal.aborted || (err as Error).name === 'AbortError') throw timeoutError(timeoutMs)
+      throw err
+    } finally {
+      clearTimeout(timeout)
     }
-    return parseResponse<T>(res, path)
   }
 
   /**
@@ -365,6 +370,14 @@ function parseJsonOrEmpty(text: string): unknown {
   } catch {
     return {}
   }
+}
+
+function timeoutError(timeoutMs: number): VeniceUpstreamError {
+  return new VeniceUpstreamError({
+    message: `Upstream request timed out after ${timeoutMs}ms`,
+    status: 504,
+    body: { error: 'timeout' },
+  })
 }
 
 function responseHeaders(res: Response): Record<string, string> {
