@@ -101,6 +101,11 @@ const fail = (text: string, structured?: Record<string, unknown>): ToolResult =>
   ...(structured ? { structuredContent: structured } : {}),
 })
 
+/** Venice answers HTTP 200 with `{ success: false }` when storage deletion fails. */
+function videoCleanupSucceeded(body: { success?: boolean } | null | undefined): boolean {
+  return body?.success === true
+}
+
 const QUEUE_DOWNLOAD_URL_TTL_MS = 24 * 60 * 60 * 1000
 const QUEUE_DOWNLOAD_URL_MAX_ENTRIES = 1000
 const queueDownloadUrls = new Map<string, { url: string; expiresAt: number }>()
@@ -498,7 +503,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             json: {
               images: args.image_urls,
               prompt: args.prompt,
-              model: args.model,
+              // MultiEditImageRequest names this field modelId and rejects unknown keys.
+              ...(args.model !== undefined ? { modelId: args.model } : {}),
               aspect_ratio: args.aspect_ratio,
               enhance_prompt: args.enhance_prompt,
               resolution: args.resolution,
@@ -698,7 +704,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                 queue_id: args.queue_id,
                 model: args.model,
               })
-              if (cleanup?.success !== true) {
+              if (!videoCleanupSucceeded(cleanup)) {
                 return {
                   deleted: false,
                   cleanupNote:
@@ -804,15 +810,24 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_complete',
       title: 'Venice Video Complete (cleanup)',
-      description: `Mark a completed video as downloaded; deletes server-side media.${X402_OK}`,
+      description: `Mark a completed video as downloaded and delete server-side media. Reports removal only when Venice confirms success.${X402_OK}`,
       inputSchema: {
         queue_id: z.string().min(1),
         model: z.string().min(1),
       },
       handler: async (args) => {
         try {
-          await client.post('/v1/video/complete', args)
-          return ok(`Marked ${args.queue_id} complete; server-side media removed.`)
+          const cleanup = await client.post<{ success?: boolean }>('/v1/video/complete', args)
+          if (!videoCleanupSucceeded(cleanup)) {
+            return fail(
+              `Server-side cleanup was not confirmed for ${args.queue_id}: Venice did not report success. ` +
+                'Assume the media is still stored and retry venice_video_complete.',
+              { server_media_deleted: false },
+            )
+          }
+          return ok(`Marked ${args.queue_id} complete; server-side media removed.`, {
+            server_media_deleted: true,
+          })
         } catch (err) {
           return fail(formatToolError(err))
         }
