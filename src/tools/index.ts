@@ -27,6 +27,7 @@ import { z } from 'zod'
 import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
+import { VeniceResponseTooLargeError } from '../types.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -95,9 +96,10 @@ const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API k
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
 
-const CRYPTO_RPC_MAX_RESPONSE_BYTES = 256 * 1024
+const CRYPTO_RPC_MAX_RESPONSE_BYTES = 64 * 1024
 const CRYPTO_RPC_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{1,255}$/
 // Path segments must not be able to form "." or "..", which URL normalisation would resolve.
+const CRYPTO_RPC_NETWORK = /^[a-z0-9][a-z0-9-]{0,99}$/
 const CHARACTER_SLUG = /^[A-Za-z0-9_-]{1,200}$/
 const CRYPTO_RPC_BROADCAST_METHODS = new Set([
   'eth_sendrawtransaction',
@@ -112,7 +114,7 @@ const cryptoRpcRequestSchema = z.object({
   jsonrpc: z.literal('2.0').optional().describe('JSON-RPC version. Defaults to "2.0" when using rpc_method.'),
   method: z.string().min(1).describe('JSON-RPC method name.'),
   params: z.array(z.unknown()).optional().describe('Method parameters.'),
-  id: cryptoRpcIdSchema.optional().describe('Caller-supplied request ID. May be omitted for a single notification.'),
+  id: cryptoRpcIdSchema.optional().describe('Caller-supplied request ID. Defaults to 1 for a single request.'),
 })
 const cryptoRpcBatchRequestSchema = cryptoRpcRequestSchema.extend({
   id: cryptoRpcIdSchema.describe('Required request ID used to correlate this batch item with its response.'),
@@ -143,6 +145,36 @@ function isBroadcastRpcMethod(method: string): boolean {
 
 function cryptoRpcRequiresIdempotencyKey(body: unknown): boolean {
   return cryptoRpcMethods(body).some(isBroadcastRpcMethod)
+}
+
+function cryptoRpcBatchesBroadcast(body: unknown): boolean {
+  return Array.isArray(body) && body.length > 1 && cryptoRpcMethods(body).some(isBroadcastRpcMethod)
+}
+
+function cryptoRpcBilling(headers: Record<string, string>): Record<string, unknown> {
+  const billing: Record<string, unknown> = {}
+  if (headers['idempotent-replayed'] !== undefined) billing.idempotentReplayed = headers['idempotent-replayed'] === 'true'
+  const credits = Number(headers['x-venice-rpc-credits'])
+  if (headers['x-venice-rpc-credits'] !== undefined && Number.isFinite(credits)) billing.rpcCredits = credits
+  if (headers['x-venice-rpc-cost-usd'] !== undefined) billing.rpcCostUsd = headers['x-venice-rpc-cost-usd']
+  return billing
+}
+
+function formatCryptoRpcBilling(billing: Record<string, unknown>): string {
+  const parts: string[] = []
+  if (billing.idempotentReplayed === true) parts.push('replayed from idempotency cache')
+  if (billing.rpcCredits !== undefined) parts.push(`credits: ${billing.rpcCredits}`)
+  if (billing.rpcCostUsd !== undefined) parts.push(`cost: $${billing.rpcCostUsd}`)
+  return parts.join(', ')
+}
+
+function cryptoRpcTooLargeMessage(billing: Record<string, unknown>): string {
+  const billingLine = formatCryptoRpcBilling(billing)
+  return [
+    `Crypto RPC response exceeds ${CRYPTO_RPC_MAX_RESPONSE_BYTES} bytes (${CRYPTO_RPC_MAX_RESPONSE_BYTES / 1024} KiB) and was not returned.`,
+    `Venice already processed and billed this request upstream${billingLine ? ` (${billingLine})` : ''}; re-sending it will be billed again.`,
+    'Narrow the query instead: a smaller eth_getLogs block range or address/topic filter, fewer batch items, or avoid trace/replay/txpool_content methods.',
+  ].join(' ')
 }
 
 /**
@@ -918,9 +950,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_crypto_rpc',
       title: 'Venice Crypto RPC Proxy',
-      description: `Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. Use venice_crypto_networks for the live network list. For a simple call, pass rpc_method/rpc_params; for complete request IDs or batches, pass request. Relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes) require idempotency_key; reuse the same key when retrying. Responses larger than 256 KiB are rejected.${X402_OK}`,
+      description: `Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. Use venice_crypto_networks for the live network list. For a simple call, pass rpc_method/rpc_params; for complete request IDs or batches, pass request. Relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes) must be sent as single requests (not batched) with idempotency_key; reuse the same key when retrying. Results are returned as compact JSON; responses larger than 64 KiB are rejected after Venice has billed them, so keep queries narrow.${X402_OK}`,
       inputSchema: {
-        network: z.string().min(1).describe('Network slug returned by venice_crypto_networks.'),
+        network: z
+          .string()
+          .regex(CRYPTO_RPC_NETWORK)
+          .describe('Network slug returned by venice_crypto_networks, e.g. "ethereum-mainnet".'),
         request: z
           .union([cryptoRpcRequestSchema, z.array(cryptoRpcBatchRequestSchema).min(1).max(100)])
           .optional()
@@ -940,11 +975,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if (args.request !== undefined && args.rpc_params !== undefined) {
             return fail('rpc_params can only be used with rpc_method.')
           }
-          const body = args.request ?? {
-            jsonrpc: '2.0' as const,
-            method: args.rpc_method!,
-            params: args.rpc_params ?? [],
-            id: 1,
+          const body =
+            args.request === undefined
+              ? { jsonrpc: '2.0' as const, method: args.rpc_method!, params: args.rpc_params ?? [], id: 1 }
+              : Array.isArray(args.request)
+                ? args.request
+                : { ...args.request, id: args.request.id ?? 1 }
+          if (cryptoRpcBatchesBroadcast(body)) {
+            return fail(
+              'Transaction relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes) cannot be batched with other requests. Send each broadcast as a single request.',
+            )
           }
           if (cryptoRpcRequiresIdempotencyKey(body) && !args.idempotency_key) {
             return fail(
@@ -952,20 +992,23 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             )
           }
           const headers = args.idempotency_key ? { 'Idempotency-Key': args.idempotency_key } : undefined
-          const resp = await client.post<unknown>(
+          const resp = await client.postWithHeaders<unknown>(
             `/v1/crypto/rpc/${encodeURIComponent(args.network)}`,
             body,
             headers,
             { maxResponseBytes: CRYPTO_RPC_MAX_RESPONSE_BYTES },
           )
-          const text = JSON.stringify(resp, null, 2)
+          const billing = cryptoRpcBilling(resp.headers)
+          const billingLine = formatCryptoRpcBilling(billing)
+          const text = `${JSON.stringify(resp.body)}${billingLine ? `\n\nVenice RPC: ${billingLine}` : ''}`
           if (Buffer.byteLength(text, 'utf8') > CRYPTO_RPC_MAX_RESPONSE_BYTES) {
-            return fail(
-              `Crypto RPC response exceeds ${CRYPTO_RPC_MAX_RESPONSE_BYTES} bytes. Narrow the query (smaller eth_getLogs range, fewer batch items, or avoid trace/replay methods).`,
-            )
+            return fail(cryptoRpcTooLargeMessage(billing))
           }
-          return ok(text)
+          return ok(text, Object.keys(billing).length > 0 ? billing : undefined)
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) {
+            return fail(cryptoRpcTooLargeMessage(cryptoRpcBilling(err.headers)))
+          }
           return fail(formatToolError(err))
         }
       },

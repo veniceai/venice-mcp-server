@@ -293,6 +293,20 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     }
   })
 
+  it('rejects dot-segment slugs and networks before contacting Venice', async () => {
+    const callsBefore = venice.calls.length
+    for (const call of [
+      { name: 'venice_get_character', arguments: { slug: '..' } },
+      { name: 'venice_character_reviews', arguments: { slug: '.' } },
+      { name: 'venice_crypto_rpc', arguments: { network: '..', rpc_method: 'eth_chainId' } },
+    ]) {
+      const r = (await rpc.request('tools/call', call)) as RpcResult
+      const result = r.result as { isError?: boolean } | undefined
+      assert.ok(r.error !== undefined || result?.isError === true, `${call.name} should reject ${JSON.stringify(call.arguments)}`)
+    }
+    assert.equal(venice.calls.length, callsBefore)
+  })
+
   it('reads venice://models resource', async () => {
     const r = (await rpc.request('resources/read', { uri: 'venice://models' })) as RpcResult
     assert.equal(r.error, undefined)
