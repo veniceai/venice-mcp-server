@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, billing, and operator APIs into any agent in 30 seconds. **40 tools, one config block.**
+Plug Venice's chat, image, video, audio, music, billing, and operator APIs into any agent in 30 seconds. **39 tools (plus 1 opt-in), one config block.**
 
 ## Quick start
 
@@ -36,7 +36,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**40 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**39 tools** spanning every Venice modality plus billing and API-key operations (and one optional tool, `venice_web3_key_mint`, registered only when `VENICE_MCP_ENABLE_WEB3_MINT=1`), **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
 
 ### 💬 Chat & embeddings
 
@@ -125,9 +125,11 @@ Usage-history continuation calls must send `cursor` without the original filters
 | `venice_api_key_rate_limits` | Get current balances, access status, tier, and model limits. API key only. |
 | `venice_api_key_rate_limit_logs` | Get the last 50 exceeded rate-limit events. API key only; experimental upstream. |
 | `venice_web3_key_challenge` | Get the unauthenticated 15-minute Web3 mint challenge. |
-| `venice_web3_key_mint` | Submit a caller-signed EVM challenge and receive a one-time INFERENCE API-key secret. ADMIN minting is rejected; a positive consumption limit is required; omitted `limit_period` defaults to `LIFETIME`. |
+| `venice_web3_key_mint` | **Optional, off by default.** Submit a caller-signed EVM challenge and receive a one-time INFERENCE API-key secret. ADMIN minting is rejected; a positive USD consumption limit within the server ceiling is required; omitted `limit_period` defaults to `LIFETIME`. |
 
-Web3 minting currently requires an EVM wallet with staked VVV on Base. Signing stays in the caller's wallet: this server accepts an address, signature, and challenge token, but never a private key. MCP minting is limited to `INFERENCE` keys with a required positive `consumption_limit`, because the wallet signature covers only the challenge token. Omitted `limit_period` is sent as `LIFETIME` so a dollar cap is a permanent cap rather than the upstream daily `EPOCH` default. The secret is shown once. If the mint times out or the response is lost, do not retry — use an ADMIN key to list and revoke any unexpected key, then start a new challenge. Minted secrets are returned only to the MCP caller and are not written to server logs. Create/update/delete key mutations are intentionally not exposed.
+> **⚠️ `venice_web3_key_mint` is opt-in.** It is registered only when `VENICE_MCP_ENABLE_WEB3_MINT=1`. The wallet signature you pass to this tool can be used directly against Venice, by anyone who sees it, to mint an **ADMIN** key with **no spending cap** until the challenge expires. The server's INFERENCE-only and spend-cap rules protect only requests that go through this server; they do not bind the signature. Enable the tool only if you accept that the signature transits the model's context (and any logs or transcripts your MCP host keeps).
+
+Web3 minting currently requires an EVM wallet with staked VVV on Base. Signing stays in the caller's wallet: this server accepts an address, signature, and challenge token, but never a private key. MCP minting is limited to `INFERENCE` keys, because the wallet signature covers only the challenge token. Every mint must set a positive `consumption_limit.usd` of at most `VENICE_MCP_MAX_MINT_USD` (default 50); a `consumption_limit.diem` cap is optional but may not exceed `VENICE_MCP_MAX_MINT_DIEM` (default 50). Omitted `limit_period` is sent as `LIFETIME` so a dollar cap is a permanent cap rather than the upstream daily `EPOCH` default. If Venice returns a key whose type, limits, or limit period differ from the request, the tool withholds the secret and returns the key ID so you can revoke it with an ADMIN key. The secret is shown once. If the mint times out or the response is lost, do not retry — use an ADMIN key to list and revoke any unexpected key, then start a new challenge. Minted secrets are returned only to the MCP caller and are not written to server logs. The record of in-flight and unknown mint attempts is kept per process, so in HTTP mode it is shared by every session; a client that reconnects after a timeout still cannot mint a second key for the same wallet. Create/update/delete key mutations are intentionally not exposed.
 
 List and get require an ADMIN `VENICE_API_KEY`. Rate-limit reads accept an INFERENCE or ADMIN key. These tools never forward `SIGN-IN-WITH-X`.
 
@@ -153,6 +155,9 @@ List and get require an ADMIN `VENICE_API_KEY`. Rate-limit reads accept an INFER
 | `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
+| `VENICE_MCP_ENABLE_WEB3_MINT` | `0` | Set to `1` to register `venice_web3_key_mint`. Read the [warning](#-api-keys) first: the wallet signature it takes can mint an uncapped ADMIN key outside this server. |
+| `VENICE_MCP_MAX_MINT_USD` | `50` | Highest `consumption_limit.usd` that `venice_web3_key_mint` will request. |
+| `VENICE_MCP_MAX_MINT_DIEM` | `50` | Highest `consumption_limit.diem` that `venice_web3_key_mint` will request. |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
 | `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Bearer token required by `/mcp` whenever HTTP mode binds outside loopback. Use a long random value. |
@@ -256,7 +261,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 40 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 39 tools (+1 opt-in)│
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -332,7 +337,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_api_key_rate_limits` | `GET /v1/api_keys/rate_limits` (INFERENCE or ADMIN) |
 | `venice_api_key_rate_limit_logs` | `GET /v1/api_keys/rate_limits/log` (INFERENCE or ADMIN) |
 
-### Web3 API-key mint (auth-free)
+### Web3 API-key mint (auth-free; mint is opt-in via `VENICE_MCP_ENABLE_WEB3_MINT=1`)
 
 | Tool | Endpoint |
 |---|---|
@@ -354,7 +359,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```bash
 npm install
 npm run build
-npm test                  # full suite (108 tests across 12 suites, ~3s)
+npm test                  # full suite (136 tests across 14 suites, ~3s)
 npm run test:unit         # unit tests only
 npm run test:integration  # spawns dist/cli.js + a mock Venice over real stdio JSON-RPC
 npm start                 # stdio mode
@@ -368,7 +373,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # 40-tool registry + endpoint/method/body mappings
+├── tools.test.ts              # tool registry (39 default + opt-in mint) + endpoint/method/body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub
@@ -391,7 +396,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 40 tools × applicable auth modes, side-by-side report
+# Comprehensive — every tool × applicable auth modes, side-by-side report (mint is always skipped)
 VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 

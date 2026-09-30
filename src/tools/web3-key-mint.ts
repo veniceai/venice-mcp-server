@@ -16,11 +16,22 @@ type MintRecord = {
   response?: unknown
 }
 
+/**
+ * Process-wide on purpose. HTTP mode builds one server per session from the
+ * same env credentials, and a client that times out usually reconnects with a
+ * new session; a per-session store would let that retry mint a second key.
+ */
 const attempts = new Map<string, MintRecord>()
 
 function pruneExpiredAttempts(now = Date.now()): void {
   for (const [token, record] of attempts) {
-    if (record.expiresAt <= now) attempts.delete(token)
+    if (record.expiresAt > now) continue
+    if (record.status === 'in_flight') {
+      // A request that never settled may still have minted a key upstream.
+      attempts.set(token, { ...record, status: 'unknown', expiresAt: now + MINT_ATTEMPT_TTL_MS })
+    } else {
+      attempts.delete(token)
+    }
   }
 }
 
@@ -45,6 +56,48 @@ export function isMintedKeyResponse(resp: unknown): boolean {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return false
   const { apiKey, id, apiKeyId } = data as { apiKey?: unknown; id?: unknown; apiKeyId?: unknown }
   return isNonEmptyString(apiKey) && (isNonEmptyString(id) || isNonEmptyString(apiKeyId))
+}
+
+export interface RequestedMintRestrictions {
+  consumptionLimit: { usd?: number | null; diem?: number | null }
+  limitPeriod: string
+}
+
+/**
+ * The challenge signature does not bind key type or limits, so the minted key
+ * is checked against what was asked for. Returns a problem description, or
+ * undefined when the key matches. Optional response fields are only compared
+ * when present.
+ */
+export function mintedKeyRestrictionProblem(resp: unknown, requested: RequestedMintRestrictions): string | undefined {
+  const data = (resp as { data: Record<string, unknown> }).data
+  if (data.apiKeyType !== 'INFERENCE') {
+    return `key type is ${JSON.stringify(data.apiKeyType ?? null)}, not INFERENCE`
+  }
+  const limit = data.consumptionLimit
+  if (limit !== undefined) {
+    if (typeof limit !== 'object' || limit === null) return 'consumption limit is missing'
+    for (const currency of ['usd', 'diem'] as const) {
+      const want = requested.consumptionLimit[currency] ?? null
+      const got = (limit as Record<string, unknown>)[currency] ?? null
+      if (want !== got) {
+        return `${currency} consumption limit is ${JSON.stringify(got)}, requested ${JSON.stringify(want)}`
+      }
+    }
+  }
+  if (data.limitPeriod !== undefined && data.limitPeriod !== requested.limitPeriod) {
+    return `limit period is ${JSON.stringify(data.limitPeriod)}, requested ${requested.limitPeriod}`
+  }
+  return undefined
+}
+
+export function mintedKeyId(resp: unknown): string {
+  const data = (resp as { data: { id?: unknown; apiKeyId?: unknown } }).data
+  return String(isNonEmptyString(data.id) ? data.id : data.apiKeyId)
+}
+
+export function web3MintRestrictionMismatchMessage(id: string, problem: string): string {
+  return `Venice minted API key ${id}, but it does not match the requested restrictions: ${problem}. The secret is withheld. Revoke key ${id} now with an ADMIN API key (DELETE /api/v1/api_keys?id=${encodeURIComponent(id)}, or the Venice API settings page). Do not retry this challenge.`
 }
 
 export function isUnknownMintOutcome(err: unknown): boolean {

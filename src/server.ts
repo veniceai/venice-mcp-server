@@ -51,6 +51,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         title: t.title,
         description: t.description,
         inputSchema: t.inputSchema,
+        ...(t.annotations ? { annotations: t.annotations } : {}),
       },
       async (args: unknown) => t.handler(args as never)
     )

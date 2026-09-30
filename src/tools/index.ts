@@ -27,6 +27,7 @@
  *      - x402/balance, x402/transactions
  */
 import { z } from 'zod'
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
@@ -38,11 +39,14 @@ import {
   isMintedKeyResponse,
   isUnknownMintOutcome,
   markUnknownWeb3MintAttempt,
+  mintedKeyId,
+  mintedKeyRestrictionProblem,
   releaseWeb3MintAttempt,
   succeedWeb3MintAttempt,
   WEB3_MINT_RECOVERY_MESSAGE,
   WEB3_MINT_UNREADABLE_RESPONSE_MESSAGE,
   web3MintBlockedMessage,
+  web3MintRestrictionMismatchMessage,
 } from './web3-key-mint.js'
 
 /**
@@ -94,6 +98,7 @@ export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
   name: string
   title: string
   description: string
+  annotations?: ToolAnnotations
   inputSchema: S
   handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
 }
@@ -1368,10 +1373,18 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
     },
 
-    {
+    // Opt-in only: the signature passed here is enough, on its own, to mint an
+    // uncapped ADMIN key directly against Venice until the challenge expires.
+    ...(cfg.enableWeb3Mint ? ([{
       name: 'venice_web3_key_mint',
       title: 'Venice Web3 API Key Mint',
-      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive consumption_limit in usd or diem is required because the wallet signature covers only the challenge token; retired VCU limits are rejected because they are not enforced against current spending. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. Never provide a private key. The returned apiKey is shown once—store it securely. Same-process retries reuse the cached secret for this token+wallet+signature only. After a timeout or unknown outcome, this wallet cannot mint again (even with a new challenge) until that attempt expires. If the response is lost, revoke any unexpected key with an ADMIN key first. A process restart still cannot recover a secret this server never saw.${NO_AUTH}`,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive usd consumption_limit of at most ${cfg.maxMintUsd} is always required, and an optional diem cap may not exceed ${cfg.maxMintDiem}, because the wallet signature covers only the challenge token; retired VCU limits are rejected because they are not enforced against current spending. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. If Venice returns a key whose type or limits differ from the request, the secret is withheld and the key ID is returned for revocation. Never provide a private key. The returned apiKey is shown once—store it securely. Same-process retries reuse the cached secret for this token+wallet+signature only. After a timeout or unknown outcome, this wallet cannot mint again (even with a new challenge) until that attempt expires. If the response is lost, revoke any unexpected key with an ADMIN key first. A process restart still cannot recover a secret this server never saw.${NO_AUTH}`,
       inputSchema: {
         address: evmAddressSchema,
         signature: z.string().min(1).max(4096).describe('Signature created by the caller wallet over the raw challenge token.'),
@@ -1387,23 +1400,33 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           .describe('Optional YYYY-MM-DD or ISO 8601 UTC expiration.'),
         consumption_limit: z
           .object({
-            usd: z.number().min(0).max(9_999_999_999).nullable().optional(),
-            diem: z.number().min(0).max(9_999_999_999).nullable().optional(),
+            // Always required: a diem-only cap would leave USD spending uncapped.
+            usd: z
+              .number({
+                required_error: 'A positive usd consumption limit is required.',
+                invalid_type_error: 'A positive usd consumption limit is required.',
+              })
+              .positive('A positive usd consumption limit is required.')
+              .max(cfg.maxMintUsd, `usd cannot exceed this server's ceiling of ${cfg.maxMintUsd} (VENICE_MCP_MAX_MINT_USD).`)
+              .describe(`Required USD cap, greater than 0 and at most ${cfg.maxMintUsd}.`),
+            diem: z
+              .number()
+              .positive('diem, when set, must be greater than 0.')
+              .max(cfg.maxMintDiem, `diem cannot exceed this server's ceiling of ${cfg.maxMintDiem} (VENICE_MCP_MAX_MINT_DIEM).`)
+              .nullable()
+              .optional()
+              .describe(`Optional DIEM cap, greater than 0 and at most ${cfg.maxMintDiem}. Omit or null to leave DIEM uncapped.`),
             // Rejected rather than stripped: a silently dropped vcu cap would
             // leave the caller believing the key is capped when it is not.
             vcu: z
               .never({
                 invalid_type_error:
-                  'VCU consumption limits are retired and are not enforced. Set a positive usd or diem cap instead.',
+                  'VCU consumption limits are retired and are not enforced. Set a positive usd cap instead.',
               })
               .optional()
-              .describe('Retired. VCU limits are rejected; set the cap in usd or diem.'),
+              .describe('Retired. VCU limits are rejected; set the cap in usd.'),
           })
-          .refine(
-            (limit) => [limit.usd, limit.diem].some((value) => typeof value === 'number' && value > 0),
-            'At least one positive consumption limit (usd or diem) is required.',
-          )
-          .describe('Required spend cap in usd or diem. The challenge signature does not bind key type or limits.'),
+          .describe('Required spend cap. usd is always required; diem is optional. The challenge signature does not bind key type or limits.'),
         limit_period: z
           .enum(['EPOCH', 'MONTH', 'LIFETIME'])
           .optional()
@@ -1420,6 +1443,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         if (attempt !== 'fresh') {
           return fail(web3MintBlockedMessage(attempt === 'succeeded' ? 'unknown' : attempt))
         }
+        const requested = {
+          consumptionLimit: args.consumption_limit,
+          limitPeriod: args.limit_period ?? 'LIFETIME',
+        }
         try {
           const resp = await client.post<unknown>(
             '/v1/api_keys/generate_web3_key',
@@ -1430,8 +1457,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               apiKeyType: 'INFERENCE',
               description: args.description,
               expiresAt: normalizeExpiresAt(args.expires_at),
-              consumptionLimit: args.consumption_limit,
-              limitPeriod: args.limit_period ?? 'LIFETIME',
+              ...requested,
             },
             undefined,
             { auth: 'none' },
@@ -1442,6 +1468,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             // the wallet to mint again, and never a cached empty "success".
             markUnknownWeb3MintAttempt(args.token, args.address, args.signature)
             return fail(`${WEB3_MINT_RECOVERY_MESSAGE} ${WEB3_MINT_UNREADABLE_RESPONSE_MESSAGE}`)
+          }
+          const problem = mintedKeyRestrictionProblem(resp, requested)
+          if (problem) {
+            // The key is live but not the key that was asked for: never hand out its
+            // secret, and keep the wallet locked so a retry cannot mint another.
+            markUnknownWeb3MintAttempt(args.token, args.address, args.signature)
+            return fail(web3MintRestrictionMismatchMessage(mintedKeyId(resp), problem))
           }
           succeedWeb3MintAttempt(args.token, args.address, args.signature, resp)
           // The secret must reach the caller, but it is never written to server logs
@@ -1456,7 +1489,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           return fail(formatToolError(err))
         }
       },
-    },
+    }] satisfies ToolDef[]) : []),
 
     // ========================================================================
     // x402 wallet helpers — SIWX reads + auth-free top-up discovery

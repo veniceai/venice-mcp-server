@@ -55,4 +55,22 @@ describe('loadConfig', () => {
     assert.equal(cfg.defaultTtsModel, 'venice-tts-2')
     assert.equal(cfg.defaultAsrModel, 'venice-asr-2')
   })
+
+  it('keeps web3 minting off unless VENICE_MCP_ENABLE_WEB3_MINT=1', () => {
+    assert.equal(loadConfig({}).enableWeb3Mint, false)
+    assert.equal(loadConfig({ VENICE_MCP_ENABLE_WEB3_MINT: 'true' }).enableWeb3Mint, false)
+    assert.equal(loadConfig({ VENICE_MCP_ENABLE_WEB3_MINT: '1' }).enableWeb3Mint, true)
+  })
+
+  it('reads mint ceilings with low defaults and ignores invalid values', () => {
+    assert.equal(loadConfig({}).maxMintUsd, 50)
+    assert.equal(loadConfig({}).maxMintDiem, 50)
+    const cfg = loadConfig({ VENICE_MCP_MAX_MINT_USD: '10.5', VENICE_MCP_MAX_MINT_DIEM: '3' })
+    assert.equal(cfg.maxMintUsd, 10.5)
+    assert.equal(cfg.maxMintDiem, 3)
+    for (const value of ['nope', '0', '-5', 'Infinity']) {
+      assert.equal(loadConfig({ VENICE_MCP_MAX_MINT_USD: value }).maxMintUsd, 50, value)
+      assert.equal(loadConfig({ VENICE_MCP_MAX_MINT_DIEM: value }).maxMintDiem, 50, value)
+    }
+  })
 })

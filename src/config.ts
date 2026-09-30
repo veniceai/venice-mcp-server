@@ -46,13 +46,21 @@ export interface Config {
   serverName: string
   /** Server version advertised. */
   serverVersion: string
+  /** Whether the venice_web3_key_mint tool is registered. Off unless explicitly enabled. */
+  enableWeb3Mint: boolean
+  /** Highest USD consumption limit venice_web3_key_mint will request. */
+  maxMintUsd: number
+  /** Highest DIEM consumption limit venice_web3_key_mint will request. */
+  maxMintDiem: number
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_MAX_MINT_USD = 50
+const DEFAULT_MAX_MINT_DIEM = 50
 
-function parseTimeoutMs(value: string | undefined): number {
-  const parsed = Number(value ?? DEFAULT_TIMEOUT_MS)
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TIMEOUT_MS
+function parsePositiveNumber(value: string | undefined, fallback: number): number {
+  const parsed = Number(value ?? fallback)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -65,9 +73,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultImageModel: env.VENICE_DEFAULT_IMAGE_MODEL ?? 'flux-2-pro',
     defaultTtsModel: env.VENICE_DEFAULT_TTS_MODEL ?? 'tts-kokoro',
     defaultAsrModel: env.VENICE_DEFAULT_ASR_MODEL ?? 'openai/whisper-large-v3',
-    timeoutMs: parseTimeoutMs(env.VENICE_HTTP_TIMEOUT_MS),
+    timeoutMs: parsePositiveNumber(env.VENICE_HTTP_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     serverName: '@veniceai/mcp-server',
     serverVersion: '0.2.0',
+    enableWeb3Mint: env.VENICE_MCP_ENABLE_WEB3_MINT === '1',
+    maxMintUsd: parsePositiveNumber(env.VENICE_MCP_MAX_MINT_USD, DEFAULT_MAX_MINT_USD),
+    maxMintDiem: parsePositiveNumber(env.VENICE_MCP_MAX_MINT_DIEM, DEFAULT_MAX_MINT_DIEM),
   }
 }
