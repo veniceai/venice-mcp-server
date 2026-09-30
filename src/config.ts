@@ -52,7 +52,7 @@ export interface Config {
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
-const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 25 * 1024 * 1024
+const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 8 * 1024 * 1024
 
 function parseTimeoutMs(value: string | undefined): number {
   const parsed = Number(value ?? DEFAULT_TIMEOUT_MS)
