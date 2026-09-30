@@ -751,7 +751,11 @@ describe('tool output shaping', () => {
 
   it('venice_video_status does not claim deletion when complete omits success', async () => {
     const stub = new StubClient({
-      '/v1/video/retrieve': () => ({ status: 'COMPLETED', download_url: 'https://stub/v.mp4' }),
+      '/v1/video/retrieve': () => ({
+        kind: 'binary',
+        buffer: Buffer.from('mock-mp4'),
+        contentType: 'video/mp4',
+      }),
       '/v1/video/complete': () => ({}),
     })
     const tools = buildTools(stub.asClient(), cfg)
@@ -762,9 +766,34 @@ describe('tool output shaping', () => {
     } as never)
 
     assert.equal(r.isError, undefined)
-    assert.equal((r.structuredContent as { url: string }).url, 'https://stub/v.mp4')
     assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
     assert.match((r.content[1] as { text: string }).text, /cleanup was not confirmed/)
+  })
+
+  it('venice_video_status never completes a JSON download_url before the caller downloads it', async () => {
+    const stub = new StubClient({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-delete-requested',
+      model: 'grok-imagine-text-to-video-private',
+      download_url: 'https://private-share.venice.ai/v1/share/read/keep-me',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal(stub.calls.some((call) => call.path === '/v1/video/complete'), false)
+    assert.equal(
+      (r.structuredContent as { url: string }).url,
+      'https://private-share.venice.ai/v1/share/read/keep-me',
+    )
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    assert.match((r.structuredContent as { next_step: string }).next_step, /venice_video_complete/)
+    const text = (r.content[1] as { text: string }).text
+    assert.match(text, /NOT deleted/)
+    assert.match(text, /Download the file from this URL first, then call venice_video_complete/)
+    assert.match(text, /HTTP DELETE/)
   })
 
   it('venice_video_status returns PROCESSING progress when not ready', async () => {

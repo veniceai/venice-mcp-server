@@ -659,7 +659,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         download_url: z.string().url().optional().describe(
           'Queue-time download_url from venice_video_generate. Must be an https Venice host. Needed for VPS / Grok Imagine Private only when this process did not queue the job (retrieve returns COMPLETED without a URL).',
         ),
-        delete_media_on_completion: z.boolean().optional(),
+        delete_media_on_completion: z.boolean().optional().describe(
+          'Delete server-side media once an embedded MP4 has been buffered. Ignored for download_url results: download first, then call venice_video_complete.',
+        ),
       },
       handler: async (args) => {
         try {
@@ -745,9 +747,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                 { status: 'COMPLETED' },
               )
             }
-            const { deleted, cleanupNote } = await cleanupAfterSuccess(
-              'Server-side media was deleted after the download URL was captured.',
-            )
+            // The download URL stops working once the stored object is removed, so
+            // cleanup must wait until the caller has fetched the bytes.
+            const cleanupNote = args.delete_media_on_completion
+              ? ' Server-side media was NOT deleted because this download_url is only valid until the stored object is removed.' +
+                ' Download the file from this URL first, then call venice_video_complete with the same queue_id and model.' +
+                ' Optionally send an HTTP DELETE to the download_url afterwards to revoke the link.'
+              : ''
             return {
               content: [
                 { type: 'resource_link', uri: url, name: 'video', mimeType: 'video/mp4' },
@@ -757,7 +763,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                 status: 'COMPLETED',
                 url,
                 representation: 'download_url resource link',
-                server_media_deleted: deleted,
+                server_media_deleted: false,
+                ...(args.delete_media_on_completion
+                  ? { next_step: 'Download url, then call venice_video_complete with the same queue_id and model.' }
+                  : {}),
               },
             }
           }
