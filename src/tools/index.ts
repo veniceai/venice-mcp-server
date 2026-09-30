@@ -887,9 +887,18 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const query = new URLSearchParams({ type: type ?? 'all' }).toString()
           const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>(`/v1/models?${query}`)
           const models = resp.data ?? resp.models ?? []
-          return ok(JSON.stringify(models.slice(0, 80), null, 2), {
+          const ids = models
+            .map((m) => (typeof m === 'object' && m !== null ? (m as { id?: unknown }).id : undefined))
+            .filter((id): id is string => typeof id === 'string')
+          const shown = models.slice(0, 80)
+          const note =
+            models.length > shown.length
+              ? `\n\nShowing full rows for ${shown.length} of ${models.length} models. All ids: ${ids.join(', ')}`
+              : ''
+          return ok(`${JSON.stringify(shown, null, 2)}${note}`, {
             type: type ?? 'all',
             count: models.length,
+            ids,
           })
         } catch (err) {
           return fail(formatToolError(err))

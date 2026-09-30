@@ -472,6 +472,7 @@ describe('tool output shaping', () => {
     assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
     assert.equal((r.structuredContent as { count: number }).count, 1)
     assert.match((r.content[0] as { text: string }).text, /flux-2-pro/)
+    assert.deepEqual((r.structuredContent as { ids: string[] }).ids, ['flux-2-pro'])
 
     await get('venice_list_models').handler({} as never)
     assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=all')
