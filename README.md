@@ -52,7 +52,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | Tool | Description |
 |---|---|
 | `venice_image_generate` | Generate an image. Supports model-specific width/height or free-string `aspect_ratio`/`resolution`, quality tiers, prompt enhancement, style references, web search, variants, and output format. |
-| `venice_image_edit` | Edit an image with a prompt. Supports free-string sizing, quality, output format, and prompt enhancement; returns a base64 image. |
+| `venice_image_edit` | Edit an image with a prompt. Supports free-string sizing, output format, and prompt enhancement; returns a base64 image. |
 | `venice_image_multi_edit` | Edit multiple images together with a single prompt (multi-image composition / outpainting), including free-string sizing, quality, output format, and prompt enhancement. |
 | `venice_image_upscale` | Upscale an image (2–4× scale, with a `creativity` control). Returns base64 PNG. |
 | `venice_image_remove_bg` | Remove image background; returns a transparent PNG. |

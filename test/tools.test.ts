@@ -181,7 +181,6 @@ const MAPPINGS: Mapping[] = [
       enhance_prompt: true,
       resolution: '4K-custom',
       output_format: 'webp',
-      quality: 'medium',
     },
     expectMethod: 'POST',
     expectPath: '/v1/image/edit',
@@ -193,7 +192,6 @@ const MAPPINGS: Mapping[] = [
       enhance_prompt: true,
       resolution: '4K-custom',
       output_format: 'webp',
-      quality: 'medium',
     },
   },
   {
@@ -845,6 +843,19 @@ describe('tool output shaping', () => {
       lyrics_prompt: longLyrics,
     })
     assert.equal(parsed.lyrics_prompt, longLyrics)
+  })
+
+  it('venice_image_edit does not send quality, which EditImageRequest rejects', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_image_edit')
+    assert.equal('quality' in tool.inputSchema, false)
+    await tool.handler(z.object(tool.inputSchema).parse({
+      image_url: 'https://x/img.png',
+      prompt: 'add hat',
+      quality: 'high',
+    }) as never)
+    const body = stub.calls.at(-1)!.body as Record<string, unknown>
+    assert.equal('quality' in body, false)
   })
 
   it('venice_music_generate maps deprecated instrumental/lyrics onto the live fields', async () => {

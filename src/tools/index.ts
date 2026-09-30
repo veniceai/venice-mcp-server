@@ -435,7 +435,6 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         enhance_prompt: z.boolean().optional().describe('Rewrite the edit prompt with awareness of the input image. May add time and cost.'),
         resolution: z.string().optional().describe('Model-specific output resolution tier; the API validates supported values.'),
         output_format: z.enum(['jpeg', 'jpg', 'png', 'webp']).optional(),
-        quality: z.enum(['low', 'medium', 'high']).optional().describe('Model-specific quality tier; may change pricing.'),
       },
       handler: async (args) => {
         try {
@@ -450,7 +449,6 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               enhance_prompt: args.enhance_prompt,
               resolution: args.resolution,
               output_format: args.output_format,
-              quality: args.quality,
             },
           })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
