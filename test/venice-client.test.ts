@@ -99,6 +99,17 @@ describe('VeniceClient', () => {
         },
       },
       {
+        match: 'POST /v1/slow-stream',
+        reply: () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve({
+              __status: 200,
+              __rawBody: RAW_E2EE_SSE,
+              __headers: { 'content-type': 'text/event-stream' },
+            }), 150)
+          }) as unknown,
+      },
+      {
         match: 'POST /v1/slow',
         reply: () =>
           new Promise((resolve) => {
@@ -358,6 +369,48 @@ describe('VeniceClient', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('rejects an SSE body larger than the byte cap with a clear error', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postEventStream('/v1/e2ee-stream', { stream: true }, undefined, { maxResponseBytes: 1_000 }),
+      /Venice response on \/v1\/e2ee-stream: response is larger than 1000 bytes/,
+    )
+  })
+
+  it('enforces the SSE byte cap while streaming when content-length is absent', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      let enqueued = 0
+      globalThis.fetch = (async () => {
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            enqueued += 1
+            controller.enqueue(new TextEncoder().encode(`data: {"choices":[{"delta":{"content":"${'ab'.repeat(256)}"}}]}\n\n`))
+          },
+        })
+        return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      }) as typeof fetch
+      const c = new VeniceClient({ ...loadConfig({}), baseUrl: 'https://unbounded.test' })
+      await assert.rejects(
+        () => c.postEventStream('/stream', { stream: true }, undefined, { maxResponseBytes: 4_096 }),
+        /response is larger than 4096 bytes/,
+      )
+      assert.ok(enqueued < 20, `read ${enqueued} chunks past the cap`)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('lets a per-call timeout outlast the configured default for long SSE streams', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 50 }))
+    await assert.rejects(
+      () => c.postEventStream('/v1/slow-stream', { stream: true }),
+      (err: unknown) => (err as VeniceUpstreamError).status === 504,
+    )
+    const raw = await c.postEventStream('/v1/slow-stream', { stream: true }, undefined, { timeoutMs: 2_000 })
+    assert.equal(raw, RAW_E2EE_SSE)
   })
 
   it('aborts on timeout and surfaces a 504 VeniceUpstreamError', async () => {

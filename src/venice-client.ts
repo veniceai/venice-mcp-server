@@ -1,5 +1,6 @@
 import type { Config } from './config.js'
 import { VeniceUpstreamError } from './types.js'
+import { readBoundedBuffer, ResponseTooLargeError } from './bounded-read.js'
 
 export interface RequestInitJSON {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
@@ -13,7 +14,12 @@ export interface RequestInitJSON {
   auth?: 'default' | 'siwx' | 'none'
   /** Require and return an upstream SSE response as one unmodified UTF-8 string. */
   responseType?: 'auto' | 'event-stream'
+  /** Reject the response once its body exceeds this many bytes. */
+  maxResponseBytes?: number
 }
+
+/** Cap on a buffered SSE body; the whole stream is held in memory and returned as one MCP text block. */
+export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
 
 /**
  * Thin HTTP client over the Venice API.
@@ -64,7 +70,7 @@ export class VeniceClient {
 
       const contentType = res.headers.get('content-type') ?? ''
       const mediaType = normalizeMediaType(contentType)
-      const body = await readResponseBody(res, mediaType)
+      const body = await readResponseBody(res, mediaType, path, init.maxResponseBytes)
 
       // Error responses are parsed according to their actual content type before
       // applying successful-response SSE requirements. This preserves structured
@@ -115,7 +121,7 @@ export class VeniceClient {
       }
       return body as T
     } catch (err) {
-      if (err instanceof VeniceUpstreamError) throw err
+      if (err instanceof VeniceUpstreamError || err instanceof ResponseTooLargeError) throw err
       if (ac.signal.aborted || (err as Error).name === 'AbortError') {
         throw new VeniceUpstreamError({
           message: `Upstream request timed out after ${timeoutMs}ms`,
@@ -161,12 +167,19 @@ export class VeniceClient {
    * POST JSON and preserve the complete SSE response as UTF-8 text.
    * No SSE framing or data payload is parsed or normalized.
    */
-  postEventStream(path: string, json: unknown, headers?: Record<string, string>): Promise<string> {
+  postEventStream(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'timeoutMs' | 'maxResponseBytes'> = {},
+  ): Promise<string> {
     return this.request<string>(path, {
       method: 'POST',
       json,
       headers,
       responseType: 'event-stream',
+      timeoutMs: opts.timeoutMs,
+      maxResponseBytes: opts.maxResponseBytes ?? DEFAULT_MAX_EVENT_STREAM_BYTES,
     })
   }
 
@@ -279,11 +292,19 @@ function normalizeMediaType(contentType: string): string {
   return contentType.split(';', 1)[0].trim().toLowerCase()
 }
 
-async function readResponseBody(res: Response, mediaType: string): Promise<unknown> {
+async function readResponseBody(
+  res: Response,
+  mediaType: string,
+  path: string,
+  maxBytes: number | undefined,
+): Promise<unknown> {
   // Do not catch body-read errors here. A stalled, truncated, or erroring body
   // must reject so request() can map aborts to 504 and other read failures to
   // a safe 502 instead of manufacturing an empty successful response.
-  const text = await res.text()
+  const text =
+    maxBytes === undefined
+      ? await res.text()
+      : (await readBoundedBuffer(res, maxBytes, `Venice response on ${path}`)).toString('utf8')
   if (mediaType === 'application/json' || mediaType.endsWith('+json')) {
     try {
       return text.length > 0 ? JSON.parse(text) : {}

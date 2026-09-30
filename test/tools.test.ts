@@ -492,6 +492,31 @@ describe('chat and responses request contracts', () => {
     assert.equal((result.content[0] as { text: string }).text, DEFAULT_E2EE_SSE)
   })
 
+  it('forwards a bounded per-call timeout_ms to both chat transports', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_chat')
+    const schema = zObject(tool)
+    assert.equal(schema.safeParse({ messages: [{ role: 'user', content: 'x' }], timeout_ms: 600_001 }).success, false)
+    assert.equal(schema.safeParse({ messages: [{ role: 'user', content: 'x' }], timeout_ms: 999 }).success, false)
+
+    await tool.handler(schema.parse({
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: E2EE_HEADERS,
+      timeout_ms: 300_000,
+    }) as never)
+    const e2eeCall = stub.calls.find((call) => call.eventStream)!
+    assert.equal(e2eeCall.timeoutMs, 300_000)
+    assert.equal('timeout_ms' in (e2eeCall.body as Record<string, unknown>), false)
+
+    await tool.handler(schema.parse({ messages: [{ role: 'user', content: 'hi' }], timeout_ms: 120_000 }) as never)
+    const plainCall = stub.calls.at(-1)!
+    assert.equal(plainCall.eventStream, undefined)
+    assert.equal(plainCall.timeoutMs, 120_000)
+    assert.equal('timeout_ms' in (plainCall.body as Record<string, unknown>), false)
+  })
+
   it('keeps plaintext chat non-streaming with unchanged completion shaping', async () => {
     const { stub, get } = setup()
     const result = await get('venice_chat').handler({

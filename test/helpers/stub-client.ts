@@ -12,6 +12,8 @@ export interface StubCall {
   binary?: boolean
   /** Whether this call expects an unparsed text/event-stream response. */
   eventStream?: boolean
+  /** Per-call timeout override passed to post / postEventStream. */
+  timeoutMs?: number
 }
 
 export type StubHandler = (call: StubCall) => unknown | Promise<unknown>
@@ -39,11 +41,16 @@ export class StubClient {
   get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
     return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
-  post<T>(path: string, json: unknown, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
-    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
+  post<T>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: { auth?: StubCall['auth']; timeoutMs?: number } = {},
+  ) {
+    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth, timeoutMs: opts.timeoutMs })
   }
-  postEventStream(path: string, json: unknown, headers?: Record<string, string>) {
-    return this.dispatch<string>({ method: 'POST', path, body: json, headers, eventStream: true })
+  postEventStream(path: string, json: unknown, headers?: Record<string, string>, opts: { timeoutMs?: number } = {}) {
+    return this.dispatch<string>({ method: 'POST', path, body: json, headers, eventStream: true, timeoutMs: opts.timeoutMs })
   }
   /**
    * Stub for postBinary. Tool calls expecting binary back get a synthetic

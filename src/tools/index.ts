@@ -344,6 +344,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         reasoning_effort: reasoningEffortSchema.optional().describe('Takes precedence over reasoning.effort.'),
         venice_parameters: veniceParametersSchema,
         e2ee_headers: e2eeHeadersSchema.optional().describe('Required exactly when enable_e2ee is true. Forwards the documented X-Venice-TEE-* headers; the server does not verify these keys or perform encryption.'),
+        timeout_ms: z
+          .number()
+          .int()
+          .min(1_000)
+          .max(600_000)
+          .optional()
+          .describe('Upstream timeout for this call, covering the full response body. E2EE streams are buffered until [DONE], so long generations may need more than the VENICE_HTTP_TIMEOUT_MS default.'),
       },
       handler: async (args) => {
         try {
@@ -392,7 +399,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               'X-Venice-TEE-Model-Pub-Key': parsedE2eeHeaders.data.model_public_key,
               'X-Venice-TEE-Signing-Algo': parsedE2eeHeaders.data.signing_algorithm,
             }
-            const rawSse = await client.postEventStream('/v1/chat/completions', body, headers)
+            const rawSse = await client.postEventStream('/v1/chat/completions', body, headers, {
+              timeoutMs: args.timeout_ms,
+            })
             const responseError = validateE2eeSseContent(collectSseDataEvents(rawSse))
             if (responseError) return fail(responseError)
             return {
@@ -431,7 +440,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const resp = await client.post<{
             choices?: Array<{ message?: Record<string, unknown> & { content?: string | null } }>
             usage?: Record<string, number>
-          }>('/v1/chat/completions', body)
+          }>('/v1/chat/completions', body, undefined, { timeoutMs: args.timeout_ms })
           const message = resp.choices?.[0]?.message
           const text = message?.content ?? JSON.stringify(message ?? resp, null, 2)
           return ok(truncate(text), { message, usage: resp.usage })
