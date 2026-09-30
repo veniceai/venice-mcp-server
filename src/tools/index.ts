@@ -444,7 +444,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See GET /v1/models/:id/card.'),
+        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See GET /v1/models/:id/card.'),
         aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see GET /v1/models/:id/card.'),
         seed: z.number().int().optional(),
         image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
@@ -935,7 +935,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Get a price quote for a video generation BEFORE queuing.${NO_AUTH}`,
       inputSchema: {
         model: z.string().min(1).describe('Video model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s".'),
+        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s".'),
       },
       handler: async (args) => {
         try {
