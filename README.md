@@ -138,7 +138,7 @@ List and get require an ADMIN `VENICE_API_KEY`. Rate-limit reads accept an INFER
 | Tool | Description |
 |---|---|
 | `venice_x402_balance` | Check the prepaid x402 credit balance for a wallet address. |
-| `venice_x402_top_up_info` | Fetch top-up requirements (network, USDC token address, receiver wallet, minimum amount). |
+| `venice_x402_top_up_info` | Fetch the top-up payment requirements: the accepted Base and Solana USDC options, each with network, asset, receiver wallet, and minimum amount. Takes no arguments. |
 | `venice_x402_transactions` | List recent x402 top-up + debit transactions for a wallet. |
 
 ## Configuration

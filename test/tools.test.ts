@@ -440,7 +440,7 @@ const MAPPINGS: Mapping[] = [
   },
   {
     tool: 'venice_x402_top_up_info',
-    args: { wallet_address: 'So11111111111111111111111111111111111111112' },
+    args: {},
     expectMethod: 'POST',
     expectPath: '/v1/x402/top-up',
     expectBodyContains: {},
@@ -643,11 +643,7 @@ describe('tool output shaping', () => {
     const { get } = setup()
     const evm = `0x${'A'.repeat(40)}`
     const solana = 'So11111111111111111111111111111111111111112'
-    for (const name of [
-      'venice_x402_balance',
-      'venice_x402_top_up_info',
-      'venice_x402_transactions',
-    ]) {
+    for (const name of ['venice_x402_balance', 'venice_x402_transactions']) {
       const schema = z.object(get(name).inputSchema)
       assert.equal(schema.safeParse({ wallet_address: evm }).success, true, `${name} EVM`)
       assert.equal(schema.safeParse({ wallet_address: solana }).success, true, `${name} Solana`)
@@ -1159,10 +1155,42 @@ describe('x402 top-up discovery auth', () => {
   it('posts an empty unauthenticated body so a configured API key is not forwarded', async () => {
     const stub = new StubClient()
     const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
-    await tool.handler({ wallet_address: `0x${'a'.repeat(40)}` } as never)
+    assert.deepEqual(Object.keys(tool.inputSchema), [])
+    assert.doesNotMatch(tool.description, /validated locally/)
+    await tool.handler({} as never)
     const call = stub.calls.at(-1)
     assert.equal(call?.path, '/v1/x402/top-up')
     assert.deepEqual(call?.body, {})
     assert.equal(call?.auth, 'none')
+  })
+
+  it('returns the documented Base and Solana payment options from the 402 body', async () => {
+    const base = {
+      scheme: 'exact',
+      network: 'eip155:8453',
+      amount: '5000000',
+      asset: '0xUSDC',
+      payTo: '0xRECEIVER',
+      maxTimeoutSeconds: 300,
+      extra: { name: 'USD Coin', version: '2' },
+    }
+    const solana = { ...base, network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', asset: 'MINT', payTo: 'SOLRECEIVER' }
+    const stub = new StubClient({
+      '/v1/x402/top-up': () => {
+        throw new VeniceUpstreamError({
+          message: 'pay',
+          status: 402,
+          body: { x402Version: 2, accepts: [{ ...base, internal: 'drop-me' }, solana], debug: 'drop-me' },
+        })
+      },
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
+    const result = await tool.handler({} as never)
+    assert.equal(result.isError, undefined)
+    assert.deepEqual(result.structuredContent, { x402Version: 2, accepts: [base, solana] })
+    const text = (result.content[0] as { text: string }).text
+    assert.match(text, /eip155:8453/)
+    assert.match(text, /solana:/)
+    assert.doesNotMatch(text, /drop-me/)
   })
 })

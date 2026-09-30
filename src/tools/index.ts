@@ -30,6 +30,7 @@ import { z } from 'zod'
 import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
+import { VeniceUpstreamError } from '../types.js'
 import { fetchUploadSource } from './remote-fetch.js'
 import {
   beginWeb3MintAttempt,
@@ -152,6 +153,23 @@ function normalizeExpiresAt(value: string | undefined): string | undefined {
 
 function normalizeWalletAddress(address: string): string {
   return address.startsWith('0x') ? address.toLowerCase() : address
+}
+
+const TOP_UP_ACCEPT_FIELDS = ['scheme', 'network', 'amount', 'asset', 'payTo', 'maxTimeoutSeconds', 'extra'] as const
+
+/** Keeps only the documented x402 requirement fields rather than reflecting the raw 402 body. */
+function topUpRequirements(body: unknown): { x402Version: unknown; accepts: Record<string, unknown>[] } | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const { x402Version, accepts } = body as { x402Version?: unknown; accepts?: unknown }
+  if (!Array.isArray(accepts)) return undefined
+  return {
+    x402Version,
+    accepts: accepts
+      .filter((option): option is Record<string, unknown> => typeof option === 'object' && option !== null)
+      .map((option) =>
+        Object.fromEntries(TOP_UP_ACCEPT_FIELDS.filter((field) => field in option).map((field) => [field, option[field]])),
+      ),
+  }
 }
 
 function redactSecretFields(value: unknown): unknown {
@@ -1470,16 +1488,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       name: 'venice_x402_top_up_info',
       title: 'Venice x402 Top-up Requirements',
       description:
-        `Fetch step-1 Base and Solana USDC top-up requirements for an EVM or Solana wallet. The API accepts an empty POST; the address is validated locally for the caller's intended wallet. Signing and PAYMENT-SIGNATURE submission happen OUTSIDE this MCP server.`,
-      inputSchema: {
-        wallet_address: walletAddressSchema,
-      },
+        `Fetch the x402 top-up payment requirements: the accepted USDC payment options (currently Base and Solana), each with network, asset, receiver wallet (payTo), minimum amount in base units, and settlement timeout. Sends an empty POST with no payment header, so nothing is charged. Signing and PAYMENT-SIGNATURE submission happen OUTSIDE this MCP server.${NO_AUTH}`,
+      inputSchema: {},
       handler: async () => {
         try {
           await client.post('/v1/x402/top-up', {}, undefined, { auth: 'none' })
           return ok('Unexpected non-402 response. Top-up may already be processed.')
         } catch (err) {
-          if (err instanceof Error && (err as { status?: number }).status === 402) {
+          if (err instanceof VeniceUpstreamError && err.status === 402) {
+            const requirements = topUpRequirements(err.body)
+            if (requirements) return ok(JSON.stringify(requirements, null, 2), requirements)
             return ok(formatToolError(err))
           }
           return fail(formatToolError(err))

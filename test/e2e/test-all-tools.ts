@@ -336,7 +336,7 @@ function buildPlan(walletAddr: string): CallSpec[] {
     },
     {
       name: 'venice_x402_top_up_info',
-      args: { wallet_address: walletAddr },
+      args: {},
       validate: () => null, // 402 expected (this is the no-payment-header response)
     },
     {
