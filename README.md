@@ -52,7 +52,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | Tool | Description |
 |---|---|
 | `venice_image_generate` | Generate an image. Supports model-specific width/height or free-string `aspect_ratio`/`resolution`, quality tiers, prompt enhancement, style references, web search, variants, and output format. |
-| `venice_image_edit` | Edit an image with a prompt. Supports free-string sizing, quality, output format, and prompt enhancement; returns a base64 image. |
+| `venice_image_edit` | Edit an image with a prompt. Supports free-string sizing, output format, and prompt enhancement; returns a base64 image. |
 | `venice_image_multi_edit` | Edit multiple images together with a single prompt (multi-image composition / outpainting), including free-string sizing, quality, output format, and prompt enhancement. |
 | `venice_image_upscale` | Upscale an image (2–4× scale, with a `creativity` control). Returns base64 PNG. |
 | `venice_image_remove_bg` | Remove image background; returns a transparent PNG. |
@@ -82,7 +82,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_music_generate` | Queue music generation. Uses the live QueueAudioRequest fields: `force_instrumental`, `lyrics_prompt`, `lyrics_optimizer`, `loop`, `voice`, `language_code`, `speed`, and model-specific `duration_seconds`. |
+| `venice_music_generate` | Queue music generation. Uses the live QueueAudioRequest fields: `force_instrumental`, `lyrics_prompt`, `lyrics_optimizer`, `loop`, `voice`, `language_code`, `speed`, and model-specific `duration_seconds`. Deprecated `instrumental` / `lyrics` are still accepted as aliases. |
 | `venice_music_status` | Check status of a queued music job; returns the completed track as an embedded resource or a local file when `VENICE_MEDIA_DIR` is set. |
 | `venice_music_wait` | Block until the job completes, polling `venice_music_status` with backoff (default 300 s timeout). |
 | `venice_music_complete` | Mark a completed music job as downloaded. |
@@ -138,10 +138,9 @@ Example prompt once both servers are connected: *"Generate a 4 s 16:9 establishi
 
 ### Media API behavior
 
-- `venice_list_models` forwards a supplied `type` to `GET /v1/models?type=...`; video and music capabilities should be discovered from those server-filtered results.
-- Image `aspect_ratio` and `resolution` values remain free strings because supported values vary by model. Venice validates them. When `enhance_prompt` is applied, image generate/edit/multi-edit results include the URL-decoded `enhanced_prompt` returned in `x-venice-enhanced-prompt`.
+- Image `aspect_ratio` and `resolution` values remain free strings because supported values vary by model. Venice validates them. When `enhance_prompt` is applied, image generate/edit/multi-edit results include the URL-decoded `enhanced_prompt` returned in `x-venice-enhanced-prompt`. Image responses are capped at `VENICE_MAX_IMAGE_RESPONSE_BYTES` (default 32 MiB). Unlike an oversized video, an oversized image result cannot be retried for free, so request fewer variants, a lower resolution, or jpeg/webp output for large batches.
 - Current public Seedance models may reject media containing detectable persons outright. Defensive support remains for compatible or legacy `needs_consent` responses: the tool returns Venice's policy text, affected media roles, and next step. The three `consents.seedance` flags are legal attestations and must only be set to `true` after the user explicitly confirms all three statements. Consent is never a content-policy bypass.
-- Completed videos may arrive as `video/mp4` or as JSON with a `download_url`. Binary completions are returned as an embedded MCP resource (`blob`, `mimeType: "video/mp4"`, synthetic `venice://video/...` URI), streamed into a bounded buffer that defaults to 25 MiB (`VENICE_MAX_VIDEO_RESPONSE_BYTES`). Oversized binary results remain queued and can be retried with the same queue ID after changing the limit. JSON completions return the `download_url` as an MCP resource link instead of fetching that URL. For VPS / Grok Imagine Private models, `download_url` is returned only on queue; pass that URL into `venice_video_status` so a `COMPLETED` retrieve without an inline URL still yields a resource link.
+- Completed videos may arrive as `video/mp4` or as JSON with a `download_url`. Binary completions are returned as an embedded MCP resource (`blob`, `mimeType: "video/mp4"`, synthetic `venice://video/...` URI), streamed into a bounded buffer that defaults to 25 MiB (`VENICE_MAX_VIDEO_RESPONSE_BYTES`). Oversized binary results remain queued and can be retried with the same queue ID after changing the limit. JSON completions return the `download_url` as an MCP resource link instead of fetching that URL. Because that link stops working once the stored media is removed, `delete_media_on_completion` is not applied to `download_url` results: download the file first, then call `venice_video_complete` (and optionally send an HTTP `DELETE` to the link to revoke it). For VPS / Grok Imagine Private models, `download_url` is returned only on queue; pass that URL into `venice_video_status` so a `COMPLETED` retrieve without an inline URL still yields a resource link.
 - Music retrieval returns JSON status and timing while processing, then an `audio/*` body when complete (including MP3, WAV, FLAC, and M4A). Completed tracks are returned as embedded MCP blob resources with a synthetic `venice://music/...` URI and buffered up to 25 MiB by default (`VENICE_MAX_AUDIO_RESPONSE_BYTES`). That configurable limit applies only to binary media; successful status JSON uses a separate fixed 1 MiB safety limit. Oversized or non-audio responses are not deleted, so the same queue ID remains available for cleanup or a retry with a higher limit.
 
 ### ⛓️ Crypto
@@ -176,6 +175,7 @@ Example prompt once both servers are connected: *"Generate a 4 s 16:9 establishi
 | `VENICE_MEDIA_DIR` | _(none)_ | Write generated images, video, music, and speech to `<dir>/<kind>/` with JSON sidecars and return `file://` links instead of inline base64. `~` is expanded. See [Timeline editors](#️-timeline-editors-davinci-resolve-premiere-final-cut-). |
 | `VENICE_MAX_LOCAL_INPUT_BYTES` | `52428800` (50 MiB) | Maximum size of a local file passed as a `*_url` input. |
 | `VENICE_TOOLSETS` | `all` | Comma-separated subset of tools to register: `media` (image, video, audio, music, catalog) or any of `chat`, `image`, `video`, `audio`, `music`, `augment`, `catalog`, `crypto`, `x402`. Smaller tool lists save host context. |
+| `VENICE_MAX_IMAGE_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum response bytes buffered by `venice_image_generate`, `venice_image_edit`, and `venice_image_multi_edit`. Larger results are discarded with an error. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |

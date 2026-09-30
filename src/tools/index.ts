@@ -390,6 +390,14 @@ function decodeEnhancedPrompt(headers: Record<string, string>): string | undefin
   }
 }
 
+function imageResponseTooLarge(err: VeniceResponseTooLargeError): ToolResult {
+  return fail(
+    `Image response exceeds the configured ${err.maxBytes}-byte MCP response limit and was discarded. ` +
+      'Venice may still charge for the generation. Retry with fewer variants, a lower resolution, or jpeg/webp output, or raise VENICE_MAX_IMAGE_RESPONSE_BYTES and restart the server.',
+    { error: 'image_response_too_large', max_bytes: err.maxBytes, retry_safe: false },
+  )
+}
+
 interface NeedsConsentBody {
   error?: { code?: string; message?: string }
   consent_flow?: string
@@ -618,7 +626,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
             model: args.model ?? cfg.defaultImageModel,
             safe_mode: args.safe_mode ?? false,
             return_binary: false,
-          })
+          }, undefined, { maxBytes: cfg.maxImageResponseBytes })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
           // Default Venice response: { id, images: [<base64>, ...] }
           const images = resp.images?.filter((image): image is string =>
@@ -697,6 +705,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           }
           return fail('Venice returned no usable image payload.')
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },
@@ -715,7 +724,6 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
         enhance_prompt: z.boolean().optional().describe('Rewrite the edit prompt with awareness of the input image. May add time and cost.'),
         resolution: z.string().optional().describe('Model-specific output resolution tier; the API validates supported values.'),
         output_format: z.enum(['jpeg', 'jpg', 'png', 'webp']).optional(),
-        quality: z.enum(['low', 'medium', 'high']).optional().describe('Model-specific quality tier; may change pricing.'),
       },
       handler: async (args) => {
         try {
@@ -731,9 +739,8 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               enhance_prompt: args.enhance_prompt,
               resolution: args.resolution,
               output_format: args.output_format,
-              quality: args.quality,
             },
-          })
+          }, { maxBytes: cfg.maxImageResponseBytes })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
           return mediaResult(store, {
             kind: 'image',
@@ -747,6 +754,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
             structured: enhancedPrompt ? { enhanced_prompt: enhancedPrompt } : undefined,
           })
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },
@@ -783,7 +791,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               output_format: args.output_format,
               quality: args.quality,
             },
-          })
+          }, { maxBytes: cfg.maxImageResponseBytes })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
           return mediaResult(store, {
             kind: 'image',
@@ -797,6 +805,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
             structured: enhancedPrompt ? { enhanced_prompt: enhancedPrompt } : undefined,
           })
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },
@@ -992,7 +1001,9 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
         download_url: z.string().url().optional().describe(
           'Queue-time download_url from venice_video_generate. Must be an https Venice host. Needed for VPS / Grok Imagine Private only when this process did not queue the job (retrieve returns COMPLETED without a URL).',
         ),
-        delete_media_on_completion: z.boolean().optional(),
+        delete_media_on_completion: z.boolean().optional().describe(
+          'Delete server-side media once an embedded MP4 has been buffered. Ignored for download_url results: download first, then call venice_video_complete.',
+        ),
       },
       handler: async (args) => {
         try {
@@ -1014,10 +1025,20 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               return { deleted: false, cleanupNote: '' }
             }
             try {
-              await client.post('/v1/video/complete', {
+              // Venice answers HTTP 200 with { success: false } when the storage
+              // delete fails, so the status code alone cannot confirm cleanup.
+              const cleanup = await client.post<{ success?: boolean }>('/v1/video/complete', {
                 queue_id: args.queue_id,
                 model: args.model,
               })
+              if (cleanup?.success !== true) {
+                return {
+                  deleted: false,
+                  cleanupNote:
+                    ' Retrieval succeeded, but server-side cleanup was not confirmed: Venice did not report success.' +
+                    ' Assume the media is still stored server-side and retry with venice_video_complete.',
+                }
+              }
               return { deleted: true, cleanupNote: ` ${successNote}` }
             } catch (cleanupError) {
               return {
@@ -1101,9 +1122,13 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
                 },
               })
             }
-            const { deleted, cleanupNote } = await cleanupAfterSuccess(
-              'Server-side media was deleted after the download URL was captured.',
-            )
+            // The download URL stops working once the stored object is removed, so
+            // cleanup must wait until the caller has fetched the bytes.
+            const cleanupNote = args.delete_media_on_completion
+              ? ' Server-side media was NOT deleted because this download_url is only valid until the stored object is removed.' +
+                ' Download the file from this URL first, then call venice_video_complete with the same queue_id and model.' +
+                ' Optionally send an HTTP DELETE to the download_url afterwards to revoke the link.'
+              : ''
             return {
               content: [
                 { type: 'resource_link', uri: url, name: 'video', mimeType: 'video/mp4' },
@@ -1113,7 +1138,10 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
                 status: 'COMPLETED',
                 url,
                 representation: 'download_url resource link',
-                server_media_deleted: deleted,
+                server_media_deleted: false,
+                ...(args.delete_media_on_completion
+                  ? { next_step: 'Download url, then call venice_video_complete with the same queue_id and model.' }
+                  : {}),
               },
             }
           }
@@ -1354,19 +1382,26 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
         voice: z.string().optional().describe('Model-supported voice id/name.'),
         language_code: z.string().optional().describe('ISO 639-1 language code on supported models.'),
         speed: z.number().min(0.25).max(4).optional().describe('Model-specific speed multiplier. Check model min_speed/max_speed.'),
+        instrumental: z.boolean().optional().describe('Deprecated: use force_instrumental. Ignored when force_instrumental is set.'),
+        lyrics: z.string().optional().describe('Deprecated: use lyrics_prompt. Ignored when lyrics_prompt is set.'),
       },
       handler: async (args) => {
         try {
+          const { instrumental, lyrics, ...queueArgs } = args
           const durationSeconds =
             typeof args.duration_seconds === 'string' ? Number(args.duration_seconds) : args.duration_seconds
           const estimatedCost = await estimateMusicCost(client, {
             model: args.model,
             duration_seconds: durationSeconds,
-            character_count: args.lyrics_prompt?.length,
+            character_count: (args.lyrics_prompt ?? lyrics)?.length,
           })
           const resp = await client.post<{ model?: string; queue_id?: string }>(
             '/v1/audio/queue',
-            args
+            {
+              ...queueArgs,
+              force_instrumental: args.force_instrumental ?? instrumental,
+              lyrics_prompt: args.lyrics_prompt ?? lyrics,
+            }
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned.')
@@ -1692,15 +1727,19 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
       },
       handler: async ({ type }) => {
         try {
-          const path = type && type !== 'all'
-            ? `/v1/models?type=${encodeURIComponent(type)}`
-            : '/v1/models'
-          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>(path)
+          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>('/v1/models')
           const all = resp.data ?? resp.models ?? []
-          return ok(JSON.stringify(all, null, 2), {
-            count: all.length,
+          const filtered =
+            type && type !== 'all'
+              ? all.filter((m: unknown) => {
+                  const obj = m as Record<string, unknown>
+                  const t = String(obj.type ?? obj.modelType ?? '').toLowerCase()
+                  return t.includes(type)
+                })
+              : all
+          return ok(JSON.stringify(filtered.slice(0, 80), null, 2), {
+            count: filtered.length,
             total: all.length,
-            requested_type: type && type !== 'all' ? type : undefined,
           })
         } catch (err) {
           return fail(formatToolError(err))
@@ -1857,13 +1896,17 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
       name: 'venice_x402_top_up_info',
       title: 'Venice x402 Top-up Requirements',
       description:
-        `Fetch step-1 top-up requirements for a wallet. The API accepts an empty POST; the address is validated locally for the caller's intended wallet. Signing and payment-header submission happen OUTSIDE this MCP server.`,
+        `Fetch step-1 top-up requirements (network, USDC token address, receiver wallet, min amount). Steps 2 (sign USDC authorization) and 3 (POST signed payment) require a wallet and happen OUTSIDE this MCP server.`,
       inputSchema: {
         wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+        amount_usd: z.number().min(1).max(1_000_000).optional(),
       },
-      handler: async () => {
+      handler: async (args) => {
         try {
-          await client.post('/v1/x402/top-up', {}, undefined, { auth: 'none' })
+          await client.post('/v1/x402/top-up', {
+            walletAddress: args.wallet_address,
+            amountUsd: args.amount_usd ?? 10,
+          })
           return ok('Unexpected non-402 response. Top-up may already be processed.')
         } catch (err) {
           if (err instanceof Error && (err as { status?: number }).status === 402) {
