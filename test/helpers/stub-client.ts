@@ -1,4 +1,9 @@
 import type { VeniceClient } from '../../src/venice-client.js'
+import { e2eeSession } from './e2ee-fixtures.js'
+
+export const STUB_E2EE = e2eeSession()
+export const STUB_E2EE_SSE =
+  `data: {"choices":[{"delta":{"content":"${STUB_E2EE.encryptToClient('stub reply')}"}}]}\n\ndata: [DONE]\n\n`
 
 export interface StubCall {
   method: 'GET' | 'POST'
@@ -97,7 +102,7 @@ export class StubClient {
 
 function defaultResponse(path: string, _binary?: boolean, eventStream?: boolean): unknown {
   if (eventStream && path.startsWith('/v1/chat/completions')) {
-    return `data: {"choices":[{"delta":{"content":"${'ab'.repeat(93)}"}}]}\n\ndata: [DONE]\n\n`
+    return STUB_E2EE_SSE
   }
   if (path.startsWith('/v1/chat/completions'))
     return { choices: [{ message: { content: 'reply' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }

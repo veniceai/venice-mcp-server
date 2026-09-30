@@ -1,20 +1,82 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  isValidEncryptedHex,
+  hasCiphertextShape,
+  isUncompressedSecp256k1PublicKey,
   modelSupportsE2ee,
   validateE2eeChatRequest,
   validateE2eeSseContent,
 } from '../src/e2ee.js'
+import { decryptE2ee, e2eeSession } from './helpers/e2ee-fixtures.js'
 
-const ciphertext = 'ab'.repeat(93)
+const session = e2eeSession()
+const ciphertext = session.encryptToModel('hello from the client')
 
 describe('E2EE contract helpers', () => {
-  it('accepts Venice-sized hex ciphertext and rejects plaintext', () => {
-    assert.equal(isValidEncryptedHex(ciphertext), true)
-    assert.equal(isValidEncryptedHex('deadbeef'), false)
-    assert.equal(isValidEncryptedHex('hello'), false)
-    assert.equal(isValidEncryptedHex('ab'.repeat(92)), false)
+  it('accepts real Venice-layout ciphertext produced with secp256k1 ECDH, HKDF-SHA256, and AES-256-GCM', () => {
+    const request = session.encryptToModel('Explain quantum computing')
+    assert.equal(decryptE2ee(request, session.model), 'Explain quantum computing')
+    assert.equal(hasCiphertextShape(request), true)
+    assert.equal(hasCiphertextShape(session.encryptToModel('')), true)
+    assert.equal(
+      validateE2eeChatRequest({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [
+          { role: 'system', content: session.encryptToModel('Be brief.') },
+          { role: 'user', content: request },
+        ],
+        venice_parameters: { enable_e2ee: true },
+      }),
+      undefined,
+    )
+
+    const response = session.encryptToClient('Qubits hold superpositions.')
+    assert.equal(decryptE2ee(response, session.client), 'Qubits hold superpositions.')
+    assert.equal(
+      validateE2eeSseContent([
+        JSON.stringify({ choices: [{ index: 0, delta: { role: 'assistant', content: response } }] }),
+        '[DONE]',
+      ]),
+      undefined,
+    )
+    assert.equal(isUncompressedSecp256k1PublicKey(session.headers.client_public_key), true)
+    assert.equal(isUncompressedSecp256k1PublicKey(session.headers.model_public_key), true)
+  })
+
+  it('rejects plaintext, hex-encoded plaintext, and malformed ciphertext by shape', () => {
+    const hexPlaintext = Buffer.from('this is my secret prompt, sent as hex. '.repeat(3)).toString('hex')
+    assert.ok(hexPlaintext.length >= 186)
+    assert.equal(hasCiphertextShape(hexPlaintext), false)
+    assert.equal(hasCiphertextShape('ab'.repeat(93)), false)
+    assert.equal(hasCiphertextShape(`04${'1'.repeat(128)}${'00'.repeat(28)}`), false)
+    assert.equal(hasCiphertextShape('deadbeef'), false)
+    assert.equal(hasCiphertextShape('hello'), false)
+    assert.equal(hasCiphertextShape(ciphertext.slice(0, 184)), false)
+    assert.equal(hasCiphertextShape(`${ciphertext}a`), false)
+    assert.equal(hasCiphertextShape(`${ciphertext.slice(0, 128)}zz${ciphertext.slice(130)}`), false)
+    const compressedPrefix = `02${ciphertext.slice(2)}`
+    assert.equal(hasCiphertextShape(compressedPrefix), false)
+
+    assert.match(
+      validateE2eeChatRequest({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: hexPlaintext }],
+      }) ?? '',
+      /encrypted hex ciphertext/,
+    )
+    assert.match(
+      validateE2eeSseContent([JSON.stringify({ choices: [{ delta: { content: hexPlaintext } }] }), '[DONE]']) ?? '',
+      /plaintext or invalid ciphertext/,
+    )
+  })
+
+  it('requires both header public keys to be on-curve uncompressed secp256k1 points', () => {
+    assert.equal(isUncompressedSecp256k1PublicKey(`04${'1'.repeat(128)}`), false)
+    assert.equal(isUncompressedSecp256k1PublicKey(`04${'0'.repeat(128)}`), false)
+    const key = session.headers.client_public_key
+    const flipped = `${key.slice(0, -1)}${key.endsWith('0') ? '1' : '0'}`
+    assert.equal(isUncompressedSecp256k1PublicKey(flipped), false)
+    assert.equal(isUncompressedSecp256k1PublicKey(key.slice(2)), false)
   })
 
   it('requires catalog supportsE2EE and rejects the default chat model', () => {

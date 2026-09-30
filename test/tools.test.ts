@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
-import { StubClient } from './helpers/stub-client.js'
+import { StubClient, STUB_E2EE, STUB_E2EE_SSE } from './helpers/stub-client.js'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 
@@ -404,14 +404,9 @@ describe('tools endpoint + method mapping', () => {
   }
 })
 
-const E2EE_CIPHERTEXT = 'ab'.repeat(93)
-const E2EE_HEADERS = {
-  client_public_key: `04${'1'.repeat(128)}`,
-  model_public_key: `04${'2'.repeat(128)}`,
-  signing_algorithm: 'ecdsa' as const,
-}
-const DEFAULT_E2EE_SSE =
-  `data: {"choices":[{"delta":{"content":"${E2EE_CIPHERTEXT}"}}]}\n\ndata: [DONE]\n\n`
+const E2EE_CIPHERTEXT = STUB_E2EE.encryptToModel('hello')
+const E2EE_HEADERS = STUB_E2EE.headers
+const DEFAULT_E2EE_SSE = STUB_E2EE_SSE
 
 describe('chat and responses request contracts', () => {
   it('accepts every documented chat content block and forwards advanced fields exactly', async () => {
@@ -488,7 +483,7 @@ describe('chat and responses request contracts', () => {
     })
     assert.equal(chatCall.eventStream, true)
     assert.equal((result.structuredContent as { transport: string }).transport, 'sse')
-    assert.equal((result.structuredContent as { encrypted: boolean }).encrypted, true)
+    assert.equal((result.structuredContent as { ciphertext_shape_valid: boolean }).ciphertext_shape_valid, true)
     assert.equal((result.content[0] as { text: string }).text, DEFAULT_E2EE_SSE)
   })
 
@@ -533,7 +528,7 @@ describe('chat and responses request contracts', () => {
   })
 
   it('returns long encrypted SSE byte-for-byte without normal completion parsing or truncation', async () => {
-    const encrypted = 'ab'.repeat(12_000)
+    const encrypted = STUB_E2EE.encryptToClient('x'.repeat(12_000))
     const rawSse =
       `event: message\r\ndata: {"choices":[{"delta":{"content":"${encrypted}"}}]}\r\n\r\n` +
       'data: [DONE]\r\n\r\n'
@@ -549,7 +544,7 @@ describe('chat and responses request contracts', () => {
     assert.equal((result.content[0] as { text: string }).text, rawSse)
     assert.equal((result.structuredContent as { byte_length: number }).byte_length, Buffer.byteLength(rawSse))
     assert.equal((result.structuredContent as { message?: unknown }).message, undefined)
-    assert.equal((result.structuredContent as { encrypted: boolean }).encrypted, true)
+    assert.equal((result.structuredContent as { ciphertext_shape_valid: boolean }).ciphertext_shape_valid, true)
   })
 
   it('rejects incoherent E2EE flag/header combinations before any upstream call', async () => {
@@ -644,6 +639,37 @@ describe('chat and responses request contracts', () => {
     }
   })
 
+  it('rejects off-curve header keys and hex-encoded plaintext before any upstream call', async () => {
+    const hexPlaintext = Buffer.from('my secret prompt, merely hex-encoded. '.repeat(3)).toString('hex')
+    const invalidArgs = [
+      { e2ee_headers: { ...E2EE_HEADERS, client_public_key: `04${'1'.repeat(128)}` } },
+      { e2ee_headers: { ...E2EE_HEADERS, model_public_key: `04${'2'.repeat(128)}` } },
+      { messages: [{ role: 'user', content: hexPlaintext }] },
+    ]
+    for (const extra of invalidArgs) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+      const result = await tool.handler({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+        ...extra,
+      } as never)
+      assert.equal(result.isError, true, JSON.stringify(extra))
+      assert.match((result.content[0] as { text: string }).text, /secp256k1|encrypted hex ciphertext/)
+      assert.equal(stub.calls.length, 0)
+    }
+    const schema = zObject(setup().get('venice_chat'))
+    assert.equal(
+      schema.safeParse({
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        e2ee_headers: { ...E2EE_HEADERS, client_public_key: `04${'1'.repeat(128)}` },
+      }).success,
+      false,
+    )
+  })
+
   it('rejects plaintext-bearing E2EE fields without sending them anywhere', async () => {
     const canaries = ['PLAIN STOP', 'user-alice@example.com', 'alice-plaintext']
     const invalidArgs = [
@@ -693,7 +719,7 @@ describe('chat and responses request contracts', () => {
 
     assert.equal(result.isError, true)
     assert.match((result.content[0] as { text: string }).text, /does not support structured output/)
-    assert.equal((result.structuredContent as { encrypted?: boolean } | undefined)?.encrypted, undefined)
+    assert.equal((result.structuredContent as { ciphertext_shape_valid?: boolean } | undefined)?.ciphertext_shape_valid, undefined)
     assert.equal(stub.callsTo('/v1/chat/completions').length, 0)
     assert.equal(stub.calls.length, 0)
     assert.doesNotMatch(JSON.stringify(stub.calls), new RegExp(canary))
@@ -713,7 +739,7 @@ describe('chat and responses request contracts', () => {
     } as never)
     assert.equal(result.isError, true)
     assert.match((result.content[0] as { text: string }).text, /plaintext or invalid ciphertext/)
-    assert.equal((result.structuredContent as { encrypted?: boolean } | undefined)?.encrypted, undefined)
+    assert.equal((result.structuredContent as { ciphertext_shape_valid?: boolean } | undefined)?.ciphertext_shape_valid, undefined)
   })
 
   it('supports assistant tool history and returns tool calls instead of dropping them', async () => {

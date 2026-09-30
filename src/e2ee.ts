@@ -1,16 +1,43 @@
 /**
  * Venice E2EE request/response gates for venice_chat.
  * This server does not encrypt, decrypt, or verify attestation. It only refuses
- * to forward or label a call as E2EE unless the documented ciphertext contract holds.
+ * to forward or return a call as E2EE unless payloads have the documented
+ * ciphertext shape. Shape checks cannot prove the content is really encrypted.
  *
  * @see https://docs.venice.ai/guides/features/tee-e2ee-models
  */
+import { ECDH } from 'node:crypto'
+
+const UNCOMPRESSED_POINT_BYTES = 65
+const GCM_NONCE_BYTES = 12
+const GCM_TAG_BYTES = 16
 
 /** Minimum hex length: ephemeral_pub (65) + nonce (12) + tag (16) = 93 bytes. */
-export const MIN_ENCRYPTED_HEX_LENGTH = 186
+export const MIN_ENCRYPTED_HEX_LENGTH = (UNCOMPRESSED_POINT_BYTES + GCM_NONCE_BYTES + GCM_TAG_BYTES) * 2
 
-export function isValidEncryptedHex(value: string): boolean {
-  return value.length >= MIN_ENCRYPTED_HEX_LENGTH && /^[0-9a-fA-F]+$/.test(value)
+function isUncompressedSecp256k1Point(bytes: Buffer): boolean {
+  if (bytes.length !== UNCOMPRESSED_POINT_BYTES || bytes[0] !== 0x04) return false
+  try {
+    ECDH.convertKey(bytes, 'secp256k1', undefined, undefined, 'uncompressed')
+    return true
+  } catch {
+    return false
+  }
+}
+
+export function isUncompressedSecp256k1PublicKey(hex: string): boolean {
+  return /^04[0-9a-fA-F]{128}$/.test(hex) && isUncompressedSecp256k1Point(Buffer.from(hex, 'hex'))
+}
+
+/**
+ * Venice ciphertext layout: ephemeral uncompressed secp256k1 public key, then
+ * the AES-GCM nonce, then ciphertext with the 16-byte tag appended.
+ */
+export function hasCiphertextShape(value: string): boolean {
+  if (value.length < MIN_ENCRYPTED_HEX_LENGTH || value.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(value)) {
+    return false
+  }
+  return isUncompressedSecp256k1Point(Buffer.from(value.slice(0, UNCOMPRESSED_POINT_BYTES * 2), 'hex'))
 }
 
 export function modelSupportsE2ee(modelId: string, catalog: unknown): boolean {
@@ -106,7 +133,7 @@ export function validateE2eeChatRequest(args: {
   }
 
   if (!Array.isArray(args.messages)) {
-    return 'E2EE requires user/system content to be encrypted hex ciphertext (at least 186 hex characters). Plaintext, files, and multimodal parts are not allowed.'
+    return 'E2EE requires user/system content to be encrypted hex ciphertext in the Venice layout: a 65-byte uncompressed secp256k1 ephemeral public key, a 12-byte nonce, then AES-GCM ciphertext with its 16-byte tag (at least 186 hex characters). Plaintext, hex-encoded plaintext, files, and multimodal parts are not allowed.'
   }
   for (const message of args.messages) {
     const messageError = validateE2eeMessage(message)
@@ -123,7 +150,7 @@ export function validateE2eeSseContent(dataEvents: readonly string[]): string | 
       parsed = JSON.parse(data)
     } catch {
       if (data.trim() !== '') {
-        return 'E2EE response contained a non-JSON data event; refusing to label the result encrypted.'
+        return 'E2EE response contained a non-JSON data event; refusing to return it as E2EE output.'
       }
       continue
     }
@@ -133,11 +160,11 @@ export function validateE2eeSseContent(dataEvents: readonly string[]): string | 
   return undefined
 }
 
-const INVALID_CIPHERTEXT = 'E2EE response contained plaintext or invalid ciphertext; refusing to label the result encrypted.'
+const INVALID_CIPHERTEXT = 'E2EE response contained plaintext or invalid ciphertext; refusing to return it as E2EE output.'
 const FINISH_REASONS = new Set(['stop', 'length', 'content_filter'])
 
 function unexpectedField(path: string): string {
-  return `E2EE response event contained an unexpected field "${path}"; only chunk metadata and ciphertext delta content are accepted, so the result is not labelled encrypted.`
+  return `E2EE response event contained an unexpected field "${path}"; only chunk metadata and ciphertext delta content are accepted, so the stream is not returned as E2EE output.`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -225,7 +252,7 @@ function validateE2eeDelta(delta: Record<string, unknown>): string | undefined {
       case 'content':
       case 'reasoning_content':
         if (value === null || value === '') break
-        if (typeof value !== 'string' || !isValidEncryptedHex(value)) return INVALID_CIPHERTEXT
+        if (typeof value !== 'string' || !hasCiphertextShape(value)) return INVALID_CIPHERTEXT
         break
       default:
         return unexpectedField(`choices[].delta.${key}`)
@@ -275,15 +302,15 @@ function validateE2eeMessage(message: unknown): string | undefined {
   }
 
   if (role === 'user' || role === 'system' || role === 'developer') {
-    if (typeof record.content !== 'string' || !isValidEncryptedHex(record.content)) {
-      return 'E2EE requires user/system content to be encrypted hex ciphertext (at least 186 hex characters). Plaintext, files, and multimodal parts are not allowed.'
+    if (typeof record.content !== 'string' || !hasCiphertextShape(record.content)) {
+      return 'E2EE requires user/system content to be encrypted hex ciphertext in the Venice layout: a 65-byte uncompressed secp256k1 ephemeral public key, a 12-byte nonce, then AES-GCM ciphertext with its 16-byte tag (at least 186 hex characters). Plaintext, hex-encoded plaintext, files, and multimodal parts are not allowed.'
     }
     return undefined
   }
 
   if (role === 'assistant') {
     if (record.content != null && record.content !== '') {
-      if (typeof record.content !== 'string' || !isValidEncryptedHex(record.content)) {
+      if (typeof record.content !== 'string' || !hasCiphertextShape(record.content)) {
         return 'E2EE assistant history must be encrypted hex ciphertext when content is present.'
       }
     }

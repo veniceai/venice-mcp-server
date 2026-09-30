@@ -3,9 +3,11 @@ import assert from 'node:assert/strict'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
 import { startMockVenice, type MockVeniceServer } from './helpers/mock-venice-server.js'
+import { e2eeSession } from './helpers/e2ee-fixtures.js'
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname)
-const INTEGRATION_ENCRYPTED_CHUNK = 'cd'.repeat(12_000)
+const INTEGRATION_E2EE = e2eeSession()
+const INTEGRATION_ENCRYPTED_CHUNK = INTEGRATION_E2EE.encryptToClient('y'.repeat(12_000))
 const INTEGRATION_RAW_SSE =
   `event: message\r\ndata: {"choices":[{"delta":{"content":"${INTEGRATION_ENCRYPTED_CHUNK}"}}]}\r\n\r\n` +
   'data: [DONE]\r\n\r\n'
@@ -258,13 +260,13 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
   it('forwards a valid E2EE chat over MCP after catalog and ciphertext checks', async () => {
     const arguments_ = {
       model: 'e2ee-qwen3-5-122b-a10b',
-      messages: [{ role: 'user', content: INTEGRATION_ENCRYPTED_CHUNK }],
+      messages: [{ role: 'user', content: INTEGRATION_E2EE.encryptToModel('integration prompt') }],
       max_completion_tokens: 321,
       temperature: 0.2,
       venice_parameters: { enable_e2ee: true },
       e2ee_headers: {
-        client_public_key: `04${'1'.repeat(128)}`,
-        model_public_key: `04${'2'.repeat(128)}`,
+        client_public_key: INTEGRATION_E2EE.headers.client_public_key,
+        model_public_key: INTEGRATION_E2EE.headers.model_public_key,
         signing_algorithm: 'ecdsa',
       },
     }
@@ -276,7 +278,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     const result = r.result as {
       isError?: boolean
       content: Array<{ text: string }>
-      structuredContent: { transport: string; encrypted: boolean; byte_length: number }
+      structuredContent: { transport: string; ciphertext_shape_valid: boolean; byte_length: number }
     }
     assert.equal(result.isError, undefined)
     const call = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').at(-1)!
@@ -294,7 +296,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(call.headers.accept, 'text/event-stream')
     assert.equal(result.content[0].text, INTEGRATION_RAW_SSE)
     assert.equal(result.structuredContent.transport, 'sse')
-    assert.equal(result.structuredContent.encrypted, true)
+    assert.equal(result.structuredContent.ciphertext_shape_valid, true)
     assert.equal(result.structuredContent.byte_length, Buffer.byteLength(INTEGRATION_RAW_SSE))
   })
 
@@ -313,8 +315,8 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
         }],
         venice_parameters: { enable_e2ee: true },
         e2ee_headers: {
-          client_public_key: `04${'1'.repeat(128)}`,
-          model_public_key: `04${'2'.repeat(128)}`,
+          client_public_key: INTEGRATION_E2EE.headers.client_public_key,
+          model_public_key: INTEGRATION_E2EE.headers.model_public_key,
           signing_algorithm: 'ecdsa',
         },
       },
