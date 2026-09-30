@@ -847,6 +847,40 @@ describe('tool output shaping', () => {
     assert.equal(parsed.lyrics_prompt, longLyrics)
   })
 
+  it('venice_music_generate maps deprecated instrumental/lyrics onto the live fields', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_music_generate')
+    const args = z.object(tool.inputSchema).parse({
+      prompt: 'song',
+      model: 'elevenlabs-music',
+      instrumental: true,
+      lyrics: 'Old lyrics field',
+    })
+    await tool.handler(args as never)
+
+    const body = stub.calls.at(-1)!.body as Record<string, unknown>
+    assert.equal(body.force_instrumental, true)
+    assert.equal(body.lyrics_prompt, 'Old lyrics field')
+    assert.equal('instrumental' in body, false)
+    assert.equal('lyrics' in body, false)
+  })
+
+  it('venice_music_generate prefers force_instrumental/lyrics_prompt over deprecated aliases', async () => {
+    const { stub, get } = setup()
+    await get('venice_music_generate').handler({
+      prompt: 'song',
+      model: 'elevenlabs-music',
+      instrumental: true,
+      force_instrumental: false,
+      lyrics: 'Old lyrics field',
+      lyrics_prompt: 'New lyrics field',
+    } as never)
+
+    const body = stub.calls.at(-1)!.body as Record<string, unknown>
+    assert.equal(body.force_instrumental, false)
+    assert.equal(body.lyrics_prompt, 'New lyrics field')
+  })
+
   it('venice_video_status returns retry-safe guidance for an oversized MP4', async () => {
     const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
     const stub = new StubClient({

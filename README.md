@@ -81,7 +81,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_music_generate` | Queue music generation. Uses the live QueueAudioRequest fields: `force_instrumental`, `lyrics_prompt`, `lyrics_optimizer`, `loop`, `voice`, `language_code`, `speed`, and model-specific `duration_seconds`. |
+| `venice_music_generate` | Queue music generation. Uses the live QueueAudioRequest fields: `force_instrumental`, `lyrics_prompt`, `lyrics_optimizer`, `loop`, `voice`, `language_code`, `speed`, and model-specific `duration_seconds`. Deprecated `instrumental` / `lyrics` are still accepted as aliases. |
 | `venice_music_status` | Check status of a queued music job. |
 | `venice_music_complete` | Mark a completed music job as downloaded. |
 

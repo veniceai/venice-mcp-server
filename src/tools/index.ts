@@ -970,12 +970,19 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         voice: z.string().optional().describe('Model-supported voice id/name.'),
         language_code: z.string().optional().describe('ISO 639-1 language code on supported models.'),
         speed: z.number().min(0.25).max(4).optional().describe('Model-specific speed multiplier. Check model min_speed/max_speed.'),
+        instrumental: z.boolean().optional().describe('Deprecated: use force_instrumental. Ignored when force_instrumental is set.'),
+        lyrics: z.string().optional().describe('Deprecated: use lyrics_prompt. Ignored when lyrics_prompt is set.'),
       },
       handler: async (args) => {
         try {
+          const { instrumental, lyrics, ...queueArgs } = args
           const resp = await client.post<{ model?: string; queue_id?: string }>(
             '/v1/audio/queue',
-            args
+            {
+              ...queueArgs,
+              force_instrumental: args.force_instrumental ?? instrumental,
+              lyrics_prompt: args.lyrics_prompt ?? lyrics,
+            }
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned.')
