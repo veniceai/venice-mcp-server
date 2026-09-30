@@ -88,7 +88,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxAudioResponseBytes: parsePositiveInteger(
       env.VENICE_MAX_AUDIO_RESPONSE_BYTES,
       DEFAULT_MAX_AUDIO_RESPONSE_BYTES,
-      ),
+    ),
     maxImageResponseBytes: parsePositiveInteger(
       env.VENICE_MAX_IMAGE_RESPONSE_BYTES,
       DEFAULT_MAX_IMAGE_RESPONSE_BYTES,
