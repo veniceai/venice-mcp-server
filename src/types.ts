@@ -31,6 +31,7 @@ export interface ModelCatalogItem {
   object?: string
   owned_by?: string
   type?: string
+  context_length?: number
   model_spec?: Record<string, unknown>
 }
 

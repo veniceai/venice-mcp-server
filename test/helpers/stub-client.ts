@@ -159,12 +159,13 @@ export class StubClient {
     }
   }
   /** Stub for postMultipart — returns canned JSON like normal POST. */
-  async postMultipart<T>(path: string, form: FormData): Promise<T> {
+  async postMultipart<T>(path: string, form: FormData, opts: { timeoutMs?: number; maxBytes?: number } = {}): Promise<T> {
     this.calls.push({
       method: 'POST',
       path,
       body: Object.fromEntries(form.entries()),
       multipart: true,
+      maxBytes: opts.maxBytes,
     })
     const overrideKey = Object.keys(this.overrides).find((k) => path.startsWith(k))
     if (overrideKey) {
