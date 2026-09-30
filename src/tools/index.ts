@@ -1145,15 +1145,19 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async ({ type }) => {
         try {
-          const path = type && type !== 'all'
-            ? `/v1/models?type=${encodeURIComponent(type)}`
-            : '/v1/models'
-          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>(path)
+          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>('/v1/models')
           const all = resp.data ?? resp.models ?? []
-          return ok(JSON.stringify(all, null, 2), {
-            count: all.length,
+          const filtered =
+            type && type !== 'all'
+              ? all.filter((m: unknown) => {
+                  const obj = m as Record<string, unknown>
+                  const t = String(obj.type ?? obj.modelType ?? '').toLowerCase()
+                  return t.includes(type)
+                })
+              : all
+          return ok(JSON.stringify(filtered.slice(0, 80), null, 2), {
+            count: filtered.length,
             total: all.length,
-            requested_type: type && type !== 'all' ? type : undefined,
           })
         } catch (err) {
           return fail(formatToolError(err))

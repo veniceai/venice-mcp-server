@@ -82,7 +82,6 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
   before(async () => {
     venice = await startMockVenice([
       { match: 'GET /v1/models', reply: { data: [{ id: 'deepseek-v4-flash-0731', type: 'text' }] } },
-      { match: 'GET /v1/models?type=video', reply: { data: [{ id: 'mock-video-model' }] } },
       {
         match: 'POST /v1/chat/completions',
         reply: ({ headers, body }) => ({
@@ -259,15 +258,6 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     const request = venice.calls.find((call) => call.path === '/v1/image/generate')
     assert.equal((request?.body as { aspect_ratio?: string }).aspect_ratio, 'cinematic-model-value')
     assert.equal((request?.body as { resolution?: string }).resolution, '2K-model-value')
-  })
-
-  it('venice_list_models sends the requested video type to Venice', async () => {
-    const r = (await rpc.request('tools/call', {
-      name: 'venice_list_models',
-      arguments: { type: 'video' },
-    })) as RpcResult
-    assert.equal(r.error, undefined)
-    assert.ok(venice.calls.some((call) => call.path === '/v1/models?type=video'))
   })
 
   it('venice_video_status supports JSON processing and binary completed responses', async () => {

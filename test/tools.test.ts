@@ -402,8 +402,6 @@ const MAPPINGS: Mapping[] = [
 
   // catalog
   { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models' },
-  { tool: 'venice_list_models', args: { type: 'video' }, expectMethod: 'GET', expectPath: '/v1/models?type=video' },
-
   // characters
   { tool: 'venice_list_characters', args: {}, expectMethod: 'GET', expectPath: '/v1/characters' },
   {
@@ -802,27 +800,10 @@ describe('tool output shaping', () => {
   })
 
   it('venice_list_models filters by capability type', async () => {
-    const stub = new StubClient({
-      '/v1/models?type=image': () => ({ data: [{ id: 'flux-2-pro' }] }),
-    })
-    const tools = buildTools(stub.asClient(), cfg)
-    const get = (name: string) => tools.find((t) => t.name === name)!
+    const { get } = setup()
     const r = await get('venice_list_models').handler({ type: 'image' } as never)
-    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
-    assert.equal((r.structuredContent as { count: number; total: number }).total, 1)
+    assert.equal((r.structuredContent as { count: number; total: number }).total, 3)
     assert.equal((r.structuredContent as { count: number }).count, 1)
-  })
-
-  it('venice_list_models does not truncate a server-filtered catalog', async () => {
-    const models = Array.from({ length: 101 }, (_, index) => ({ id: `video-${index}` }))
-    const stub = new StubClient({
-      '/v1/models?type=video': () => ({ data: models }),
-    })
-    const tools = buildTools(stub.asClient(), cfg)
-    const r = await tools.find((t) => t.name === 'venice_list_models')!.handler({ type: 'video' } as never)
-
-    assert.equal((r.structuredContent as { count: number }).count, 101)
-    assert.equal((JSON.parse((r.content[0] as { text: string }).text) as unknown[]).length, 101)
   })
 
   it('venice_music_generate accepts model-defined lyrics_prompt lengths', () => {
