@@ -260,9 +260,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
       model: 'e2ee-qwen3-5-122b-a10b',
       messages: [{ role: 'user', content: INTEGRATION_ENCRYPTED_CHUNK }],
       max_completion_tokens: 321,
-      reasoning_effort: 'high',
-      prompt_cache_key: 'integration-cache',
-      prompt_cache_retention: '24h',
+      temperature: 0.2,
       venice_parameters: { enable_e2ee: true },
       e2ee_headers: {
         client_public_key: `04${'1'.repeat(128)}`,
@@ -282,15 +280,14 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     }
     assert.equal(result.isError, undefined)
     const call = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').at(-1)!
-    const body = call.body as Record<string, unknown>
-    assert.equal(body.model, 'e2ee-qwen3-5-122b-a10b')
-    assert.deepEqual(body.messages, arguments_.messages)
-    assert.equal(body.max_completion_tokens, 321)
-    assert.equal(body.reasoning_effort, 'high')
-    assert.equal(body.prompt_cache_key, 'integration-cache')
-    assert.equal(body.stream, true)
-    assert.equal('e2ee_headers' in body, false)
-    assert.equal((body.venice_parameters as { include_venice_system_prompt: boolean }).include_venice_system_prompt, false)
+    assert.deepEqual(call.body, {
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: arguments_.messages,
+      temperature: 0.2,
+      max_completion_tokens: 321,
+      venice_parameters: { enable_e2ee: true, include_venice_system_prompt: false, enable_web_search: 'off' },
+      stream: true,
+    })
     assert.equal(call.headers['x-venice-tee-client-pub-key'], arguments_.e2ee_headers.client_public_key)
     assert.equal(call.headers['x-venice-tee-model-pub-key'], arguments_.e2ee_headers.model_public_key)
     assert.equal(call.headers['x-venice-tee-signing-algo'], 'ecdsa')

@@ -26,7 +26,12 @@ import { z } from 'zod'
 import { collectSseDataEvents, type VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
-import { modelSupportsE2ee, validateE2eeChatRequest, validateE2eeSseContent } from '../e2ee.js'
+import {
+  E2EE_VENICE_PARAMETERS,
+  modelSupportsE2ee,
+  validateE2eeChatRequest,
+  validateE2eeSseContent,
+} from '../e2ee.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -321,7 +326,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. File, tool, web, and structured-output features are rejected. Upstream SSE is returned unchanged in content[0].text only after ciphertext and error-envelope checks. This server does not decrypt, verify, or claim plaintext completion.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. E2EE accepts only model, role/content messages, temperature, top_p, max_tokens, max_completion_tokens, and timeout_ms; every other field is rejected. Upstream SSE is returned unchanged in content[0].text only after ciphertext and error-envelope checks. This server does not decrypt, verify, or claim plaintext completion.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -373,11 +378,6 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               return fail(`E2EE requires an explicit catalog model with supportsE2EE; "${model}" is not E2EE-capable.`)
             }
 
-            const veniceParameters = {
-              ...args.venice_parameters,
-              include_venice_system_prompt: false,
-              enable_web_search: 'off' as const,
-            }
             const body = {
               model,
               messages: args.messages,
@@ -385,13 +385,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               max_tokens: args.max_tokens,
               max_completion_tokens: args.max_completion_tokens,
               top_p: args.top_p,
-              stop: args.stop,
-              verbosity: args.verbosity,
-              prompt_cache_key: args.prompt_cache_key,
-              prompt_cache_retention: args.prompt_cache_retention,
-              reasoning: args.reasoning,
-              reasoning_effort: args.reasoning_effort,
-              venice_parameters: veniceParameters,
+              venice_parameters: E2EE_VENICE_PARAMETERS,
               stream: true,
             }
             const headers = {

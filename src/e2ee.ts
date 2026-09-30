@@ -19,6 +19,38 @@ export function modelSupportsE2ee(modelId: string, catalog: unknown): boolean {
   return match?.model_spec?.capabilities?.supportsE2EE === true
 }
 
+/** Tool inputs that may accompany an E2EE call; none of them carry caller text to the API. */
+const E2EE_REQUEST_KEYS = new Set([
+  'model',
+  'messages',
+  'temperature',
+  'top_p',
+  'max_tokens',
+  'max_completion_tokens',
+  'venice_parameters',
+  'e2ee_headers',
+  'timeout_ms',
+])
+
+/** The only venice_parameters values accepted on the E2EE path. */
+const E2EE_VENICE_PARAMETER_VALUES: Readonly<Record<string, unknown>> = {
+  enable_e2ee: true,
+  enable_web_search: 'off',
+  enable_web_citations: false,
+  enable_web_scraping: false,
+  enable_x_search: false,
+  include_venice_system_prompt: false,
+}
+
+/** The fixed venice_parameters sent upstream for every E2EE call. */
+export const E2EE_VENICE_PARAMETERS = {
+  enable_e2ee: true,
+  include_venice_system_prompt: false,
+  enable_web_search: 'off',
+} as const
+
+const E2EE_MESSAGE_KEYS = new Set(['role', 'content'])
+
 export function validateE2eeChatRequest(args: {
   model?: string
   messages?: unknown
@@ -34,6 +66,7 @@ export function validateE2eeChatRequest(args: {
     include_venice_system_prompt?: boolean
     character_slug?: string
   }
+  [key: string]: unknown
 }): string | undefined {
   if (typeof args.model !== 'string' || args.model.trim() === '') {
     return 'E2EE requires an explicit E2EE-capable model; the default chat model is not used.'
@@ -59,6 +92,17 @@ export function validateE2eeChatRequest(args: {
     if (venice.character_slug !== undefined) {
       return 'E2EE does not support character injection; encrypt any persona instructions client-side.'
     }
+    for (const [key, value] of Object.entries(venice)) {
+      if (value === undefined) continue
+      if (!(key in E2EE_VENICE_PARAMETER_VALUES) || E2EE_VENICE_PARAMETER_VALUES[key] !== value) {
+        return `E2EE does not allow this venice_parameters.${key} value; the E2EE request always sends enable_e2ee=true, include_venice_system_prompt=false, and enable_web_search="off".`
+      }
+    }
+  }
+
+  for (const [key, value] of Object.entries(args)) {
+    if (value === undefined || E2EE_REQUEST_KEYS.has(key)) continue
+    return `E2EE does not allow "${key}": it would travel to the API as plaintext outside the enclave trust boundary. Only model, messages, temperature, top_p, max_tokens, max_completion_tokens, and timeout_ms may accompany encrypted messages.`
   }
 
   if (!Array.isArray(args.messages)) {
@@ -110,11 +154,22 @@ function validateE2eeMessage(message: unknown): string | undefined {
   if (role === 'tool' || record.tool_calls !== undefined) {
     return 'E2EE does not support tools or function calling.'
   }
+  if (record.reasoning_content != null && record.reasoning_content !== '') {
+    return 'E2EE assistant history cannot include reasoning_content; send only role and encrypted content.'
+  }
+  if (record.reasoning_details !== undefined) {
+    return 'E2EE does not support reasoning_details; they are not encrypted ciphertext.'
+  }
+  for (const [key, value] of Object.entries(record)) {
+    if (value === undefined || E2EE_MESSAGE_KEYS.has(key)) continue
+    return `E2EE messages may only contain role and content; "${key}" would travel to the API as plaintext.`
+  }
 
   if (role === 'user' || role === 'system' || role === 'developer') {
     if (typeof record.content !== 'string' || !isValidEncryptedHex(record.content)) {
       return 'E2EE requires user/system content to be encrypted hex ciphertext (at least 186 hex characters). Plaintext, files, and multimodal parts are not allowed.'
     }
+    return undefined
   }
 
   if (role === 'assistant') {
@@ -123,17 +178,10 @@ function validateE2eeMessage(message: unknown): string | undefined {
         return 'E2EE assistant history must be encrypted hex ciphertext when content is present.'
       }
     }
-    if (record.reasoning_content != null && record.reasoning_content !== '') {
-      if (typeof record.reasoning_content !== 'string' || !isValidEncryptedHex(record.reasoning_content)) {
-        return 'E2EE assistant history cannot include plaintext reasoning_content.'
-      }
-    }
-    if (record.reasoning_details !== undefined) {
-      return 'E2EE does not support reasoning_details; they are not encrypted ciphertext.'
-    }
+    return undefined
   }
 
-  return undefined
+  return 'E2EE messages must use the user, system, developer, or assistant role.'
 }
 
 function collectMessageContents(payload: Record<string, unknown>): string[] | undefined {

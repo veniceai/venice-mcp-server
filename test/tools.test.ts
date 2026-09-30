@@ -475,12 +475,12 @@ describe('chat and responses request contracts', () => {
     const result = await tool.handler(parsed as never)
     assert.equal(result.isError, undefined)
     const chatCall = stub.calls.find((call) => call.path === '/v1/chat/completions')!
-    const body = chatCall.body as Record<string, unknown>
-    assert.equal(body.model, 'e2ee-qwen3-5-122b-a10b')
-    assert.deepEqual(body.messages, args.messages)
-    assert.equal(body.stream, true)
-    assert.equal('e2ee_headers' in body, false)
-    assert.equal((body.venice_parameters as { include_venice_system_prompt: boolean }).include_venice_system_prompt, false)
+    assert.deepEqual(JSON.parse(JSON.stringify(chatCall.body)), {
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: args.messages,
+      venice_parameters: { enable_e2ee: true, include_venice_system_prompt: false, enable_web_search: 'off' },
+      stream: true,
+    })
     assert.deepEqual(chatCall.headers, {
       'X-Venice-TEE-Client-Pub-Key': E2EE_HEADERS.client_public_key,
       'X-Venice-TEE-Model-Pub-Key': E2EE_HEADERS.model_public_key,
@@ -641,6 +641,32 @@ describe('chat and responses request contracts', () => {
         stub.calls.some((call) => call.path === '/v1/chat/completions'),
         false,
       )
+    }
+  })
+
+  it('rejects plaintext-bearing E2EE fields without sending them anywhere', async () => {
+    const canaries = ['PLAIN STOP', 'user-alice@example.com', 'alice-plaintext']
+    const invalidArgs = [
+      { stop: ['PLAIN STOP'] },
+      { prompt_cache_key: 'user-alice@example.com' },
+      { messages: [{ role: 'user', content: E2EE_CIPHERTEXT, name: 'alice-plaintext' }] },
+    ]
+    for (const extra of invalidArgs) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+      const result = await tool.handler(zObject(tool).parse({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+        ...extra,
+      }) as never)
+      assert.equal(result.isError, true, JSON.stringify(extra))
+      assert.match((result.content[0] as { text: string }).text, /does not allow|may only contain role and content/)
+      assert.equal(stub.calls.length, 0)
+      for (const canary of canaries) {
+        assert.doesNotMatch((result.content[0] as { text: string }).text, new RegExp(canary))
+      }
     }
   })
 
