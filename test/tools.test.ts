@@ -917,6 +917,9 @@ describe('tool output shaping', () => {
     assert.equal(r.structuredContent, undefined)
     const text = (r.content[0] as { text: string }).text
     assert.match(text, /402 Payment Required/)
+    assert.match(text, /VENICE_API_KEY/)
+    assert.match(text, /venice_x402_top_up_info/)
+    assert.doesNotMatch(text, /unrecognized payment response/)
     assert.doesNotMatch(text, /Completed music|audio_response_too_large/)
   })
 

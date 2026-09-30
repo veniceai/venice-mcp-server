@@ -66,7 +66,7 @@ describe('loadConfig', () => {
     assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: 'nope' }).maxAudioResponseBytes, fallback)
     assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '0' }).maxAudioResponseBytes, fallback)
     assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '1.5' }).maxAudioResponseBytes, fallback)
-    })
+  })
 
   it('parses the image response byte limit with a fallback for invalid values', () => {
     assert.equal(loadConfig({ VENICE_MAX_IMAGE_RESPONSE_BYTES: '4096' }).maxImageResponseBytes, 4096)

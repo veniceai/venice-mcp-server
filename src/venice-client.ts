@@ -35,6 +35,8 @@ export type VeniceMixedResponse<T> =
 
 const MAX_MIXED_JSON_RESPONSE_BYTES = 1024 * 1024
 const MAX_UPSTREAM_ERROR_RESPONSE_BYTES = 64 * 1024
+// 402 bodies carry the top-up and auth instructions agents need, so they get the larger JSON budget.
+const MAX_PAYMENT_REQUIRED_RESPONSE_BYTES = MAX_MIXED_JSON_RESPONSE_BYTES
 
 export class VeniceResponseTooLargeError extends Error {
   constructor(
@@ -285,16 +287,15 @@ export class VeniceClient {
       const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal })
       const contentType = res.headers.get('content-type') ?? 'application/octet-stream'
       if (!res.ok) {
-        const { buffer, truncated } = await readTruncatedResponseBuffer(
-          res,
-          MAX_UPSTREAM_ERROR_RESPONSE_BYTES,
-        )
+        const maxErrorBytes =
+          res.status === 402 ? MAX_PAYMENT_REQUIRED_RESPONSE_BYTES : MAX_UPSTREAM_ERROR_RESPONSE_BYTES
+        const { buffer, truncated } = await readTruncatedResponseBuffer(res, maxErrorBytes)
         let errBody: unknown
         if (truncated) {
           errBody = {
             error: 'upstream_error_body_truncated',
             truncated: true,
-            max_bytes: MAX_UPSTREAM_ERROR_RESPONSE_BYTES,
+            max_bytes: maxErrorBytes,
           }
         } else if (contentType.includes('application/json')) {
           try {

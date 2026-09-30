@@ -47,9 +47,14 @@ describe('VeniceClient', () => {
           __status: 402,
           __body: {
             reason: 'insufficient_balance',
+            currentBalanceUsd: 0.01,
             padding: 'x'.repeat(128 * 1024),
           },
         },
+      },
+      {
+        match: 'POST /v1/huge-payment',
+        reply: { __status: 402, __body: { reason: 'insufficient_balance', padding: 'x'.repeat(2 * 1024 * 1024) } },
       },
       { match: 'POST /v1/server-error', reply: { __status: 503, __body: { error: 'down' } } },
       { match: 'POST /v1/text-only', reply: { __status: 200, __body: 'plain text', __headers: { 'content-type': 'text/plain' } } },
@@ -292,10 +297,24 @@ describe('VeniceClient', () => {
     )
   })
 
-  it('postMixed preserves oversized 402 semantics while bounding its error body', async () => {
+  it('postMixed keeps payment instructions from a 402 body larger than the generic error cap', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
       () => c.postMixed('/v1/oversized-payment', {}, { maxBytes: 8 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 402)
+        assert.equal((err.body as { currentBalanceUsd: number }).currentBalanceUsd, 0.01)
+        assert.equal(err instanceof VeniceResponseTooLargeError, false)
+        return true
+      },
+    )
+  })
+
+  it('postMixed preserves 402 semantics while bounding a huge error body', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMixed('/v1/huge-payment', {}, { maxBytes: 8 }),
       (err: unknown) => {
         assert.ok(err instanceof VeniceUpstreamError)
         assert.equal(err.status, 402)
@@ -303,7 +322,7 @@ describe('VeniceClient', () => {
         assert.deepEqual(err.body, {
           error: 'upstream_error_body_truncated',
           truncated: true,
-          max_bytes: 64 * 1024,
+          max_bytes: 1024 * 1024,
         })
         assert.equal(err instanceof VeniceResponseTooLargeError, false)
         return true

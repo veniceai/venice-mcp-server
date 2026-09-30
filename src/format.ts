@@ -80,6 +80,13 @@ function format402(err: VeniceUpstreamError): string {
     return lines.join('\n')
   }
 
+  if ((err.body as { error?: unknown } | undefined)?.error === 'upstream_error_body_truncated') {
+    lines.push('The payment details were too large to include. To continue, either:')
+    lines.push(`  - set VENICE_API_KEY with a key that has balance, or`)
+    lines.push('  - check your wallet credit with venice_x402_balance and top up via venice_x402_top_up_info.')
+    return lines.join('\n')
+  }
+
   // Avoid reflecting unexpected upstream bodies; they may contain implementation details.
   lines.push('Payment is required, but Venice returned an unrecognized payment response.')
   return lines.join('\n')
