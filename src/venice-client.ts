@@ -147,13 +147,8 @@ export class VeniceClient {
   }
 
   /** POST request with JSON body. */
-  post<T = unknown>(
-    path: string,
-    json: unknown,
-    headers?: Record<string, string>,
-    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs'> = {},
-  ): Promise<T> {
-    return this.request<T>(path, { method: 'POST', json, headers, ...opts })
+  post<T = unknown>(path: string, json: unknown, headers?: Record<string, string>): Promise<T> {
+    return this.request<T>(path, { method: 'POST', json, headers })
   }
 
   /** POST JSON while retaining response metadata such as Venice extension headers. */
