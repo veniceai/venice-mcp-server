@@ -1,5 +1,5 @@
 import type { Config } from './config.js'
-import { VeniceUpstreamError } from './types.js'
+import { VeniceResponseTooLargeError, VeniceUpstreamError } from './types.js'
 
 export interface RequestInitJSON {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
@@ -28,7 +28,7 @@ export interface RequestInitJSON {
 export class VeniceClient {
   constructor(private readonly cfg: Config) {}
 
-  async request<T = unknown>(path: string, init: RequestInitJSON = {}): Promise<T> {
+  private async send<T>(path: string, init: RequestInitJSON): Promise<{ body: T; headers: Record<string, string> }> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       Accept: 'application/json',
@@ -92,20 +92,27 @@ export class VeniceClient {
     clearTimeout(timeout)
 
     const body = await readResponseBody(res, init.maxResponseBytes)
+    const headerObj: Record<string, string> = {}
+    res.headers.forEach((v, k) => {
+      headerObj[k] = v
+    })
 
     if (!res.ok) {
-      const headerObj: Record<string, string> = {}
-      res.headers.forEach((v, k) => {
-        headerObj[k] = v
-      })
       throw new VeniceUpstreamError({
         message: `Venice ${res.status} on ${path}`,
         status: res.status,
-        body,
+        body: body === TOO_LARGE ? { error: `Upstream error response is larger than ${init.maxResponseBytes} bytes` } : body,
         headers: headerObj,
       })
     }
-    return body as T
+    if (body === TOO_LARGE) {
+      throw new VeniceResponseTooLargeError({ limitBytes: init.maxResponseBytes!, headers: headerObj })
+    }
+    return { body: body as T, headers: headerObj }
+  }
+
+  async request<T = unknown>(path: string, init: RequestInitJSON = {}): Promise<T> {
+    return (await this.send<T>(path, init)).body
   }
 
   /** GET request returning JSON. */
@@ -125,6 +132,16 @@ export class VeniceClient {
     opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxResponseBytes'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'POST', json, headers, ...opts })
+  }
+
+  /** POST request with JSON body, also returning the (lower-cased) response headers. */
+  postWithHeaders<T = unknown>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxResponseBytes'> = {},
+  ): Promise<{ body: T; headers: Record<string, string> }> {
+    return this.send<T>(path, { method: 'POST', json, headers, ...opts })
   }
 
   /**
@@ -232,11 +249,14 @@ export class VeniceClient {
   }
 }
 
-/** Parse JSON or text, optionally aborting once the body exceeds `maxResponseBytes`. */
+const TOO_LARGE = Symbol('tooLarge')
+
+/** Parse JSON or text, returning `TOO_LARGE` once the body exceeds `maxResponseBytes`. */
 async function readResponseBody(res: Response, maxResponseBytes?: number): Promise<unknown> {
   const contentType = res.headers.get('content-type') ?? ''
   if (maxResponseBytes !== undefined) {
     const text = await readBoundedResponseText(res, maxResponseBytes)
+    if (text === TOO_LARGE) return TOO_LARGE
     if (contentType.includes('application/json')) {
       if (!text) return {}
       try {
@@ -253,13 +273,13 @@ async function readResponseBody(res: Response, maxResponseBytes?: number): Promi
   return await res.text().catch(() => '')
 }
 
-async function readBoundedResponseText(res: Response, maxBytes: number): Promise<string> {
+async function readBoundedResponseText(res: Response, maxBytes: number): Promise<string | typeof TOO_LARGE> {
   const contentLength = res.headers.get('content-length')
   if (contentLength !== null) {
     const size = Number(contentLength)
     if (Number.isFinite(size) && size > maxBytes) {
       if (res.body) await res.body.cancel().catch(() => undefined)
-      throw new Error(`Upstream response is larger than ${maxBytes} bytes`)
+      return TOO_LARGE
     }
   }
 
@@ -272,7 +292,8 @@ async function readBoundedResponseText(res: Response, maxBytes: number): Promise
       const buf = Buffer.from(chunk)
       total += buf.length
       if (total > maxBytes) {
-        throw new Error(`Upstream response is larger than ${maxBytes} bytes`)
+        await res.body.cancel().catch(() => undefined)
+        return TOO_LARGE
       }
       chunks.push(buf)
     }

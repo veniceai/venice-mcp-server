@@ -6,6 +6,8 @@ export interface StubCall {
   body?: unknown
   headers?: Record<string, string>
   auth?: 'default' | 'apiKey' | 'siwx' | 'none'
+  /** Response size limit the caller passed to the client. */
+  maxResponseBytes?: number
   /** Whether this call went through postMultipart (FormData body) instead of JSON. */
   multipart?: boolean
   /** Whether this call went through postBinary (binary response expected). */
@@ -22,7 +24,13 @@ export type StubHandler = (call: StubCall) => unknown | Promise<unknown>
  */
 export class StubClient {
   calls: StubCall[] = []
-  constructor(private overrides: Record<string, StubHandler> = {}) {}
+  /**
+   * @param responseHeaders Headers returned by `postWithHeaders`, keyed by path prefix.
+   */
+  constructor(
+    private overrides: Record<string, StubHandler> = {},
+    private responseHeaders: Record<string, Record<string, string>> = {},
+  ) {}
 
   private async dispatch<T>(call: StubCall): Promise<T> {
     this.calls.push(call)
@@ -37,8 +45,30 @@ export class StubClient {
   get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
     return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
   }
-  post<T>(path: string, json: unknown, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
-    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
+  post<T>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: { auth?: StubCall['auth']; maxResponseBytes?: number } = {},
+  ) {
+    return this.dispatch<T>({
+      method: 'POST',
+      path,
+      body: json,
+      headers,
+      auth: opts.auth,
+      maxResponseBytes: opts.maxResponseBytes,
+    })
+  }
+  async postWithHeaders<T>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: { auth?: StubCall['auth']; maxResponseBytes?: number } = {},
+  ): Promise<{ body: T; headers: Record<string, string> }> {
+    const body = await this.post<T>(path, json, headers, opts)
+    const matchKey = Object.keys(this.responseHeaders).find((k) => path.startsWith(k))
+    return { body, headers: matchKey ? this.responseHeaders[matchKey] : {} }
   }
   /**
    * Stub for postBinary. Tool calls expecting binary back get a synthetic

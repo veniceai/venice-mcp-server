@@ -21,6 +21,19 @@ export class VeniceUpstreamError extends Error {
   }
 }
 
+/** A successful upstream response whose body exceeded the caller's `maxResponseBytes`. */
+export class VeniceResponseTooLargeError extends Error {
+  readonly limitBytes: number
+  readonly headers: Record<string, string>
+
+  constructor(opts: { limitBytes: number; headers?: Record<string, string> }) {
+    super(`Upstream response is larger than ${opts.limitBytes} bytes`)
+    this.name = 'VeniceResponseTooLargeError'
+    this.limitBytes = opts.limitBytes
+    this.headers = opts.headers ?? {}
+  }
+}
+
 export interface VeniceMessage {
   role: 'system' | 'user' | 'assistant'
   content: string
