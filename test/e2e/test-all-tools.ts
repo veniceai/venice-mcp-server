@@ -63,7 +63,7 @@ function buildPlan(walletAddr: string): CallSpec[] {
     // ============ SAFE READS — should work in BOTH modes ============
     {
       name: 'venice_list_models',
-      args: { type: 'text' },
+      args: { type: 'image' },
       validate: r => (r?.structuredContent?.count > 0 ? null : 'expected count > 0'),
     },
     {

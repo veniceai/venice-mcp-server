@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
+import { z } from 'zod'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 
@@ -114,6 +115,9 @@ describe('tools registry', () => {
     assert.equal(schema.safeParse({ model_id: '   ', type: 'image' }).success, false)
     assert.equal(schema.safeParse({ model_id: 'flux-2-pro' }).success, false)
     assert.equal(schema.safeParse({ model_id: 'flux-2-pro', type: 'all' }).success, false)
+    assert.equal(schema.safeParse({ model_id: 'flux-2-pro', type: 'code' }).success, false)
+    assert.equal(schema.safeParse({ model_id: 'jev-latest', type: 'decision' }).success, true)
+    assert.equal(schema.safeParse({ model_id: 'x', type: 'some-new-type' }).success, true)
     assert.deepEqual(schema.parse({ model_id: '  flux-2-pro  ', type: 'image' }), {
       model_id: 'flux-2-pro',
       type: 'image',
@@ -152,11 +156,16 @@ const MAPPINGS: Mapping[] = [
   },
   {
     tool: 'venice_embeddings',
-    args: { input: 'foo' },
+    args: {
+      input: 'foo',
+      model: 'text-embedding-bge-m3',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/embeddings',
+    expectBodyContains: {
+      model: 'text-embedding-bge-m3',
+    },
   },
-
   // image
   {
     tool: 'venice_image_generate',
@@ -203,9 +212,17 @@ const MAPPINGS: Mapping[] = [
   // video
   {
     tool: 'venice_video_generate',
-    args: { prompt: 'a sunset' },
+    args: {
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/video/queue',
+    expectBodyContains: {
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    },
   },
   {
     tool: 'venice_video_status',
@@ -318,7 +335,7 @@ const MAPPINGS: Mapping[] = [
   },
 
   // catalog
-  { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models' },
+  { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models?type=all' },
   {
     tool: 'venice_model_details',
     args: { model_id: 'flux-2-pro', type: 'image' },
@@ -449,11 +466,15 @@ describe('tool output shaping', () => {
     assert.match((r.content[0] as { text: string }).text, /402 Payment Required/)
   })
 
-  it('venice_list_models filters by capability type', async () => {
-    const { get } = setup()
+  it('venice_list_models forwards type to the catalog so non-text models are discoverable', async () => {
+    const { stub, get } = setup()
     const r = await get('venice_list_models').handler({ type: 'image' } as never)
-    assert.equal((r.structuredContent as { count: number; total: number }).total, 3)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
     assert.equal((r.structuredContent as { count: number }).count, 1)
+    assert.match((r.content[0] as { text: string }).text, /flux-2-pro/)
+
+    await get('venice_list_models').handler({} as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=all')
   })
 
   it('venice_model_details returns the full matching catalog row', async () => {
@@ -490,10 +511,10 @@ describe('tool output shaping', () => {
       type: 'image',
     } as never)
     assert.equal(r.isError, true)
-    assert.equal(
-      (r.content[0] as { text: string }).text,
-      'Model "flux-2-pro" was not found in the "image" catalog.'
-    )
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /No model "flux-2-pro" in the "image" catalog/)
+    assert.match(text, /retry with that type/)
+    assert.doesNotMatch(text, /\(.*\bimage\b.*\)/)
     assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
   })
 
@@ -558,5 +579,68 @@ describe('tool output shaping', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('requires model for venice_embeddings', () => {
+    const { get } = setup()
+    const tool = get('venice_embeddings')
+
+    const modelSchema = tool.inputSchema.model
+
+    assert.equal(
+      modelSchema.isOptional(),
+      false,
+      'venice_embeddings.model should be required'
+    )
+  })
+})
+
+describe('video tool schemas', () => {
+  it('venice_video_generate requires duration', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+
+    const result = schema.safeParse({
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+    })
+
+    assert.equal(result.success, false)
+  })
+
+  it('venice_video_quote requires duration', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+
+    const result = schema.safeParse({
+      model: 'veo3.1-fast-text-to-video',
+    })
+
+    assert.equal(result.success, false)
+  })
+
+  it('accepts duration for venice_video_generate', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+
+    const result = schema.safeParse({
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    })
+
+    assert.equal(result.success, true)
+  })
+
+  it('accepts duration for venice_video_quote', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+
+    const result = schema.safeParse({
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    })
+
+    assert.equal(result.success, true)
   })
 })

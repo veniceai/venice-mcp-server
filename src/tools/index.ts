@@ -93,17 +93,13 @@ const fail = (text: string): ToolResult => ({
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
-const MODEL_DETAIL_TYPES = [
-  'asr',
-  'embedding',
-  'image',
-  'inpaint',
-  'music',
-  'text',
-  'tts',
-  'upscale',
-  'video',
-] as const
+/** Types in the live catalog (GET /v1/models?type=all). Accepted as strings so a new Venice type still works. */
+const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'music', 'tts', 'asr', 'embedding', 'decision'] as const
+const modelTypeSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z][a-z0-9_-]*$/, 'Must be a catalog type such as "video".')
 
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
@@ -242,7 +238,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Compute embeddings for text input (OpenAI-compatible).${X402_OK}`,
       inputSchema: {
         input: z.union([z.string(), z.array(z.string())]).describe('Text or array of texts.'),
-        model: z.string().optional().describe('Embedding model id.'),
+        model: z.string().min(1).describe('Embedding model id.'),
         encoding_format: z.enum(['float', 'base64']).optional(),
       },
       handler: async (args) => {
@@ -455,7 +451,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See venice_model_details.'),
+        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See venice_model_details.'),
         aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see venice_model_details.'),
         seed: z.number().int().optional(),
         image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
@@ -882,23 +878,18 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice List Models',
       description: `List the live model catalog with capabilities and prices.${NO_AUTH}`,
       inputSchema: {
-        type: z.enum(['text', 'image', 'video', 'audio', 'music', 'embedding', 'all']).optional(),
+        type: modelTypeSchema
+          .optional()
+          .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}, "code", or "all" (default). Without a type Venice returns only text models, so pass one to find video, image or audio ids.`),
       },
       handler: async ({ type }) => {
         try {
-          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>('/v1/models')
-          const all = resp.data ?? resp.models ?? []
-          const filtered =
-            type && type !== 'all'
-              ? all.filter((m: unknown) => {
-                  const obj = m as Record<string, unknown>
-                  const t = String(obj.type ?? obj.modelType ?? '').toLowerCase()
-                  return t.includes(type)
-                })
-              : all
-          return ok(JSON.stringify(filtered.slice(0, 80), null, 2), {
-            count: filtered.length,
-            total: all.length,
+          const query = new URLSearchParams({ type: type ?? 'all' }).toString()
+          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>(`/v1/models?${query}`)
+          const models = resp.data ?? resp.models ?? []
+          return ok(JSON.stringify(models.slice(0, 80), null, 2), {
+            type: type ?? 'all',
+            count: models.length,
           })
         } catch (err) {
           return fail(formatToolError(err))
@@ -911,8 +902,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Model Details',
       description: `Get one exact model's full catalog row, including model_spec constraints, capabilities, and pricing when available. Requires a concrete type to keep the upstream catalog response bounded.${NO_AUTH}`,
       inputSchema: {
-        model_id: z.string().trim().min(1).describe('Exact model id from venice_list_models.'),
-        type: z.enum(MODEL_DETAIL_TYPES).describe('Concrete API model type from venice_list_models. "all" and "code" are intentionally excluded.'),
+        model_id: z.string().trim().min(1).describe('Exact model id, e.g. from venice_list_models({ type: "video" }).'),
+        type: modelTypeSchema
+          .refine((t) => t !== 'all' && t !== 'code', 'Use a concrete type such as "video"; "all" and "code" are not allowed.')
+          .describe(`Catalog type the model belongs to: ${KNOWN_MODEL_TYPES.join(', ')}.`),
       },
       handler: async ({ model_id, type }) => {
         try {
@@ -924,7 +917,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             )
             .find((candidate) => candidate.id === model_id)
           if (!model) {
-            return fail(`Model "${model_id}" was not found in the "${type}" catalog.`)
+            return fail(
+              `No model "${model_id}" in the "${type}" catalog. If the id is right, it may belong to another type ` +
+                `(${KNOWN_MODEL_TYPES.filter((t) => t !== type).join(', ')}); retry with that type, or find it with venice_list_models({ type }).`
+            )
           }
           return ok(JSON.stringify(model, null, 2), model)
         } catch (err) {
@@ -973,7 +969,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Get a price quote for a video generation BEFORE queuing.${NO_AUTH}`,
       inputSchema: {
         model: z.string().min(1).describe('Video model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s".'),
+        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s".'),
       },
       handler: async (args) => {
         try {
