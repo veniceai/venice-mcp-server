@@ -123,7 +123,7 @@ Usage-history continuation calls must send `cursor` without the original filters
 | `venice_list_api_keys` | List active key metadata without full key secrets. ADMIN API key only. |
 | `venice_get_api_key` | Get one key's metadata, usage, balances, and rate limits. ADMIN API key only. |
 | `venice_api_key_rate_limits` | Get current balances, access status, tier, and model limits. API key only. |
-| `venice_api_key_rate_limit_logs` | Get the last 50 exceeded rate-limit events. API key only; experimental upstream. |
+| `venice_api_key_rate_limit_logs` | Get the last 50 exceeded rate-limit events. ADMIN API key only; experimental upstream. |
 | `venice_web3_key_challenge` | Get the unauthenticated 15-minute Web3 mint challenge. |
 | `venice_web3_key_mint` | **Optional, off by default.** Submit a caller-signed EVM challenge and receive a one-time INFERENCE API-key secret. ADMIN minting is rejected; a positive USD consumption limit within the server ceiling is required; omitted `limit_period` defaults to `LIFETIME`. |
 
@@ -131,7 +131,7 @@ Usage-history continuation calls must send `cursor` without the original filters
 
 Web3 minting currently requires an EVM wallet with staked VVV on Base. Signing stays in the caller's wallet: this server accepts an address, signature, and challenge token, but never a private key. MCP minting is limited to `INFERENCE` keys, because the wallet signature covers only the challenge token. Every mint must set a positive `consumption_limit.usd` of at most `VENICE_MCP_MAX_MINT_USD` (default 50); a `consumption_limit.diem` cap is optional but may not exceed `VENICE_MCP_MAX_MINT_DIEM` (default 50). Omitted `limit_period` is sent as `LIFETIME` so a dollar cap is a permanent cap rather than the upstream daily `EPOCH` default. If Venice returns a key whose type, limits, or limit period differ from the request, the tool withholds the secret and returns the key ID so you can revoke it with an ADMIN key. The secret is shown once. If the mint times out or the response is lost, do not retry — use an ADMIN key to list and revoke any unexpected key, then start a new challenge. Minted secrets are returned only to the MCP caller and are not written to server logs. The record of in-flight and unknown mint attempts is kept per process, so in HTTP mode it is shared by every session; a client that reconnects after a timeout still cannot mint a second key for the same wallet. Create/update/delete key mutations are intentionally not exposed.
 
-List and get require an ADMIN `VENICE_API_KEY`. Rate-limit reads accept an INFERENCE or ADMIN key. These tools never forward `SIGN-IN-WITH-X`.
+List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_key_rate_limits` accepts an INFERENCE or ADMIN key. These tools never forward `SIGN-IN-WITH-X`.
 
 ### 💳 x402 wallet helpers
 
@@ -335,7 +335,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_list_api_keys` | `GET /v1/api_keys` |
 | `venice_get_api_key` | `GET /v1/api_keys/:id` |
 | `venice_api_key_rate_limits` | `GET /v1/api_keys/rate_limits` (INFERENCE or ADMIN) |
-| `venice_api_key_rate_limit_logs` | `GET /v1/api_keys/rate_limits/log` (INFERENCE or ADMIN) |
+| `venice_api_key_rate_limit_logs` | `GET /v1/api_keys/rate_limits/log` (ADMIN) |
 
 ### Web3 API-key mint (auth-free; mint is opt-in via `VENICE_MCP_ENABLE_WEB3_MINT=1`)
 

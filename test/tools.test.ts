@@ -144,10 +144,11 @@ describe('tools registry', () => {
       'venice_billing_usage_history',
       'venice_list_api_keys',
       'venice_get_api_key',
+      'venice_api_key_rate_limit_logs',
     ]) {
       assert.match(get(name).description, /ADMIN API key required/i, `${name} admin description`)
     }
-    for (const name of ['venice_api_key_rate_limits', 'venice_api_key_rate_limit_logs']) {
+    for (const name of ['venice_api_key_rate_limits']) {
       assert.match(get(name).description, /API key required/i, `${name} auth description`)
       assert.doesNotMatch(get(name).description, /ADMIN API key required/i, `${name} allows inference keys`)
     }

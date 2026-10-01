@@ -13,7 +13,7 @@
  *      - crypto/rpc/:network
  *   ⚠️  API key only (no x402):
  *      - characters (list, get, reviews)
- *      - api_keys/rate_limits and rate_limits/log (INFERENCE or ADMIN)
+ *      - api_keys/rate_limits (INFERENCE or ADMIN); rate_limits/log requires ADMIN
  *      - billing/* and api_keys list/get require an ADMIN key
  *      - support-bot
  *   🔓 Auth-free:
@@ -1338,7 +1338,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_api_key_rate_limit_logs',
       title: 'Venice API Key Rate Limit Logs',
-      description: `Get the last 50 exceeded rate-limit events for the account. This read-only endpoint is experimental.${API_KEY_ONLY}`,
+      description: `Get the last 50 exceeded rate-limit events for the account. This read-only endpoint is experimental.${ADMIN_API_KEY_ONLY}`,
       inputSchema: {},
       handler: async () => {
         try {
