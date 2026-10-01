@@ -159,7 +159,6 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
           ...process.env,
           VENICE_TEST_BASE_URL: venice.url,
           VENICE_API_KEY: 'vk_integration',
-          VENICE_MCP_ENABLE_WEB3_MINT: '1',
         },
         stdio: ['pipe', 'pipe', 'pipe'],
       }
@@ -187,23 +186,17 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 40 tools over JSON-RPC when web3 minting is enabled', async () => {
+  it('lists 39 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
-    const list = (r.result as { tools: Array<{ name: string; annotations?: Record<string, unknown> }> }).tools
-    assert.equal(list.length, 40)
-    assert.deepEqual(list.find((t) => t.name === 'venice_web3_key_mint')?.annotations, {
-      readOnlyHint: false,
-      destructiveHint: true,
-      idempotentHint: false,
-      openWorldHint: true,
-    })
-    // Spot-check a few
+    const list = (r.result as { tools: Array<{ name: string }> }).tools
+    assert.equal(list.length, 39)
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
     assert.ok(names.includes('venice_video_status'))
     assert.ok(names.includes('venice_x402_balance'))
     assert.ok(names.includes('venice_billing_usage_history'))
-    assert.ok(names.includes('venice_web3_key_mint'))
+    assert.ok(names.includes('venice_web3_key_challenge'))
+    assert.equal(names.includes('venice_web3_key_mint'), false)
   })
 
   it('lists 3 resources', async () => {
