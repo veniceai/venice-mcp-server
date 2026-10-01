@@ -205,9 +205,17 @@ const MAPPINGS: Mapping[] = [
   // video
   {
     tool: 'venice_video_generate',
-    args: { prompt: 'a sunset' },
+    args: {
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/video/queue',
+    expectBodyContains: {
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    },
   },
   {
     tool: 'venice_video_status',
@@ -957,5 +965,55 @@ describe('tool output shaping', () => {
       false,
       'venice_embeddings.model should be required'
     )
+  })
+})
+
+describe('video tool schemas', () => {
+  it('venice_video_generate requires duration', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+
+    const result = schema.safeParse({
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+    })
+
+    assert.equal(result.success, false)
+  })
+
+  it('venice_video_quote requires duration', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+
+    const result = schema.safeParse({
+      model: 'veo3.1-fast-text-to-video',
+    })
+
+    assert.equal(result.success, false)
+  })
+
+  it('accepts duration for venice_video_generate', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+
+    const result = schema.safeParse({
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    })
+
+    assert.equal(result.success, true)
+  })
+
+  it('accepts duration for venice_video_quote', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+
+    const result = schema.safeParse({
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    })
+
+    assert.equal(result.success, true)
   })
 })
