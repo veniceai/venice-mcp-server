@@ -110,14 +110,6 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
         },
       },
       {
-        match: 'GET /v1/api_keys/generate_web3_key',
-        reply: ({ headers }) => ({
-          success: true,
-          data: { token: 'integration-challenge' },
-          sawAuth: Boolean(headers.authorization || headers['sign-in-with-x']),
-        }),
-      },
-      {
         match: 'POST /v1/insufficient',
         reply: {
           __status: 402,
@@ -186,16 +178,16 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 39 tools over JSON-RPC', async () => {
+  it('lists 38 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 39)
+    assert.equal(list.length, 38)
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
     assert.ok(names.includes('venice_video_status'))
     assert.ok(names.includes('venice_x402_balance'))
     assert.ok(names.includes('venice_billing_usage_history'))
-    assert.ok(names.includes('venice_web3_key_challenge'))
+    assert.equal(names.includes('venice_web3_key_challenge'), false)
     assert.equal(names.includes('venice_web3_key_mint'), false)
   })
 
@@ -260,17 +252,6 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     )
     assert.equal(upstreamCall?.headers.authorization, 'Bearer vk_integration')
     assert.equal(upstreamCall?.headers['sign-in-with-x'], undefined)
-  })
-
-  it('retrieves a Web3 challenge without forwarding configured auth', async () => {
-    const r = (await rpc.request('tools/call', {
-      name: 'venice_web3_key_challenge',
-      arguments: {},
-    })) as RpcResult
-    assert.equal(r.error, undefined)
-    const text = (r.result as { content: Array<{ text: string }> }).content[0].text
-    assert.match(text, /integration-challenge/)
-    assert.match(text, /"sawAuth": false/)
   })
 
   it('reads venice://models resource', async () => {

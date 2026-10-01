@@ -19,7 +19,7 @@ function setup(config = cfg) {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented default set (39 tools)', () => {
+  it('registers exactly the documented default set (38 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
@@ -58,13 +58,12 @@ describe('tools registry', () => {
       'venice_voice_clone',
       'venice_web_scrape',
       'venice_web_search',
-      'venice_web3_key_challenge',
       'venice_x402_balance',
       'venice_x402_top_up_info',
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 39)
+    assert.equal(tools.length, 38)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -415,13 +414,6 @@ const MAPPINGS: Mapping[] = [
     expectMethod: 'GET',
     expectPath: '/v1/api_keys/rate_limits/log',
   },
-  {
-    tool: 'venice_web3_key_challenge',
-    args: {},
-    expectMethod: 'GET',
-    expectPath: '/v1/api_keys/generate_web3_key',
-  },
-
   // x402 helpers
   {
     tool: 'venice_x402_balance',
@@ -704,17 +696,6 @@ describe('tool output shaping', () => {
       stub.calls.at(-1)?.path,
       '/v1/billing/usage-history?startTimestamp=2026-08-01T00%3A00%3A00.123456Z&endTimestamp=2026-08-02T00%3A00%3A00.1Z',
     )
-  })
-
-  it('retrieves a Web3 challenge without auth and without a private-key field', async () => {
-    const stub = new StubClient({
-      '/v1/api_keys/generate_web3_key': () => ({ success: true, data: { token: 'challenge-token' } }),
-    })
-    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_web3_key_challenge')!
-    assert.equal('private_key' in tool.inputSchema, false)
-    await tool.handler({} as never)
-    assert.equal(stub.calls.at(-1)?.method, 'GET')
-    assert.equal(stub.calls.at(-1)?.auth, 'none')
   })
 
   it('redacts unexpected secret fields from operator API-key reads', async () => {

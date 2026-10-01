@@ -151,7 +151,6 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
   if (path === '/v1/api_keys') return { object: 'list', data: [] }
   if (path === '/v1/api_keys/rate_limits') return { data: { accessPermitted: true, rateLimits: [] } }
   if (path === '/v1/api_keys/rate_limits/log') return { object: 'list', data: [] }
-  if (path === '/v1/api_keys/generate_web3_key') return { success: true, data: { token: 'stub-challenge' } }
   if (path.startsWith('/v1/api_keys/')) return { data: { id: path.split('/').at(-1), last6Chars: 'abc123' } }
   if (path.startsWith('/v1/x402/balance')) return { walletAddress: '0x', balanceUsd: 5.42, currency: 'USDC' }
   if (path.startsWith('/v1/x402/transactions')) return { transactions: [] }

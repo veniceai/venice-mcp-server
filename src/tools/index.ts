@@ -21,7 +21,6 @@
  *      - image/styles
  *      - audio/quote, video/quote
  *      - x402/top-up requirement discovery
- *      - api_keys/generate_web3_key challenge
  *      - tee/attestation, tee/signature
  *   👛 SIWX only:
  *      - x402/balance, x402/transactions
@@ -1262,7 +1261,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     },
 
     // ========================================================================
-    // API KEYS — safe reads + unauthenticated Web3 mint flow
+    // API KEYS — safe reads. Web3 challenge and mint live on a follow-up.
     // ========================================================================
 
     {
@@ -1334,26 +1333,6 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         }
       },
     },
-
-    {
-      name: 'venice_web3_key_challenge',
-      title: 'Venice Web3 API Key Challenge',
-      description: `Get the unauthenticated, short-lived token for autonomous API-key minting. Sign the raw token outside this server with an EVM wallet holding staked VVV; this server never accepts a private key.${NO_AUTH}`,
-      inputSchema: {},
-      handler: async () => {
-        try {
-          const resp = await client.get<unknown>(
-            '/v1/api_keys/generate_web3_key',
-            undefined,
-            { auth: 'none' },
-          )
-          return ok(JSON.stringify(resp, null, 2))
-        } catch (err) {
-          return fail(formatToolError(err))
-        }
-      },
-    },
-
 
     // ========================================================================
     // x402 wallet helpers — SIWX reads + auth-free top-up discovery

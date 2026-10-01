@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, billing, and operator APIs into any agent in 30 seconds. **39 tools (plus 1 opt-in), one config block.**
+Plug Venice's chat, image, video, audio, music, billing, and operator APIs into any agent in 30 seconds. **38 tools, one config block.**
 
 ## Quick start
 
@@ -36,7 +36,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**39 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**38 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
 
 ### 💬 Chat & embeddings
 
@@ -124,11 +124,8 @@ Usage-history continuation calls must send `cursor` without the original filters
 | `venice_get_api_key` | Get one key's metadata, usage, balances, and rate limits. ADMIN API key only. |
 | `venice_api_key_rate_limits` | Get current balances, access status, tier, and model limits. API key only. |
 | `venice_api_key_rate_limit_logs` | Get the last 50 exceeded rate-limit events. ADMIN API key only; experimental upstream. |
-| `venice_web3_key_challenge` | Get the unauthenticated 15-minute Web3 mint challenge. |
 
-`venice_web3_key_challenge` returns a challenge token and does not accept a private key. This server does not submit a signed mint. Create/update/delete key mutations are intentionally not exposed.
-
-List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_key_rate_limits` accepts an INFERENCE or ADMIN key. These tools never forward `SIGN-IN-WITH-X`.
+List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_key_rate_limits` accepts an INFERENCE or ADMIN key. These tools never forward `SIGN-IN-WITH-X`. Web3 challenge and mint are not registered here.
 
 ### 💳 x402 wallet helpers
 
@@ -255,7 +252,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 39 tools (+1 opt-in)│
+│  (Claude / Cursor /  ├────────────────────────▶│  - 38 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -331,12 +328,6 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_api_key_rate_limits` | `GET /v1/api_keys/rate_limits` (INFERENCE or ADMIN) |
 | `venice_api_key_rate_limit_logs` | `GET /v1/api_keys/rate_limits/log` (ADMIN) |
 
-### Web3 API-key challenge (auth-free)
-
-| Tool | Endpoint |
-|---|---|
-| `venice_web3_key_challenge` | `GET /v1/api_keys/generate_web3_key` |
-
 ### x402 wallet helpers (SIWX reads + auth-free discovery)
 
 | Tool | Endpoint |
@@ -368,7 +359,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # tool registry (39 tools) + endpoint/method/body mappings
+├── tools.test.ts              # tool registry (38 tools) + endpoint/method/body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub

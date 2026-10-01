@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 /**
- * COMPREHENSIVE end-to-end plan covering all 39 MCP tools against live Venice API.
+ * COMPREHENSIVE end-to-end plan covering all 38 MCP tools against live Venice API.
  *
  * Runs the same test plan twice — once with API key auth, once with x402 SIWX wallet auth —
  * and produces a side-by-side report showing which tools work in which mode.
@@ -316,12 +316,6 @@ function buildPlan(walletAddr: string): CallSpec[] {
       args: {},
       skipReason: 'safe default: would expose real account rate-limit events',
     },
-    {
-      name: 'venice_web3_key_challenge',
-      args: {},
-      skipReason: 'safe default: challenge token must not be printed in reports',
-    },
-
     // ============ x402 wallet helpers — SIWX-ONLY (will 402 on API key mode) ============
     {
       name: 'venice_x402_balance',
@@ -462,7 +456,7 @@ function summary(mode: string, results: ToolResult[]) {
 async function main() {
   const arg = process.argv[2] || 'both'
   const wallet = loadOrCreateWallet()
-  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 39 tools × auth modes ═══${COLORS.reset}`)
+  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 38 tools × auth modes ═══${COLORS.reset}`)
   console.log(`Venice base:   ${BASE_URL}`)
   console.log(`Test wallet:   ${wallet.address}\n`)
 
