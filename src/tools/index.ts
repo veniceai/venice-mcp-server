@@ -23,9 +23,16 @@
  *      - tee/attestation, tee/signature
  */
 import { z } from 'zod'
-import type { VeniceClient } from '../venice-client.js'
+import { collectSseDataEvents, type VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
+import {
+  E2EE_VENICE_PARAMETERS,
+  isUncompressedSecp256k1PublicKey,
+  modelSupportsE2ee,
+  validateE2eeChatRequest,
+  validateE2eeSseContent,
+} from '../e2ee.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -222,6 +229,18 @@ const chatToolChoiceSchema = z.union([
   }),
 ])
 
+const uncompressedSecp256k1KeySchema = z
+  .string()
+  .regex(/^04[0-9a-fA-F]{128}$/)
+  .refine(isUncompressedSecp256k1PublicKey, 'Not a point on the secp256k1 curve.')
+  .describe('Uncompressed secp256k1 public key: 130 hexadecimal characters beginning with 04, on the secp256k1 curve.')
+
+const e2eeHeadersSchema = z.object({
+  client_public_key: uncompressedSecp256k1KeySchema,
+  model_public_key: uncompressedSecp256k1KeySchema,
+  signing_algorithm: z.literal('ecdsa'),
+}).describe('TEE headers produced by a caller-side E2EE implementation after independently verifying attestation.')
+
 const responsesContentPartSchema = z.union([
   z.object({ type: z.enum(['input_text', 'text', 'output_text']), text: z.string() }),
   z.object({
@@ -285,10 +304,13 @@ const veniceParametersSchema = z
       .boolean()
       .optional()
       .describe('Turn reasoning off entirely on supported models, and strip the <think></think> blocks.'),
+    enable_e2ee: z
+      .boolean()
+      .optional()
+      .describe('Request E2EE on an E2EE-capable text model. This flag alone does not encrypt anything: the caller must verify attestation, encrypt/decrypt payloads, provide the required TEE headers, and verify the response signature.'),
   })
-  .strict()
   .optional()
-  .describe('Venice-only options: web search, citations, system prompt control, reasoning control, and characters.')
+  .describe('Venice-only options: web search, citations, system prompt control, reasoning control, characters, and E2EE enablement.')
 
 const responsesVeniceParametersSchema = z
   .object(sharedVeniceParameters)
@@ -306,7 +328,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. E2EE accepts only model, role/content messages, temperature, top_p, max_tokens, max_completion_tokens, and timeout_ms; every other field is rejected. Upstream SSE is returned unchanged in content[0].text only after ciphertext-shape and error-envelope checks. The server validates shape only (hex, on-curve ephemeral key, room for nonce and GCM tag): it does not decrypt, so it cannot prove content is encrypted, and it does not verify signatures or claim plaintext completion.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -328,18 +350,66 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         reasoning: reasoningSchema.optional(),
         reasoning_effort: reasoningEffortSchema.optional().describe('Takes precedence over reasoning.effort.'),
         venice_parameters: veniceParametersSchema,
+        e2ee_headers: e2eeHeadersSchema.optional().describe('Required exactly when enable_e2ee is true. Forwards the documented X-Venice-TEE-* headers; the server does not verify these keys or perform encryption.'),
         timeout_ms: z
           .number()
           .int()
           .min(1_000)
           .max(600_000)
           .optional()
-          .describe('Upstream timeout for this call, covering the full response body. Long generations may need more than the VENICE_HTTP_TIMEOUT_MS default.'),
+          .describe('Upstream timeout for this call, covering the full response body. E2EE streams are buffered until [DONE], so long generations may need more than the VENICE_HTTP_TIMEOUT_MS default.'),
       },
       handler: async (args) => {
         try {
-          if (args.venice_parameters && 'enable_e2ee' in args.venice_parameters) {
-            return fail('E2EE is not available from this server. venice_chat does not accept enable_e2ee.')
+          const e2eeEnabled = args.venice_parameters?.enable_e2ee === true
+          const parsedE2eeHeaders = e2eeHeadersSchema.safeParse(args.e2ee_headers)
+          if (e2eeEnabled && !parsedE2eeHeaders.success) {
+            return fail('E2EE requires the complete validated e2ee_headers bundle; both public keys must be uncompressed points on secp256k1.')
+          }
+          if (!e2eeEnabled && args.e2ee_headers !== undefined) {
+            return fail('e2ee_headers may only be supplied when venice_parameters.enable_e2ee is true.')
+          }
+
+          if (e2eeEnabled && parsedE2eeHeaders.success) {
+            const requestError = validateE2eeChatRequest(args)
+            if (requestError) return fail(requestError)
+
+            const model = args.model!.trim()
+            const catalog = await client.get<unknown>('/v1/models')
+            if (!modelSupportsE2ee(model, catalog)) {
+              return fail(`E2EE requires an explicit catalog model with supportsE2EE; "${model}" is not E2EE-capable.`)
+            }
+
+            const body = {
+              model,
+              messages: args.messages,
+              temperature: args.temperature,
+              max_tokens: args.max_tokens,
+              max_completion_tokens: args.max_completion_tokens,
+              top_p: args.top_p,
+              venice_parameters: E2EE_VENICE_PARAMETERS,
+              stream: true,
+            }
+            const headers = {
+              'X-Venice-TEE-Client-Pub-Key': parsedE2eeHeaders.data.client_public_key,
+              'X-Venice-TEE-Model-Pub-Key': parsedE2eeHeaders.data.model_public_key,
+              'X-Venice-TEE-Signing-Algo': parsedE2eeHeaders.data.signing_algorithm,
+            }
+            const rawSse = await client.postEventStream('/v1/chat/completions', body, headers, {
+              timeoutMs: args.timeout_ms,
+            })
+            const responseError = validateE2eeSseContent(collectSseDataEvents(rawSse))
+            if (responseError) return fail(responseError)
+            return {
+              content: [{ type: 'text', text: rawSse }],
+              structuredContent: {
+                transport: 'sse',
+                media_type: 'text/event-stream',
+                ciphertext_shape_valid: true,
+                byte_length: Buffer.byteLength(rawSse, 'utf8'),
+                framing: 'content[0].text is the complete upstream SSE stream, including data lines, event separators, and [DONE].',
+              },
+            }
           }
 
           const body = {
@@ -379,7 +449,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_responses',
       title: 'Venice Responses API',
-      description: `Alpha, stateless OpenAI-compatible Responses API for Venice text models. Supports text/image input and reasoning controls, but this MCP tool does not advertise tool calling because the endpoint does not reliably accept those fields. E2EE-capable models are not supported.${nsfwNote}${X402_OK}`,
+      description: `Alpha, stateless OpenAI-compatible Responses API for Venice text models. Supports text/image input and reasoning controls, but this MCP tool does not advertise tool calling because the endpoint does not reliably accept those fields. E2EE-capable models are not supported; use venice_chat for E2EE.${nsfwNote}${X402_OK}`,
       inputSchema: {
         input: z
           .union([

@@ -3,8 +3,14 @@ import assert from 'node:assert/strict'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import path from 'node:path'
 import { startMockVenice, type MockVeniceServer } from './helpers/mock-venice-server.js'
+import { e2eeSession } from './helpers/e2ee-fixtures.js'
 
 const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname)
+const INTEGRATION_E2EE = e2eeSession()
+const INTEGRATION_ENCRYPTED_CHUNK = INTEGRATION_E2EE.encryptToClient('y'.repeat(12_000))
+const INTEGRATION_RAW_SSE =
+  `event: message\r\ndata: {"choices":[{"delta":{"content":"${INTEGRATION_ENCRYPTED_CHUNK}"}}]}\r\n\r\n` +
+  'data: [DONE]\r\n\r\n'
 
 /**
  * Wraps a child process speaking JSON-RPC over stdio.
@@ -97,6 +103,13 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
       {
         match: 'POST /v1/chat/completions',
         reply: ({ headers, body }) => {
+          if ((body as { stream?: boolean }).stream === true) {
+            return {
+              __status: 200,
+              __rawBody: INTEGRATION_RAW_SSE,
+              __headers: { 'content-type': 'text/event-stream; charset=utf-8' },
+            }
+          }
           return {
             choices: [
               {
@@ -244,19 +257,91 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(call.headers.accept, 'application/json')
   })
 
-  it('rejects enable_e2ee over MCP without contacting chat completions', async () => {
+  it('forwards a valid E2EE chat over MCP after catalog and ciphertext checks', async () => {
+    const arguments_ = {
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: INTEGRATION_E2EE.encryptToModel('integration prompt') }],
+      max_completion_tokens: 321,
+      temperature: 0.2,
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: {
+        client_public_key: INTEGRATION_E2EE.headers.client_public_key,
+        model_public_key: INTEGRATION_E2EE.headers.model_public_key,
+        signing_algorithm: 'ecdsa',
+      },
+    }
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_chat',
+      arguments: arguments_,
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as {
+      isError?: boolean
+      content: Array<{ text: string }>
+      structuredContent: { transport: string; ciphertext_shape_valid: boolean; byte_length: number }
+    }
+    assert.equal(result.isError, undefined)
+    const call = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').at(-1)!
+    assert.deepEqual(call.body, {
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: arguments_.messages,
+      temperature: 0.2,
+      max_completion_tokens: 321,
+      venice_parameters: { enable_e2ee: true, include_venice_system_prompt: false, enable_web_search: 'off' },
+      stream: true,
+    })
+    assert.equal(call.headers['x-venice-tee-client-pub-key'], arguments_.e2ee_headers.client_public_key)
+    assert.equal(call.headers['x-venice-tee-model-pub-key'], arguments_.e2ee_headers.model_public_key)
+    assert.equal(call.headers['x-venice-tee-signing-algo'], 'ecdsa')
+    assert.equal(call.headers.accept, 'text/event-stream')
+    assert.equal(result.content[0].text, INTEGRATION_RAW_SSE)
+    assert.equal(result.structuredContent.transport, 'sse')
+    assert.equal(result.structuredContent.ciphertext_shape_valid, true)
+    assert.equal(result.structuredContent.byte_length, Buffer.byteLength(INTEGRATION_RAW_SSE))
+  })
+
+  it('rejects E2EE plaintext and file payloads over MCP without contacting chat completions', async () => {
     const beforeCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
     const r = (await rpc.request('tools/call', {
       name: 'venice_chat',
       arguments: {
-        messages: [{ role: 'user', content: 'hello' }],
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Inspect' },
+            { type: 'file', file: { file_data: 'https://example.com/report.pdf', filename: 'report.pdf' } },
+          ],
+        }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: {
+          client_public_key: INTEGRATION_E2EE.headers.client_public_key,
+          model_public_key: INTEGRATION_E2EE.headers.model_public_key,
+          signing_algorithm: 'ecdsa',
+        },
+      },
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as { isError?: boolean; content: Array<{ text: string }> }
+    assert.equal(result.isError, true)
+    assert.match(result.content[0].text, /encrypted hex ciphertext/)
+    const afterCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
+    assert.equal(afterCalls, beforeCalls)
+  })
+
+  it('rejects incoherent E2EE inputs over MCP without contacting Venice', async () => {
+    const beforeCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_chat',
+      arguments: {
+        messages: [{ role: 'user', content: 'encrypted' }],
         venice_parameters: { enable_e2ee: true },
       },
     })) as RpcResult
     assert.equal(r.error, undefined)
     const result = r.result as { isError?: boolean; content: Array<{ text: string }> }
     assert.equal(result.isError, true)
-    assert.match(result.content[0].text, /enable_e2ee/)
+    assert.match(result.content[0].text, /complete validated e2ee_headers bundle/)
     const afterCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
     assert.equal(afterCalls, beforeCalls)
   })

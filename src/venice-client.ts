@@ -164,6 +164,26 @@ export class VeniceClient {
   }
 
   /**
+   * POST JSON and preserve the complete SSE response as UTF-8 text.
+   * No SSE framing or data payload is parsed or normalized.
+   */
+  postEventStream(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'timeoutMs' | 'maxResponseBytes'> = {},
+  ): Promise<string> {
+    return this.request<string>(path, {
+      method: 'POST',
+      json,
+      headers,
+      responseType: 'event-stream',
+      timeoutMs: opts.timeoutMs,
+      maxResponseBytes: opts.maxResponseBytes ?? DEFAULT_MAX_EVENT_STREAM_BYTES,
+    })
+  }
+
+  /**
    * POST a multipart/form-data body. Used by endpoints that require file upload
    * (image/edit, image/upscale, image/multi-edit, image/background-remove,
    * audio/transcriptions, audio/voices, augment/text-parser).
