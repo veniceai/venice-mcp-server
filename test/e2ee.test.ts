@@ -156,15 +156,22 @@ describe('E2EE contract helpers', () => {
     assert.equal(
       validateE2eeChatRequest({
         ...base,
-        temperature: 0.5,
-        top_p: 0.9,
-        max_tokens: 10,
-        max_completion_tokens: 20,
         e2ee_headers: {},
         timeout_ms: 120_000,
       }),
       undefined,
     )
+    for (const [key, value] of [
+      ['temperature', 0.5],
+      ['top_p', 0.9],
+      ['max_tokens', 10],
+      ['max_completion_tokens', 20],
+    ] as const) {
+      assert.match(
+        validateE2eeChatRequest({ ...base, [key]: value }) ?? '',
+        new RegExp(`E2EE does not apply ${key}`),
+      )
+    }
     const leaking: Array<[string, unknown]> = [
       ['stop', ['PLAIN STOP']],
       ['stop', 'PLAIN STOP'],

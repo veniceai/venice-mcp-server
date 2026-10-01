@@ -9,7 +9,7 @@ const REPO_ROOT = path.resolve(new URL('..', import.meta.url).pathname)
 const INTEGRATION_E2EE = e2eeSession()
 const INTEGRATION_ENCRYPTED_CHUNK = INTEGRATION_E2EE.encryptToClient('y'.repeat(12_000))
 const INTEGRATION_RAW_SSE =
-  `event: message\r\ndata: {"choices":[{"delta":{"content":"${INTEGRATION_ENCRYPTED_CHUNK}"}}]}\r\n\r\n` +
+  `event: message\r\ndata: {"id":"chatcmpl-integration","choices":[{"delta":{"content":"${INTEGRATION_ENCRYPTED_CHUNK}"}}]}\r\n\r\n` +
   'data: [DONE]\r\n\r\n'
 
 /**
@@ -261,8 +261,6 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     const arguments_ = {
       model: 'e2ee-qwen3-5-122b-a10b',
       messages: [{ role: 'user', content: INTEGRATION_E2EE.encryptToModel('integration prompt') }],
-      max_completion_tokens: 321,
-      temperature: 0.2,
       venice_parameters: { enable_e2ee: true },
       e2ee_headers: {
         client_public_key: INTEGRATION_E2EE.headers.client_public_key,
@@ -278,15 +276,13 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     const result = r.result as {
       isError?: boolean
       content: Array<{ text: string }>
-      structuredContent: { transport: string; ciphertext_shape_valid: boolean; byte_length: number }
+      structuredContent: { id: string; deltas: Array<{ content: string }>; ciphertext_shape_valid: boolean }
     }
     assert.equal(result.isError, undefined)
     const call = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').at(-1)!
     assert.deepEqual(call.body, {
       model: 'e2ee-qwen3-5-122b-a10b',
       messages: arguments_.messages,
-      temperature: 0.2,
-      max_completion_tokens: 321,
       venice_parameters: { enable_e2ee: true, include_venice_system_prompt: false, enable_web_search: 'off' },
       stream: true,
     })
@@ -294,10 +290,13 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(call.headers['x-venice-tee-model-pub-key'], arguments_.e2ee_headers.model_public_key)
     assert.equal(call.headers['x-venice-tee-signing-algo'], 'ecdsa')
     assert.equal(call.headers.accept, 'text/event-stream')
-    assert.equal(result.content[0].text, INTEGRATION_RAW_SSE)
-    assert.equal(result.structuredContent.transport, 'sse')
+    assert.deepEqual(JSON.parse(result.content[0].text), {
+      id: 'chatcmpl-integration',
+      deltas: [{ content: INTEGRATION_ENCRYPTED_CHUNK }],
+    })
+    assert.equal(result.structuredContent.id, 'chatcmpl-integration')
+    assert.deepEqual(result.structuredContent.deltas, [{ content: INTEGRATION_ENCRYPTED_CHUNK }])
     assert.equal(result.structuredContent.ciphertext_shape_valid, true)
-    assert.equal(result.structuredContent.byte_length, Buffer.byteLength(INTEGRATION_RAW_SSE))
   })
 
   it('rejects E2EE plaintext and file payloads over MCP without contacting chat completions', async () => {

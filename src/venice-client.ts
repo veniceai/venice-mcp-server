@@ -18,8 +18,8 @@ export interface RequestInitJSON {
   maxResponseBytes?: number
 }
 
-/** Cap on a buffered SSE body; the whole stream is held in memory and returned as one MCP text block. */
-export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
+/** Cap on a buffered SSE body. The E2EE tool returns compact deltas, not this raw buffer. */
+export const DEFAULT_MAX_EVENT_STREAM_BYTES = 1024 * 1024
 
 /**
  * Thin HTTP client over the Venice API.

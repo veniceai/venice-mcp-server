@@ -27,6 +27,7 @@ import { collectSseDataEvents, type VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
 import {
+  compactE2eeStream,
   E2EE_VENICE_PARAMETERS,
   isUncompressedSecp256k1PublicKey,
   modelSupportsE2ee,
@@ -328,7 +329,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. E2EE accepts only model, role/content messages, temperature, top_p, max_tokens, max_completion_tokens, and timeout_ms; every other field is rejected. Upstream SSE is returned unchanged in content[0].text only after ciphertext-shape and error-envelope checks. The server validates shape only (hex, on-curve ephemeral key, room for nonce and GCM tag): it does not decrypt, so it cannot prove content is encrypted, and it does not verify signatures or claim plaintext completion.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Plaintext calls are non-streaming. E2EE calls require enable_e2ee, e2ee_headers, an explicit catalog model with supportsE2EE, and encrypted hex user/system content. E2EE accepts only model, role/content messages, and timeout_ms; temperature, top_p, max_tokens, and max_completion_tokens are rejected because upstream does not apply them. The result is compact JSON {id, deltas} after ciphertext-shape and error-envelope checks. The server validates shape only (hex, on-curve ephemeral key, room for nonce and GCM tag): it does not decrypt, so it cannot prove content is encrypted, and it does not verify signatures or claim plaintext completion.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -383,10 +384,6 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             const body = {
               model,
               messages: args.messages,
-              temperature: args.temperature,
-              max_tokens: args.max_tokens,
-              max_completion_tokens: args.max_completion_tokens,
-              top_p: args.top_p,
               venice_parameters: E2EE_VENICE_PARAMETERS,
               stream: true,
             }
@@ -398,16 +395,17 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             const rawSse = await client.postEventStream('/v1/chat/completions', body, headers, {
               timeoutMs: args.timeout_ms,
             })
-            const responseError = validateE2eeSseContent(collectSseDataEvents(rawSse))
+            const dataEvents = collectSseDataEvents(rawSse)
+            const responseError = validateE2eeSseContent(dataEvents)
             if (responseError) return fail(responseError)
+            const compact = compactE2eeStream(dataEvents)
+            if (typeof compact === 'string') return fail(compact)
             return {
-              content: [{ type: 'text', text: rawSse }],
+              content: [{ type: 'text', text: JSON.stringify({ id: compact.id, deltas: compact.deltas }) }],
               structuredContent: {
-                transport: 'sse',
-                media_type: 'text/event-stream',
+                id: compact.id,
+                deltas: compact.deltas,
                 ciphertext_shape_valid: true,
-                byte_length: Buffer.byteLength(rawSse, 'utf8'),
-                framing: 'content[0].text is the complete upstream SSE stream, including data lines, event separators, and [DONE].',
               },
             }
           }

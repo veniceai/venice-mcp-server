@@ -495,9 +495,35 @@ describe('chat and responses request contracts', () => {
       'X-Venice-TEE-Signing-Algo': 'ecdsa',
     })
     assert.equal(chatCall.eventStream, true)
-    assert.equal((result.structuredContent as { transport: string }).transport, 'sse')
-    assert.equal((result.structuredContent as { ciphertext_shape_valid: boolean }).ciphertext_shape_valid, true)
-    assert.equal((result.content[0] as { text: string }).text, DEFAULT_E2EE_SSE)
+    const payload = JSON.parse((result.content[0] as { text: string }).text) as {
+      id: string
+      deltas: Array<{ content?: string }>
+    }
+    assert.equal(payload.id, 'chatcmpl-stub')
+    assert.equal(payload.deltas.length, 1)
+    assert.match(DEFAULT_E2EE_SSE, new RegExp(payload.deltas[0].content!))
+    assert.doesNotMatch((result.content[0] as { text: string }).text, /data: \[DONE\]/)
+    const structured = result.structuredContent as { id: string; deltas: unknown; ciphertext_shape_valid: boolean }
+    assert.equal(structured.id, 'chatcmpl-stub')
+    assert.deepEqual(structured.deltas, payload.deltas)
+    assert.equal(structured.ciphertext_shape_valid, true)
+  })
+
+  it('rejects E2EE sampling limits before any completion request', async () => {
+    for (const extra of [{ temperature: 0.2 }, { max_tokens: 32 }, { top_p: 0.9 }, { max_completion_tokens: 32 }]) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+      const result = await tool.handler({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+        ...extra,
+      } as never)
+      assert.equal(result.isError, true, JSON.stringify(extra))
+      assert.match((result.content[0] as { text: string }).text, /would be silently ignored/)
+      assert.equal(stub.calls.length, 0, JSON.stringify(extra))
+    }
   })
 
   it('forwards a bounded per-call timeout_ms to both chat transports', async () => {
@@ -540,10 +566,10 @@ describe('chat and responses request contracts', () => {
     })
   })
 
-  it('returns long encrypted SSE byte-for-byte without normal completion parsing or truncation', async () => {
+  it('returns compact ciphertext deltas instead of the raw SSE buffer', async () => {
     const encrypted = STUB_E2EE.encryptToClient('x'.repeat(12_000))
     const rawSse =
-      `event: message\r\ndata: {"choices":[{"delta":{"content":"${encrypted}"}}]}\r\n\r\n` +
+      `event: message\r\ndata: {"id":"chatcmpl-long","choices":[{"delta":{"content":"${encrypted}"}}]}\r\n\r\n` +
       'data: [DONE]\r\n\r\n'
     const stub = new StubClient({ '/v1/chat/completions': () => rawSse })
     const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
@@ -554,8 +580,9 @@ describe('chat and responses request contracts', () => {
       e2ee_headers: E2EE_HEADERS,
     } as never)
     assert.equal(result.isError, undefined)
-    assert.equal((result.content[0] as { text: string }).text, rawSse)
-    assert.equal((result.structuredContent as { byte_length: number }).byte_length, Buffer.byteLength(rawSse))
+    const text = (result.content[0] as { text: string }).text
+    assert.doesNotMatch(text, /data: \[DONE\]/)
+    assert.deepEqual(JSON.parse(text), { id: 'chatcmpl-long', deltas: [{ content: encrypted }] })
     assert.equal((result.structuredContent as { message?: unknown }).message, undefined)
     assert.equal((result.structuredContent as { ciphertext_shape_valid: boolean }).ciphertext_shape_valid, true)
   })

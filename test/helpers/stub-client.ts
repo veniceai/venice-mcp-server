@@ -3,7 +3,7 @@ import { e2eeSession } from './e2ee-fixtures.js'
 
 export const STUB_E2EE = e2eeSession()
 export const STUB_E2EE_SSE =
-  `data: {"choices":[{"delta":{"content":"${STUB_E2EE.encryptToClient('stub reply')}"}}]}\n\ndata: [DONE]\n\n`
+  `data: {"id":"chatcmpl-stub","choices":[{"index":0,"delta":{"content":"${STUB_E2EE.encryptToClient('stub reply')}"}}]}\n\ndata: [DONE]\n\n`
 
 export interface StubCall {
   method: 'GET' | 'POST'

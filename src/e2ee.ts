@@ -50,14 +50,16 @@ export function modelSupportsE2ee(modelId: string, catalog: unknown): boolean {
 const E2EE_REQUEST_KEYS = new Set([
   'model',
   'messages',
-  'temperature',
-  'top_p',
-  'max_tokens',
-  'max_completion_tokens',
   'venice_parameters',
   'e2ee_headers',
   'timeout_ms',
 ])
+
+/**
+ * Upstream builds a minimal E2EE provider body (model, messages, stream) and
+ * drops these. Accepting them would look like a cap that is never applied.
+ */
+const E2EE_IGNORED_SAMPLING_KEYS = ['temperature', 'top_p', 'max_tokens', 'max_completion_tokens'] as const
 
 /** The only venice_parameters values accepted on the E2EE path. */
 const E2EE_VENICE_PARAMETER_VALUES: Readonly<Record<string, unknown>> = {
@@ -104,6 +106,11 @@ export function validateE2eeChatRequest(args: {
   if (args.response_format !== undefined) {
     return 'E2EE does not support structured output; response_format is rejected in full, including json_object and text. A schema would travel to the API as plaintext outside the enclave trust boundary, and the E2EE request would not honour it.'
   }
+  for (const key of E2EE_IGNORED_SAMPLING_KEYS) {
+    if (args[key] !== undefined) {
+      return `E2EE does not apply ${key}. Upstream sends only model, messages, and stream for an E2EE completion, so this value would be silently ignored.`
+    }
+  }
 
   const venice = args.venice_parameters
   if (venice) {
@@ -129,7 +136,7 @@ export function validateE2eeChatRequest(args: {
 
   for (const [key, value] of Object.entries(args)) {
     if (value === undefined || E2EE_REQUEST_KEYS.has(key)) continue
-    return `E2EE does not allow "${key}": it would travel to the API as plaintext outside the enclave trust boundary. Only model, messages, temperature, top_p, max_tokens, max_completion_tokens, and timeout_ms may accompany encrypted messages.`
+    return `E2EE does not allow "${key}": it would travel to the API as plaintext outside the enclave trust boundary. Only model, messages, and timeout_ms may accompany encrypted messages.`
   }
 
   if (!Array.isArray(args.messages)) {
@@ -140,6 +147,43 @@ export function validateE2eeChatRequest(args: {
     if (messageError) return messageError
   }
   return undefined
+}
+
+export interface E2eeStreamDelta {
+  content?: string
+  reasoning_content?: string
+}
+
+/** Ciphertext deltas plus the completion id needed by venice_tee_signature. */
+export function compactE2eeStream(dataEvents: readonly string[]): { id: string; deltas: E2eeStreamDelta[] } | string {
+  let id: string | undefined
+  const deltas: E2eeStreamDelta[] = []
+  for (const data of dataEvents) {
+    if (data === '[DONE]') continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(data)
+    } catch {
+      continue
+    }
+    if (!isRecord(parsed)) continue
+    if (typeof parsed.id === 'string' && parsed.id !== '') {
+      if (id === undefined) id = parsed.id
+      else if (id !== parsed.id) return 'E2EE stream changed completion id mid-stream; refusing to return it.'
+    }
+    if (!Array.isArray(parsed.choices)) continue
+    for (const choice of parsed.choices) {
+      if (!isRecord(choice) || !isRecord(choice.delta)) continue
+      const delta: E2eeStreamDelta = {}
+      if (typeof choice.delta.content === 'string' && choice.delta.content !== '') delta.content = choice.delta.content
+      if (typeof choice.delta.reasoning_content === 'string' && choice.delta.reasoning_content !== '') {
+        delta.reasoning_content = choice.delta.reasoning_content
+      }
+      if (delta.content !== undefined || delta.reasoning_content !== undefined) deltas.push(delta)
+    }
+  }
+  if (id === undefined) return 'E2EE stream did not include a completion id, which venice_tee_signature requires.'
+  return { id, deltas }
 }
 
 export function validateE2eeSseContent(dataEvents: readonly string[]): string | undefined {
