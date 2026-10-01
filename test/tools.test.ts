@@ -2,11 +2,16 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
+import { getSucceededWeb3Mint, resetWeb3MintAttemptStore } from '../src/tools/web3-key-mint.js'
 import { loadConfig } from '../src/config.js'
+import { VeniceClient } from '../src/venice-client.js'
 import { VeniceUpstreamError } from '../src/types.js'
 import { StubClient } from './helpers/stub-client.js'
+import { startMockVenice } from './helpers/mock-venice-server.js'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
+const mintCfg = loadConfig({ VENICE_API_KEY: 'test-key', VENICE_MCP_ENABLE_WEB3_MINT: '1' })
+
 function setup(config = cfg) {
   const stub = new StubClient()
   const tools = buildTools(stub.asClient(), config)
@@ -65,6 +70,23 @@ describe('tools registry', () => {
     ].sort()
     assert.deepEqual(names, expected)
     assert.equal(tools.length, 39)
+  })
+
+  it('registers venice_web3_key_mint only when VENICE_MCP_ENABLE_WEB3_MINT=1', () => {
+    const client = new StubClient().asClient()
+    for (const value of [undefined, '0', 'true']) {
+      const names = buildTools(client, loadConfig({ VENICE_MCP_ENABLE_WEB3_MINT: value })).map((t) => t.name)
+      assert.equal(names.includes('venice_web3_key_mint'), false, `enabled by ${value}`)
+    }
+    const enabled = buildTools(client, mintCfg)
+    assert.equal(enabled.length, 40)
+    const mint = enabled.find((t) => t.name === 'venice_web3_key_mint')!
+    assert.deepEqual(mint.annotations, {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    })
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -421,6 +443,24 @@ const MAPPINGS: Mapping[] = [
     expectMethod: 'GET',
     expectPath: '/v1/api_keys/generate_web3_key',
   },
+  {
+    tool: 'venice_web3_key_mint',
+    args: {
+      address: `0x${'a'.repeat(40)}`,
+      signature: '0xsigned',
+      token: 'challenge',
+      api_key_type: 'INFERENCE',
+      consumption_limit: { usd: 50, diem: 10 },
+      limit_period: 'MONTH',
+    },
+    expectMethod: 'POST',
+    expectPath: '/v1/api_keys/generate_web3_key',
+    expectBodyContains: {
+      apiKeyType: 'INFERENCE',
+      consumptionLimit: { usd: 50, diem: 10 },
+      limitPeriod: 'MONTH',
+    },
+  },
 
   // x402 helpers
   {
@@ -448,7 +488,7 @@ describe('tools endpoint + method mapping', () => {
   for (const m of MAPPINGS) {
     it(`${m.tool} → ${m.expectMethod} ${m.expectPath}`, async () => {
       const stub = new StubClient()
-      const tools = buildTools(stub.asClient(), cfg)
+      const tools = buildTools(stub.asClient(), mintCfg)
       const t = tools.find((x) => x.name === m.tool)
       if (!t) throw new Error(`tool missing: ${m.tool}`)
       const originalFetch = globalThis.fetch
@@ -457,6 +497,7 @@ describe('tools endpoint + method mapping', () => {
         venice_asr: 'audio/wav',
         venice_text_parser: 'application/pdf',
       }
+      resetWeb3MintAttemptStore()
       try {
         if (uploadContentTypes[m.tool]) {
           globalThis.fetch = (async () =>
@@ -687,6 +728,522 @@ describe('tool output shaping', () => {
     assert.equal(stub.calls.length, 0)
   })
 
+  it('uses unauthenticated Web3 challenge/mint calls without accepting a private-key field', async () => {
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) =>
+        method === 'POST'
+          ? { success: true, data: { apiKey: 'vk_new_secret', apiKeyType: 'INFERENCE', id: 'key-1' } }
+          : { success: true, data: { token: 'challenge-token' } },
+    })
+    const tools = buildTools(stub.asClient(), mintCfg)
+    const challenge = tools.find((tool) => tool.name === 'venice_web3_key_challenge')!
+    const mint = tools.find((tool) => tool.name === 'venice_web3_key_mint')!
+    assert.equal('private_key' in mint.inputSchema, false)
+    assert.equal('privateKey' in mint.inputSchema, false)
+
+    await challenge.handler({} as never)
+    assert.equal(stub.calls.at(-1)?.auth, 'none')
+
+    resetWeb3MintAttemptStore()
+    const result = await mint.handler({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    assert.equal(stub.calls.at(-1)?.auth, 'none')
+    assert.equal((stub.calls.at(-1)?.body as { apiKeyType?: string }).apiKeyType, 'INFERENCE')
+    assert.equal((stub.calls.at(-1)?.body as { limitPeriod?: string }).limitPeriod, 'LIFETIME')
+    assert.match((result.content[0] as { text: string }).text, /vk_new_secret/)
+    assert.equal(result.structuredContent, undefined)
+
+    const schema = z.object(mint.inputSchema)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      api_key_type: 'ADMIN',
+      consumption_limit: { usd: 25 },
+    }).success, false)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+    }).success, false)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      consumption_limit: { usd: 0, diem: null },
+    }).success, false)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      description: 'x'.repeat(64),
+      consumption_limit: { usd: 25 },
+    }).success, true)
+    assert.equal(schema.safeParse({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+      description: 'x'.repeat(65),
+      consumption_limit: { usd: 25 },
+    }).success, false)
+  })
+
+  it('rejects retired VCU consumption limits and requires a positive usd cap within the ceiling', () => {
+    const { get } = setup(mintCfg)
+    const mint = get('venice_web3_key_mint')
+    const schema = z.object(mint.inputSchema)
+    const base = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'challenge-token',
+    }
+    const messagesOf = (result: ReturnType<typeof schema.safeParse>): string =>
+      result.success ? '' : result.error.issues.map((issue) => issue.message).join(' | ')
+
+    const vcuOnly = schema.safeParse({ ...base, consumption_limit: { vcu: 1 } })
+    assert.equal(vcuOnly.success, false)
+    assert.match(messagesOf(vcuOnly), /VCU consumption limits are retired/)
+
+    // A vcu value is rejected even when it rides along with a valid usd cap,
+    // so the caller never believes a retired currency was accepted.
+    const vcuWithUsd = schema.safeParse({ ...base, consumption_limit: { usd: 25, vcu: 1 } })
+    assert.equal(vcuWithUsd.success, false)
+    assert.match(messagesOf(vcuWithUsd), /VCU consumption limits are retired/)
+
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25 } }).success, true)
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 50, diem: 50 } }).success, true)
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: null } }).success, true)
+
+    for (const uncappedUsd of [{ diem: 10 }, { usd: null, diem: 10 }, { usd: 0, diem: null }]) {
+      const result = schema.safeParse({ ...base, consumption_limit: uncappedUsd })
+      assert.equal(result.success, false, JSON.stringify(uncappedUsd))
+      assert.match(messagesOf(result), /A positive usd consumption limit is required/)
+    }
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: 0 } }).success, false)
+
+    const overUsd = schema.safeParse({ ...base, consumption_limit: { usd: 50.01 } })
+    assert.equal(overUsd.success, false)
+    assert.match(messagesOf(overUsd), /VENICE_MCP_MAX_MINT_USD/)
+    const overDiem = schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: 51 } })
+    assert.equal(overDiem.success, false)
+    assert.match(messagesOf(overDiem), /VENICE_MCP_MAX_MINT_DIEM/)
+
+    assert.match(mint.description, /positive usd consumption_limit of at most 50 is always required/)
+    assert.match(mint.description, /VCU limits are rejected/)
+  })
+
+  it('applies configured mint ceilings to the schema', () => {
+    const raised = loadConfig({
+      VENICE_MCP_ENABLE_WEB3_MINT: '1',
+      VENICE_MCP_MAX_MINT_USD: '200',
+      VENICE_MCP_MAX_MINT_DIEM: '5',
+    })
+    const mint = buildTools(new StubClient().asClient(), raised).find((t) => t.name === 'venice_web3_key_mint')!
+    const schema = z.object(mint.inputSchema)
+    const base = { address: `0x${'a'.repeat(40)}`, signature: 'signed-value', token: 'challenge-token' }
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 200 } }).success, true)
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 201 } }).success, false)
+    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: 6 } }).success, false)
+  })
+
+  it('withholds the secret when the minted key does not match the requested restrictions', async () => {
+    const mismatches = [
+      { apiKeyType: 'ADMIN', consumptionLimit: { usd: 25, diem: null }, limitPeriod: 'LIFETIME' },
+      { apiKeyType: 'INFERENCE', consumptionLimit: { usd: null, diem: null }, limitPeriod: 'LIFETIME' },
+      { apiKeyType: 'INFERENCE', consumptionLimit: { usd: 25, diem: 3 }, limitPeriod: 'LIFETIME' },
+      { apiKeyType: 'INFERENCE', consumptionLimit: { usd: 25, diem: null }, limitPeriod: 'EPOCH' },
+      { consumptionLimit: { usd: 25 }, limitPeriod: 'LIFETIME' },
+    ]
+    for (const [index, fields] of mismatches.entries()) {
+      resetWeb3MintAttemptStore()
+      let posts = 0
+      const stub = new StubClient({
+        '/v1/api_keys/generate_web3_key': () => {
+          posts += 1
+          return { success: true, data: { apiKey: 'vk_wrong_key_secret', id: `key-wrong-${index}`, ...fields } }
+        },
+      })
+      const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+      const args = {
+        address: `0x${'a'.repeat(40)}`,
+        signature: 'signed-value',
+        token: `mismatch-token-${index}`,
+        consumption_limit: { usd: 25 },
+      } as never
+
+      const result = await mint.handler(args)
+      const text = (result.content[0] as { text: string }).text
+      assert.equal(result.isError, true, JSON.stringify(fields))
+      assert.doesNotMatch(text, /vk_wrong_key_secret/)
+      assert.match(text, new RegExp(`key-wrong-${index}`))
+      assert.match(text, /Revoke/)
+
+      const retry = await mint.handler(args)
+      assert.equal(retry.isError, true)
+      assert.doesNotMatch((retry.content[0] as { text: string }).text, /vk_wrong_key_secret/)
+      assert.equal(posts, 1)
+    }
+  })
+
+  it('accepts a minted key whose returned restrictions match the request', async () => {
+    resetWeb3MintAttemptStore()
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': () => ({
+        success: true,
+        data: {
+          apiKey: 'vk_matching_secret',
+          apiKeyType: 'INFERENCE',
+          id: 'key-match',
+          consumptionLimit: { usd: 25, diem: 10, vcu: null },
+          limitPeriod: 'MONTH',
+        },
+      }),
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const result = await mint.handler({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'matching-token',
+      consumption_limit: { usd: 25, diem: 10 },
+      limit_period: 'MONTH',
+    } as never)
+    assert.equal(result.isError, undefined)
+    assert.match((result.content[0] as { text: string }).text, /vk_matching_secret/)
+  })
+
+  it('marks a mint that never settles as an unknown outcome instead of unlocking it', async (t) => {
+    resetWeb3MintAttemptStore()
+    t.mock.timers.enable({ apis: ['Date'], now: 0 })
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': () => {
+        posts += 1
+        return new Promise(() => {})
+      },
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const address = `0x${'a'.repeat(40)}`
+    void mint.handler({ address, signature: 'signed-value', token: 'hung-token', consumption_limit: { usd: 25 } } as never)
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(posts, 1)
+
+    t.mock.timers.setTime(16 * 60 * 1000)
+    const retry = await mint.handler({
+      address,
+      signature: 'signed-value',
+      token: 'hung-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    assert.equal(retry.isError, true)
+    assert.match((retry.content[0] as { text: string }).text, /Mint outcome is unknown/)
+    const fresh = await mint.handler({
+      address,
+      signature: 'signed-value',
+      token: 'new-challenge-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    assert.equal(fresh.isError, true)
+    assert.match((fresh.content[0] as { text: string }).text, /new challenge will not mint/)
+    assert.equal(posts, 1)
+  })
+
+  it('replays a successful web3 mint for the same challenge token without creating another key', async () => {
+    resetWeb3MintAttemptStore()
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) =>
+        method === 'POST' ? { success: true, data: { apiKey: 'vk_replay_secret', apiKeyType: 'INFERENCE', id: 'key-replay' } } : {},
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const args = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'replay-token',
+      consumption_limit: { usd: 25 },
+    } as never
+
+    const first = await mint.handler(args)
+    const second = await mint.handler(args)
+    assert.equal(stub.calls.filter((call) => call.method === 'POST').length, 1)
+    assert.match((first.content[0] as { text: string }).text, /vk_replay_secret/)
+    assert.match((second.content[0] as { text: string }).text, /vk_replay_secret/)
+
+    const otherSigner = await mint.handler({
+      ...args,
+      address: `0x${'b'.repeat(40)}`,
+    } as never)
+    assert.equal(otherSigner.isError, true)
+    assert.match((otherSigner.content[0] as { text: string }).text, /different wallet or signature/)
+    assert.equal(stub.calls.filter((call) => call.method === 'POST').length, 1)
+  })
+
+  it('refuses to retry a web3 mint after an unknown outcome', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        throw new VeniceUpstreamError({
+          message: 'timeout',
+          status: 504,
+          body: { error: 'timeout' },
+        })
+      },
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const args = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'unknown-token',
+      consumption_limit: { usd: 25 },
+    } as never
+
+    const first = await mint.handler(args)
+    const second = await mint.handler(args)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, true)
+    assert.equal(posts, 1)
+    assert.match((first.content[0] as { text: string }).text, /Mint outcome is unknown/)
+    assert.match((second.content[0] as { text: string }).text, /Do not retry/)
+    assert.match((second.content[0] as { text: string }).text, /venice_list_api_keys/)
+  })
+
+  it('refuses to retry a web3 mint after a 429', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        throw new VeniceUpstreamError({
+          message: 'rate limited',
+          status: 429,
+          body: { error: 'rate limited' },
+        })
+      },
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const args = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'rate-limited-token',
+      consumption_limit: { usd: 25 },
+    } as never
+
+    const first = await mint.handler(args)
+    const second = await mint.handler(args)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, true)
+    assert.equal(posts, 1)
+    assert.match((second.content[0] as { text: string }).text, /Do not retry/)
+  })
+
+  it('refuses a new challenge token for a wallet with an unknown mint outcome', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        throw new VeniceUpstreamError({
+          message: 'timeout',
+          status: 504,
+          body: { error: 'timeout' },
+        })
+      },
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const address = `0x${'a'.repeat(40)}`
+    const first = await mint.handler({
+      address,
+      signature: 'signed-value',
+      token: 'lost-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    const second = await mint.handler({
+      address,
+      signature: 'signed-value',
+      token: 'fresh-challenge-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, true)
+    assert.equal(posts, 1)
+    assert.match((second.content[0] as { text: string }).text, /new challenge will not mint/)
+  })
+
+  it('refuses a re-cased wallet address after an unknown mint outcome', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        throw new VeniceUpstreamError({
+          message: 'timeout',
+          status: 504,
+          body: { error: 'timeout' },
+        })
+      },
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const first = await mint.handler({
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'lost-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    const second = await mint.handler({
+      address: `0x${'A'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'fresh-challenge-token',
+      consumption_limit: { usd: 25 },
+    } as never)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, true)
+    assert.equal(posts, 1)
+    assert.match((second.content[0] as { text: string }).text, /new challenge will not mint/)
+  })
+
+  it('allows a corrected web3 mint after a definitive 4xx', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        if (posts === 1) {
+          throw new VeniceUpstreamError({
+            message: 'bad token',
+            status: 400,
+            body: { error: 'invalid token' },
+          })
+        }
+        return { success: true, data: { apiKey: 'vk_after_400', apiKeyType: 'INFERENCE', id: 'key-400' } }
+      },
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const args = {
+      address: `0x${'a'.repeat(40)}`,
+      signature: 'signed-value',
+      token: 'retryable-token',
+      consumption_limit: { usd: 25 },
+      expires_at: '2026-08-01T12:00:00.123456Z',
+    } as never
+
+    const first = await mint.handler(args)
+    const second = await mint.handler(args)
+    assert.equal(first.isError, true)
+    assert.equal(second.isError, undefined)
+    assert.equal(posts, 2)
+    assert.equal((stub.calls.at(-1)?.body as { expiresAt?: string }).expiresAt, '2026-08-01T12:00:00.123Z')
+    assert.match((second.content[0] as { text: string }).text, /vk_after_400/)
+  })
+
+  it('treats a mint response without a readable API key as an unknown outcome', async () => {
+    resetWeb3MintAttemptStore()
+    let posts = 0
+    const stub = new StubClient({
+      '/v1/api_keys/generate_web3_key': ({ method }) => {
+        if (method !== 'POST') return {}
+        posts += 1
+        return { success: true, data: {} }
+      },
+    })
+    const mint = buildTools(stub.asClient(), mintCfg).find((tool) => tool.name === 'venice_web3_key_mint')!
+    const address = `0x${'a'.repeat(40)}`
+    const args = {
+      address,
+      signature: 'signed-value',
+      token: 'empty-envelope-token',
+      consumption_limit: { usd: 25 },
+    } as never
+
+    const first = await mint.handler(args)
+    const firstText = (first.content[0] as { text: string }).text
+    assert.equal(first.isError, true)
+    assert.match(firstText, /Mint outcome is unknown/)
+    assert.match(firstText, /no readable API key/)
+    assert.doesNotMatch(firstText, /Store the newly minted API key/)
+    assert.equal(getSucceededWeb3Mint('empty-envelope-token', address, 'signed-value'), undefined)
+
+    // The wallet is not released for another mint: the key may exist upstream.
+    const retry = await mint.handler(args)
+    assert.equal(retry.isError, true)
+    assert.equal(posts, 1)
+  })
+
+  it('enters the unknown-outcome path when the HTTP client reads a truncated mint response', async () => {
+    resetWeb3MintAttemptStore()
+    const server = await startMockVenice([
+      {
+        match: 'GET /v1/api_keys/generate_web3_key',
+        reply: { success: true, data: { token: 'fresh-challenge-token' } },
+      },
+      {
+        match: 'POST /v1/api_keys/generate_web3_key',
+        reply: {
+          __status: 200,
+          __headers: { 'content-type': 'application/json' },
+          // Truncated JSON: the shared client parses this into {}.
+          __rawBody: '{"success":true,"data":{"apiKey":"vk_truncated',
+        },
+      },
+    ])
+    try {
+      const httpCfg = { ...loadConfig({ VENICE_MCP_ENABLE_WEB3_MINT: '1' }), baseUrl: server.url }
+      const tools = buildTools(new VeniceClient(httpCfg), httpCfg)
+      const mint = tools.find((tool) => tool.name === 'venice_web3_key_mint')!
+      const challenge = tools.find((tool) => tool.name === 'venice_web3_key_challenge')!
+      const address = `0x${'c'.repeat(40)}`
+      const mintPosts = () => server.calls.filter((call) => call.method === 'POST').length
+
+      const first = await mint.handler({
+        address,
+        signature: 'signed-value',
+        token: 'truncated-token',
+        consumption_limit: { usd: 25 },
+      } as never)
+      const firstText = (first.content[0] as { text: string }).text
+      assert.equal(first.isError, true)
+      assert.match(firstText, /Mint outcome is unknown/)
+      assert.match(firstText, /no readable API key/)
+      assert.doesNotMatch(firstText, /Store the newly minted API key/)
+      assert.doesNotMatch(firstText, /\{\}/)
+      assert.equal(getSucceededWeb3Mint('truncated-token', address, 'signed-value'), undefined)
+      assert.equal(mintPosts(), 1)
+
+      const retry = await mint.handler({
+        address,
+        signature: 'signed-value',
+        token: 'truncated-token',
+        consumption_limit: { usd: 25 },
+      } as never)
+      assert.equal(retry.isError, true)
+      assert.doesNotMatch((retry.content[0] as { text: string }).text, /Store the newly minted API key/)
+      assert.equal(mintPosts(), 1)
+
+      // A new challenge for the same wallet must not issue another mint POST.
+      const fresh = await challenge.handler({} as never)
+      assert.equal(fresh.isError, undefined)
+      const afterNewChallenge = await mint.handler({
+        address,
+        signature: 'signed-value',
+        token: 'fresh-challenge-token',
+        consumption_limit: { usd: 25 },
+      } as never)
+      assert.equal(afterNewChallenge.isError, true)
+      assert.match((afterNewChallenge.content[0] as { text: string }).text, /new challenge will not mint/)
+      assert.equal(mintPosts(), 1)
+    } finally {
+      await server.close()
+    }
+  })
+
   it('accepts high-precision RFC3339 timestamps on usage-history filters', async () => {
     const { get, stub } = setup()
     const history = get('venice_billing_usage_history')
@@ -704,17 +1261,6 @@ describe('tool output shaping', () => {
       stub.calls.at(-1)?.path,
       '/v1/billing/usage-history?startTimestamp=2026-08-01T00%3A00%3A00.123456Z&endTimestamp=2026-08-02T00%3A00%3A00.1Z',
     )
-  })
-
-  it('retrieves a Web3 challenge without auth and without a private-key field', async () => {
-    const stub = new StubClient({
-      '/v1/api_keys/generate_web3_key': () => ({ success: true, data: { token: 'challenge-token' } }),
-    })
-    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_web3_key_challenge')!
-    assert.equal('private_key' in tool.inputSchema, false)
-    await tool.handler({} as never)
-    assert.equal(stub.calls.at(-1)?.method, 'GET')
-    assert.equal(stub.calls.at(-1)?.auth, 'none')
   })
 
   it('redacts unexpected secret fields from operator API-key reads', async () => {
