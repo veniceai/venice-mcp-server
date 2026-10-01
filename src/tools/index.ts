@@ -1384,7 +1384,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         idempotentHint: false,
         openWorldHint: true,
       },
-      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive usd consumption_limit of at most ${cfg.maxMintUsd} is always required, and an optional diem cap may not exceed ${cfg.maxMintDiem}, because the wallet signature covers only the challenge token; retired VCU limits are rejected because they are not enforced against current spending. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. If Venice returns a key whose type or limits differ from the request, the secret is withheld and the key ID is returned for revocation. Never provide a private key. The returned apiKey is shown once—store it securely. Same-process retries reuse the cached secret for this token+wallet+signature only. After a timeout or unknown outcome, this wallet cannot mint again (even with a new challenge) until that attempt expires. If the response is lost, revoke any unexpected key with an ADMIN key first. A process restart still cannot recover a secret this server never saw.${NO_AUTH}`,
+      description: `Submit an externally signed Web3 challenge to mint an INFERENCE API key for an EVM wallet with staked VVV on Base. ADMIN keys are not mintable through MCP. A positive usd consumption_limit of at most ${cfg.maxMintUsd} is always required. DIEM caps are rejected: the API does not enforce a requested DIEM limit. Retired VCU limits are rejected because they are not enforced against current spending. limit_period defaults to LIFETIME so a dollar cap is a permanent cap, not a daily reset. If Venice returns a key whose type or USD limit differ from the request, the secret is withheld and the key ID is returned for revocation. Never provide a private key. The returned apiKey is shown once—store it securely. Same-process retries reuse the cached secret for this token+wallet+signature only. After a timeout or unknown outcome, this wallet cannot mint again (even with a new challenge) until that attempt expires. If the response is lost, revoke any unexpected key with an ADMIN key first. A process restart still cannot recover a secret this server never saw.${NO_AUTH}`,
       inputSchema: {
         address: evmAddressSchema,
         signature: z.string().min(1).max(4096).describe('Signature created by the caller wallet over the raw challenge token.'),
@@ -1410,12 +1410,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               .max(cfg.maxMintUsd, `usd cannot exceed this server's ceiling of ${cfg.maxMintUsd} (VENICE_MCP_MAX_MINT_USD).`)
               .describe(`Required USD cap, greater than 0 and at most ${cfg.maxMintUsd}.`),
             diem: z
-              .number()
-              .positive('diem, when set, must be greater than 0.')
-              .max(cfg.maxMintDiem, `diem cannot exceed this server's ceiling of ${cfg.maxMintDiem} (VENICE_MCP_MAX_MINT_DIEM).`)
-              .nullable()
+              .never({
+                invalid_type_error:
+                  'DIEM consumption limits are not set by this tool. The API does not enforce a requested DIEM cap. Set a positive usd cap instead.',
+              })
               .optional()
-              .describe(`Optional DIEM cap, greater than 0 and at most ${cfg.maxMintDiem}. Omit or null to leave DIEM uncapped.`),
+              .describe('Rejected. DIEM limits are not enforced; set the cap in usd.'),
             // Rejected rather than stripped: a silently dropped vcu cap would
             // leave the caller believing the key is capped when it is not.
             vcu: z
@@ -1426,7 +1426,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               .optional()
               .describe('Retired. VCU limits are rejected; set the cap in usd.'),
           })
-          .describe('Required spend cap. usd is always required; diem is optional. The challenge signature does not bind key type or limits.'),
+          .describe('Required spend cap in usd. DIEM and VCU are rejected. The challenge signature does not bind key type or limits.'),
         limit_period: z
           .enum(['EPOCH', 'MONTH', 'LIFETIME'])
           .optional()

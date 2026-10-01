@@ -59,7 +59,7 @@ export function isMintedKeyResponse(resp: unknown): boolean {
 }
 
 export interface RequestedMintRestrictions {
-  consumptionLimit: { usd?: number | null; diem?: number | null }
+  consumptionLimit: { usd?: number | null }
   limitPeriod: string
 }
 
@@ -77,7 +77,7 @@ export function mintedKeyRestrictionProblem(resp: unknown, requested: RequestedM
   const limit = data.consumptionLimit
   if (limit !== undefined) {
     if (typeof limit !== 'object' || limit === null) return 'consumption limit is missing'
-    for (const currency of ['usd', 'diem'] as const) {
+    for (const currency of ['usd'] as const) {
       const want = requested.consumptionLimit[currency] ?? null
       const got = (limit as Record<string, unknown>)[currency] ?? null
       if (want !== got) {

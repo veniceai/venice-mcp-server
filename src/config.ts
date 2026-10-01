@@ -50,13 +50,10 @@ export interface Config {
   enableWeb3Mint: boolean
   /** Highest USD consumption limit venice_web3_key_mint will request. */
   maxMintUsd: number
-  /** Highest DIEM consumption limit venice_web3_key_mint will request. */
-  maxMintDiem: number
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_MINT_USD = 50
-const DEFAULT_MAX_MINT_DIEM = 50
 
 function parsePositiveNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value ?? fallback)
@@ -79,6 +76,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     serverVersion: '0.2.0',
     enableWeb3Mint: env.VENICE_MCP_ENABLE_WEB3_MINT === '1',
     maxMintUsd: parsePositiveNumber(env.VENICE_MCP_MAX_MINT_USD, DEFAULT_MAX_MINT_USD),
-    maxMintDiem: parsePositiveNumber(env.VENICE_MCP_MAX_MINT_DIEM, DEFAULT_MAX_MINT_DIEM),
   }
 }

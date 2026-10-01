@@ -450,14 +450,14 @@ const MAPPINGS: Mapping[] = [
       signature: '0xsigned',
       token: 'challenge',
       api_key_type: 'INFERENCE',
-      consumption_limit: { usd: 50, diem: 10 },
+      consumption_limit: { usd: 50 },
       limit_period: 'MONTH',
     },
     expectMethod: 'POST',
     expectPath: '/v1/api_keys/generate_web3_key',
     expectBodyContains: {
       apiKeyType: 'INFERENCE',
-      consumptionLimit: { usd: 50, diem: 10 },
+      consumptionLimit: { usd: 50 },
       limitPeriod: 'MONTH',
     },
   },
@@ -774,7 +774,7 @@ describe('tool output shaping', () => {
       address: `0x${'a'.repeat(40)}`,
       signature: 'signed-value',
       token: 'challenge-token',
-      consumption_limit: { usd: 0, diem: null },
+      consumption_limit: { usd: 0 },
     }).success, false)
     assert.equal(schema.safeParse({
       address: `0x${'a'.repeat(40)}`,
@@ -815,22 +815,25 @@ describe('tool output shaping', () => {
     assert.match(messagesOf(vcuWithUsd), /VCU consumption limits are retired/)
 
     assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25 } }).success, true)
-    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 50, diem: 50 } }).success, true)
-    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: null } }).success, true)
+    const withDiem = schema.safeParse({ ...base, consumption_limit: { usd: 50, diem: 50 } })
+    assert.equal(withDiem.success, false)
+    assert.match(messagesOf(withDiem), /DIEM consumption limits are not set/)
+    const nullDiem = schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: null } })
+    assert.equal(nullDiem.success, false)
+    assert.match(messagesOf(nullDiem), /DIEM consumption limits are not set/)
 
-    for (const uncappedUsd of [{ diem: 10 }, { usd: null, diem: 10 }, { usd: 0, diem: null }]) {
+    for (const uncappedUsd of [{ diem: 10 }, { usd: null, diem: 10 }, { usd: 0 }]) {
       const result = schema.safeParse({ ...base, consumption_limit: uncappedUsd })
       assert.equal(result.success, false, JSON.stringify(uncappedUsd))
       assert.match(messagesOf(result), /A positive usd consumption limit is required/)
     }
-    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: 0 } }).success, false)
+    const zeroDiem = schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: 0 } })
+    assert.equal(zeroDiem.success, false)
+    assert.match(messagesOf(zeroDiem), /DIEM consumption limits are not set/)
 
     const overUsd = schema.safeParse({ ...base, consumption_limit: { usd: 50.01 } })
     assert.equal(overUsd.success, false)
     assert.match(messagesOf(overUsd), /VENICE_MCP_MAX_MINT_USD/)
-    const overDiem = schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: 51 } })
-    assert.equal(overDiem.success, false)
-    assert.match(messagesOf(overDiem), /VENICE_MCP_MAX_MINT_DIEM/)
 
     assert.match(mint.description, /positive usd consumption_limit of at most 50 is always required/)
     assert.match(mint.description, /VCU limits are rejected/)
@@ -840,21 +843,19 @@ describe('tool output shaping', () => {
     const raised = loadConfig({
       VENICE_MCP_ENABLE_WEB3_MINT: '1',
       VENICE_MCP_MAX_MINT_USD: '200',
-      VENICE_MCP_MAX_MINT_DIEM: '5',
     })
     const mint = buildTools(new StubClient().asClient(), raised).find((t) => t.name === 'venice_web3_key_mint')!
     const schema = z.object(mint.inputSchema)
     const base = { address: `0x${'a'.repeat(40)}`, signature: 'signed-value', token: 'challenge-token' }
     assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 200 } }).success, true)
     assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 201 } }).success, false)
-    assert.equal(schema.safeParse({ ...base, consumption_limit: { usd: 25, diem: 6 } }).success, false)
   })
 
   it('withholds the secret when the minted key does not match the requested restrictions', async () => {
     const mismatches = [
       { apiKeyType: 'ADMIN', consumptionLimit: { usd: 25, diem: null }, limitPeriod: 'LIFETIME' },
       { apiKeyType: 'INFERENCE', consumptionLimit: { usd: null, diem: null }, limitPeriod: 'LIFETIME' },
-      { apiKeyType: 'INFERENCE', consumptionLimit: { usd: 25, diem: 3 }, limitPeriod: 'LIFETIME' },
+      { apiKeyType: 'INFERENCE', consumptionLimit: { usd: 10, diem: null }, limitPeriod: 'LIFETIME' },
       { apiKeyType: 'INFERENCE', consumptionLimit: { usd: 25, diem: null }, limitPeriod: 'EPOCH' },
       { consumptionLimit: { usd: 25 }, limitPeriod: 'LIFETIME' },
     ]
@@ -898,7 +899,7 @@ describe('tool output shaping', () => {
           apiKey: 'vk_matching_secret',
           apiKeyType: 'INFERENCE',
           id: 'key-match',
-          consumptionLimit: { usd: 25, diem: 10, vcu: null },
+          consumptionLimit: { usd: 25, diem: null, vcu: null },
           limitPeriod: 'MONTH',
         },
       }),
@@ -908,7 +909,7 @@ describe('tool output shaping', () => {
       address: `0x${'a'.repeat(40)}`,
       signature: 'signed-value',
       token: 'matching-token',
-      consumption_limit: { usd: 25, diem: 10 },
+      consumption_limit: { usd: 25 },
       limit_period: 'MONTH',
     } as never)
     assert.equal(result.isError, undefined)
