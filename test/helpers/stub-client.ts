@@ -1,9 +1,4 @@
 import type { VeniceClient } from '../../src/venice-client.js'
-import { e2eeSession } from './e2ee-fixtures.js'
-
-export const STUB_E2EE = e2eeSession()
-export const STUB_E2EE_SSE =
-  `data: {"choices":[{"delta":{"content":"${STUB_E2EE.encryptToClient('stub reply')}"}}]}\n\ndata: [DONE]\n\n`
 
 export interface StubCall {
   method: 'GET' | 'POST'
@@ -54,9 +49,6 @@ export class StubClient {
   ) {
     return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth, timeoutMs: opts.timeoutMs })
   }
-  postEventStream(path: string, json: unknown, headers?: Record<string, string>, opts: { timeoutMs?: number } = {}) {
-    return this.dispatch<string>({ method: 'POST', path, body: json, headers, eventStream: true, timeoutMs: opts.timeoutMs })
-  }
   /**
    * Stub for postBinary. Tool calls expecting binary back get a synthetic
    * { buffer, contentType } shaped Buffer of zero bytes (image/png by default).
@@ -100,10 +92,7 @@ export class StubClient {
   }
 }
 
-function defaultResponse(path: string, _binary?: boolean, eventStream?: boolean): unknown {
-  if (eventStream && path.startsWith('/v1/chat/completions')) {
-    return STUB_E2EE_SSE
-  }
+function defaultResponse(path: string, _binary?: boolean, _eventStream?: boolean): unknown {
   if (path.startsWith('/v1/chat/completions'))
     return { choices: [{ message: { content: 'reply' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
   if (path.startsWith('/v1/responses')) return { output_text: 'response' }

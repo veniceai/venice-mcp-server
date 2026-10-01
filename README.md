@@ -42,8 +42,8 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_chat` | Chat completions with documented text/image/audio/video/file blocks, structured response formats, function tools, prompt caching, reasoning controls, and `venice_parameters.enable_e2ee` (explicit E2EE-capable model and ciphertext-only user/system content; no files, tools, or web). |
-| `venice_responses` | Alpha, stateless Responses API for text models. Supports text/image input and reasoning controls. E2EE models are not supported, and this tool does not expose unreliable tool fields. |
+| `venice_chat` | Chat completions with documented text/image/audio/video/file blocks, structured response formats, function tools, prompt caching, and reasoning controls. Calls are plaintext and non-streaming. |
+| `venice_responses` | Alpha, stateless Responses API for text models. Supports text/image input and reasoning controls. E2EE-capable models are not supported, and this tool does not expose unreliable tool fields. |
 | `venice_embeddings` | Compute embeddings for text input (OpenAI-compatible). |
 | `venice_chat_with_character` | Chat with a Venice character by slug. |
 
@@ -107,27 +107,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `venice_tee_attestation` | Fetch Intel TDX attestation evidence, optional NVIDIA evidence, and the model signing key using a caller-generated 32-byte nonce. |
 | `venice_tee_signature` | Fetch the enclave response-signature payload for a chat completion request ID. |
 
-Both routes are currently live without authentication. They only apply to text models advertising `supportsTeeAttestation`; check `supportsE2EE` separately before attempting E2EE. `/responses` rejects E2EE-capable models.
-
-These tools expose evidence; they do not verify it. Full E2EE requires the caller to:
-
-1. Generate a fresh 32-byte nonce and independently verify the returned nonce and hardware evidence.
-2. Verify the attested signing/encryption key binding and that debug mode is disabled.
-3. Encrypt every user/system message to hex ciphertext in Venice's layout (65-byte ephemeral public key, 12-byte nonce, AES-GCM ciphertext and 16-byte tag) and pass the three required keys through `venice_chat.e2ee_headers`; the server forwards them as `X-Venice-TEE-Client-Pub-Key`, `X-Venice-TEE-Model-Pub-Key`, and `X-Venice-TEE-Signing-Algo`.
-4. Decrypt the encrypted response and cryptographically verify its signature against the verified attestation.
-
-Venice requires E2EE chat completions to stream. Plaintext `venice_chat` calls continue to send `stream: false` and return the normal completion text. When `enable_e2ee: true` is set, the tool also requires an explicit catalog model with `supportsE2EE`, a complete `e2ee_headers` bundle, and encrypted hex user/system content. The E2EE path is an allowlist: only `model`, `messages` (each with just `role` and `content`), `temperature`, `top_p`, `max_tokens`, `max_completion_tokens`, and `timeout_ms` are accepted. Anything else that would reach the API as plaintext, such as `stop`, `prompt_cache_key`, a message `name`, tools, files, or web options, is rejected. The request always sends the fixed `venice_parameters` `{ enable_e2ee: true, include_venice_system_prompt: false, enable_web_search: "off" }`. Only then does the tool send `stream: true`, request `text/event-stream`, and return:
-
-- `content[0].text`: the complete upstream SSE text after validating an exact `text/event-stream` media type, a terminal `data: [DONE]` event, no SSE error envelope, only allowlisted chunk fields, and ciphertext-shaped content deltas — without truncation, newline normalization, ciphertext extraction, or removal of SSE framing.
-- `structuredContent`: `{ transport: "sse", media_type: "text/event-stream", ciphertext_shape_valid: true, byte_length, framing }`. `ciphertext_shape_valid` is set only after those checks succeed.
-
-The checks validate shape only: each ciphertext must be even-length hex whose first 65 bytes are an uncompressed point on secp256k1, followed by at least a 12-byte nonce and 16-byte GCM tag. Both `e2ee_headers` public keys must also be on-curve. The server cannot decrypt, so it cannot prove content is encrypted. It only rules out plaintext and hex-encoded plaintext, which fail the on-curve check.
-
-The request timeout remains active until the entire stream body has been consumed; pass `timeout_ms` (up to 600000) to raise it above `VENICE_HTTP_TIMEOUT_MS` for long generations. The buffered stream is capped at 16 MiB. A stalled body becomes a 504, an oversized body is rejected, while truncated/erroring bodies, lookalike content types, streams containing `{"error":...}`, streams missing the terminal `[DONE]` event, and streams whose content is not ciphertext-shaped are rejected rather than returned as E2EE output. JSON error responses—including structured 402 payment diagnostics—are parsed before these successful-stream checks.
-
-The E2EE result is encrypted transport data, not a plaintext completion. `enable_e2ee: true` without all three headers, without an explicit E2EE-capable model, or with plaintext/file/tool/web inputs is rejected before an API completion call; providing TEE E2EE headers without `enable_e2ee: true` is also rejected.
-
-Setting `venice_parameters.enable_e2ee: true` without the caller-side cryptographic operations above does **not** create a trustworthy end-to-end encrypted session.
+Both routes are currently live without authentication. They only apply to text models advertising `supportsTeeAttestation`. These tools expose evidence; they do not verify it, and this server does not encrypt chat. `venice_chat` rejects `enable_e2ee`.
 
 ### ⛓️ Crypto
 
@@ -397,7 +377,7 @@ Not in this server. You sign the SIWE message + USDC top-up authorizations in yo
 $5 USD (anti-dust). Minimum balance to call inference is $0.10. Default suggested top-up is $10.
 
 **Privacy guarantees?**
-No email, phone, or KYC is required on the SIWX path. For hardware-verifiable privacy, choose a text model whose catalog capabilities advertise TEE/E2EE support and perform the full caller-side attestation, encryption/decryption, and signature-verification flow described above. This MCP server does not implement that cryptographic handshake and must not be treated as providing E2EE merely because it forwards `enable_e2ee`.
+No email, phone, or KYC is required on the SIWX path. `venice_tee_attestation` and `venice_tee_signature` return hardware evidence for the caller to verify. This server does not encrypt chat.
 
 **DIEM staking?**
 If your wallet is linked to a Venice user with DIEM staked, calls consume from the staking balance instead of USDC credits — no top-up needed.
