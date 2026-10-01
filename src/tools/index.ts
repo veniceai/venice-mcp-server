@@ -102,6 +102,11 @@ const fail = (text: string, structured?: Record<string, unknown>): ToolResult =>
   ...(structured ? { structuredContent: structured } : {}),
 })
 
+/** Venice answers HTTP 200 with `{ success: false }` when storage deletion fails. */
+function videoCleanupSucceeded(body: { success?: boolean } | null | undefined): boolean {
+  return body?.success === true
+}
+
 const QUEUE_DOWNLOAD_URL_TTL_MS = 24 * 60 * 60 * 1000
 const QUEUE_DOWNLOAD_URL_MAX_ENTRIES = 1000
 const queueDownloadUrls = new Map<string, { url: string; expiresAt: number }>()
@@ -414,7 +419,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Compute embeddings for text input (OpenAI-compatible).${X402_OK}`,
       inputSchema: {
         input: z.union([z.string(), z.array(z.string())]).describe('Text or array of texts.'),
-        model: z.string().optional().describe('Embedding model id.'),
+        model: z.string().min(1).describe('Embedding model id.'),
         encoding_format: z.enum(['float', 'base64']).optional(),
       },
       handler: async (args) => {
@@ -596,7 +601,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             json: {
               images: args.image_urls,
               prompt: args.prompt,
-              model: args.model,
+              // MultiEditImageRequest names this field modelId and rejects unknown keys.
+              ...(args.model !== undefined ? { modelId: args.model } : {}),
               aspect_ratio: args.aspect_ratio,
               enhance_prompt: args.enhance_prompt,
               resolution: args.resolution,
@@ -688,7 +694,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See GET /v1/models/:id/card.'),
+        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See GET /v1/models/:id/card.'),
         aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see GET /v1/models/:id/card.'),
         seed: z.number().int().optional(),
         image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
@@ -796,7 +802,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                 queue_id: args.queue_id,
                 model: args.model,
               })
-              if (cleanup?.success !== true) {
+              if (!videoCleanupSucceeded(cleanup)) {
                 return {
                   deleted: false,
                   cleanupNote:
@@ -902,15 +908,24 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_complete',
       title: 'Venice Video Complete (cleanup)',
-      description: `Mark a completed video as downloaded; deletes server-side media.${X402_OK}`,
+      description: `Mark a completed video as downloaded and delete server-side media. Reports removal only when Venice confirms success.${X402_OK}`,
       inputSchema: {
         queue_id: z.string().min(1),
         model: z.string().min(1),
       },
       handler: async (args) => {
         try {
-          await client.post('/v1/video/complete', args)
-          return ok(`Marked ${args.queue_id} complete; server-side media removed.`)
+          const cleanup = await client.post<{ success?: boolean }>('/v1/video/complete', args)
+          if (!videoCleanupSucceeded(cleanup)) {
+            return fail(
+              `Server-side cleanup was not confirmed for ${args.queue_id}: Venice did not report success. ` +
+                'Assume the media is still stored and retry venice_video_complete.',
+              { server_media_deleted: false },
+            )
+          }
+          return ok(`Marked ${args.queue_id} complete; server-side media removed.`, {
+            server_media_deleted: true,
+          })
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1419,7 +1434,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Get a price quote for a video generation BEFORE queuing.${NO_AUTH}`,
       inputSchema: {
         model: z.string().min(1).describe('Video model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().optional().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s".'),
+        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s".'),
       },
       handler: async (args) => {
         try {
