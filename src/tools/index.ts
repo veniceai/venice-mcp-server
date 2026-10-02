@@ -119,7 +119,7 @@ const CRYPTO_RPC_BROADCAST_METHODS = new Set([
 const cryptoRpcIdSchema = z.union([z.string(), z.number().int()])
 const cryptoRpcParamsSchema = z.union([z.array(z.unknown()), z.record(z.unknown())])
 const cryptoRpcRequestSchema = z.object({
-  jsonrpc: z.literal('2.0').optional().describe('JSON-RPC version. Defaults to "2.0" when using rpc_method.'),
+  jsonrpc: z.literal('2.0').optional().describe('JSON-RPC version. Defaults to "2.0".'),
   method: z.string().min(1).describe('JSON-RPC method name.'),
   params: cryptoRpcParamsSchema.optional().describe('Method parameters, by position (array) or by name (object).'),
   id: cryptoRpcIdSchema.optional().describe('Caller-supplied request ID. Defaults to 1 for a single request.'),
@@ -987,8 +987,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             args.request === undefined
               ? { jsonrpc: '2.0' as const, method: args.rpc_method!, params: args.rpc_params ?? [], id: 1 }
               : Array.isArray(args.request)
-                ? args.request
-                : { ...args.request, id: args.request.id ?? 1 }
+                ? args.request.map((item) => ({ jsonrpc: '2.0' as const, ...item }))
+                : { jsonrpc: '2.0' as const, ...args.request, id: args.request.id ?? 1 }
           if (cryptoRpcBatchesBroadcast(body)) {
             return fail(
               'Transaction relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes) cannot be batched with other requests. Send each broadcast as a single request.',

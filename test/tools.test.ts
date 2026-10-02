@@ -724,7 +724,22 @@ describe('tool output shaping', () => {
     await tool.handler({ network: 'ethereum-mainnet', request: { jsonrpc: '2.0', method: 'eth_chainId' } } as never)
     assert.deepEqual(stub.calls.at(-1)?.body, { jsonrpc: '2.0', method: 'eth_chainId', id: 1 })
     await tool.handler({ network: 'ethereum-mainnet', request: { method: 'eth_chainId', id: 0 } } as never)
-    assert.deepEqual(stub.calls.at(-1)?.body, { method: 'eth_chainId', id: 0 })
+    assert.deepEqual(stub.calls.at(-1)?.body, { jsonrpc: '2.0', method: 'eth_chainId', id: 0 })
+  })
+
+  it('venice_crypto_rpc defaults jsonrpc on every batch item', async () => {
+    const { stub, get } = setup()
+    await get('venice_crypto_rpc').handler({
+      network: 'ethereum-mainnet',
+      request: [
+        { method: 'eth_chainId', id: 1 },
+        { jsonrpc: '2.0', method: 'eth_blockNumber', id: 2 },
+      ],
+    } as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, [
+      { jsonrpc: '2.0', method: 'eth_chainId', id: 1 },
+      { jsonrpc: '2.0', method: 'eth_blockNumber', id: 2 },
+    ])
   })
 
   it('venice_crypto_rpc passes by-name params through unchanged', async () => {
