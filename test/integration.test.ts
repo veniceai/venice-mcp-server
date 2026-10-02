@@ -83,6 +83,31 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     venice = await startMockVenice([
       { match: 'GET /v1/models', reply: { data: [{ id: 'deepseek-v4-flash-0731', type: 'text' }] } },
       {
+        match: 'GET /v1/models?type=tts',
+        reply: {
+          data: [{
+            id: 'tts-mock',
+            type: 'tts',
+            model_spec: {
+              voices: ['mock-voice'],
+              supported_formats: ['mp3'],
+              default_format: 'mp3',
+              voice_cloning: { mode: 'zero_shot' },
+            },
+          }],
+          object: 'list',
+          type: 'tts',
+        },
+      },
+      {
+        match: 'GET /v1/models/traits',
+        reply: { data: { default: 'deepseek-v4-flash-0731' }, object: 'list', type: 'text' },
+      },
+      {
+        match: 'GET /v1/models/compatibility_mapping',
+        reply: { data: { 'gpt-4o': 'deepseek-v4-flash-0731' }, object: 'list', type: 'text' },
+      },
+      {
         match: 'GET /v1/models?type=image',
         reply: {
           data: [{
@@ -218,15 +243,17 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 32 tools over JSON-RPC', async () => {
+  it('lists 34 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 32)
+    assert.equal(list.length, 34)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
     assert.ok(names.includes('venice_model_details'))
     assert.ok(names.includes('venice_video_status'))
+    assert.ok(names.includes('venice_model_traits'))
+    assert.ok(names.includes('venice_model_compatibility_mapping'))
     assert.ok(names.includes('venice_x402_balance'))
   })
 
@@ -357,6 +384,29 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(r.error, undefined)
     const text = (r.result as { contents: Array<{ text: string }> }).contents[0].text
     assert.match(text, /deepseek-v4-flash-0731/)
+  })
+
+  it('reads venice://voices from live TTS model metadata', async () => {
+    const r = (await rpc.request('resources/read', { uri: 'venice://voices' })) as RpcResult
+    assert.equal(r.error, undefined)
+    const text = (r.result as { contents: Array<{ text: string }> }).contents[0].text
+    assert.match(text, /tts-mock/)
+    assert.match(text, /mock-voice/)
+    assert.equal(venice.calls.at(-1)?.path, '/v1/models?type=tts')
+  })
+
+  it('calls auth-free catalog metadata tools', async () => {
+    const traits = (await rpc.request('tools/call', {
+      name: 'venice_model_traits',
+      arguments: {},
+    })) as RpcResult
+    assert.match(JSON.stringify(traits.result), /deepseek-v4-flash-0731/)
+
+    const compatibility = (await rpc.request('tools/call', {
+      name: 'venice_model_compatibility_mapping',
+      arguments: {},
+    })) as RpcResult
+    assert.match(JSON.stringify(compatibility.result), /gpt-4o/)
   })
 })
 

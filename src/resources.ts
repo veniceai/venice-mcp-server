@@ -4,6 +4,7 @@
  */
 import type { VeniceClient } from './venice-client.js'
 import { formatToolError } from './format.js'
+import { shapeTtsVoiceCatalog, type ModelCatalogResponse } from './types.js'
 
 export interface ResourceDef {
   uri: string
@@ -62,11 +63,12 @@ export function buildResources(client: VeniceClient): ResourceDef[] {
     {
       uri: 'venice://voices',
       name: 'Venice TTS voices',
-      description: 'Available TTS voices including cloned voices.',
+      description: 'Live model-scoped built-in voices, output formats, custom voice IDs, and cloning capabilities.',
       mimeType: 'application/json',
       read: async () => {
         try {
-          const data = await client.get<unknown>('/v1/audio/voices')
+          const catalog = await client.get<ModelCatalogResponse>('/v1/models?type=tts')
+          const data = shapeTtsVoiceCatalog(catalog)
           return {
             uri: 'venice://voices',
             mimeType: 'application/json',

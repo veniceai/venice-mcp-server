@@ -22,12 +22,21 @@
  *      - x402/balance, x402/top-up, x402/transactions
  *      - tee/attestation, tee/signature
  */
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { VeniceClient } from '../venice-client.js'
 import { VeniceResponseTooLargeError } from '../venice-client.js'
 import type { Config } from '../config.js'
-import { VeniceUpstreamError } from '../types.js'
-import { formatToolError, truncate } from '../format.js'
+import { shapeTtsVoiceCatalog, VeniceUpstreamError, type ModelCatalogItem, type ModelCatalogResponse } from '../types.js'
+import {
+  ASR_TEXT_PAGE_CHARS,
+  ASR_TIMESTAMP_DEFAULT_LIMIT,
+  ASR_TIMESTAMP_MAX_LIMIT,
+  boundAsrResult,
+  formatToolError,
+  truncate,
+  type AsrUpstreamBody,
+} from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -206,6 +215,86 @@ const modelTypeSchema = z
   .trim()
   .toLowerCase()
   .regex(/^[a-z][a-z0-9_-]*$/, 'Must be a catalog type such as "video".')
+/** Single-type endpoints reject the list-only "all" and "code" filters. */
+const concreteModelTypeSchema = modelTypeSchema.refine(
+  (t) => t !== 'all' && t !== 'code',
+  'Use a concrete type such as "video"; "all" and "code" are not allowed.',
+)
+
+// First entry is the upstream default for POST /audio/voices when model is omitted.
+const VOICE_CLONE_MODELS = ['tts-chatterbox-hd', 'tts-minimax-speech-02-hd'] as const
+
+const MODEL_LIST_DEFAULT_LIMIT = 50
+const MODEL_LIST_MAX_LIMIT = 200
+// A full video model entry is ~1.5 KB, so 200 verbose entries would still be
+// hundreds of KB; pages stop early at this budget and report next_offset.
+const MODEL_LIST_MAX_PAGE_CHARS = 64 * 1024
+
+function compactModel(model: ModelCatalogItem): Record<string, unknown> {
+  const spec = model.model_spec ?? {}
+  const capabilities = spec.capabilities
+  const enabled =
+    capabilities && typeof capabilities === 'object'
+      ? Object.entries(capabilities).filter(([, v]) => v === true).map(([k]) => k)
+      : []
+  const traits = Array.isArray(spec.traits) && spec.traits.length > 0 ? spec.traits : undefined
+  return {
+    id: model.id,
+    type: model.type,
+    name: spec.name,
+    context_length: model.context_length,
+    max_completion_tokens: spec.maxCompletionTokens,
+    capabilities: enabled.length > 0 ? enabled : undefined,
+    traits,
+    privacy: spec.privacy,
+    offline: spec.offline === true ? true : undefined,
+    beta: spec.betaModel === true ? true : undefined,
+    pricing: spec.pricing,
+  }
+}
+
+// Transcription is charged per successful request, so a paged timestamp walk has
+// to read one retained result rather than transcribe the clip again. Retention is
+// capped in both lifetime and entry count so a long-lived server cannot accumulate
+// full transcripts indefinitely.
+const ASR_RESULT_TTL_MS = 10 * 60 * 1000
+const ASR_RESULT_MAX_ENTRIES = 16
+
+/** Retained ASR results, scoped to one buildTools call so HTTP sessions never share handles. */
+class AsrResultStore {
+  private readonly results = new Map<string, { body: AsrUpstreamBody; expiresAt: number; timer: NodeJS.Timeout }>()
+
+  remember(body: AsrUpstreamBody): string {
+    // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
+    while (this.results.size >= ASR_RESULT_MAX_ENTRIES) {
+      const oldest = this.results.keys().next()
+      if (oldest.done) break
+      this.evict(oldest.value)
+    }
+    const handle = randomUUID()
+    // Unref'd so a retained transcript never keeps the process alive.
+    const timer = setTimeout(() => this.evict(handle), ASR_RESULT_TTL_MS).unref()
+    this.results.set(handle, { body, expiresAt: Date.now() + ASR_RESULT_TTL_MS, timer })
+    return handle
+  }
+
+  get(handle: string): AsrUpstreamBody | undefined {
+    const entry = this.results.get(handle)
+    if (!entry) return undefined
+    if (entry.expiresAt <= Date.now()) {
+      this.evict(handle)
+      return undefined
+    }
+    return entry.body
+  }
+
+  private evict(handle: string): void {
+    const entry = this.results.get(handle)
+    if (!entry) return
+    clearTimeout(entry.timer)
+    this.results.delete(handle)
+  }
+}
 
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
@@ -261,6 +350,7 @@ const responsesVeniceParametersSchema = z
 
 export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
+  const asrResults = new AsrResultStore()
   const queueDownloadUrls = new QueueDownloadUrlStore()
 
   const tools: ToolDef[] = [
@@ -890,13 +980,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_tts',
       title: 'Venice TTS (Speech)',
-      description: `Convert text to speech. Supports cloned voices + emotion tags ([whispers], [sarcastically], etc.).${X402_OK}`,
+      description: `Convert text to speech. Supports cloned voices + emotion tags ([whispers], [sarcastically], etc.). When streaming=true, Venice streams upstream but this MCP tool buffers and returns one complete audio result; it does not emit incremental MCP chunks.${X402_OK}`,
       inputSchema: {
         input: z.string().min(1).max(4096).describe('Text to convert to speech (max 4096 chars).'),
         voice: z.string().optional().describe('Voice id; see venice://voices.'),
         model: z.string().optional(),
         speed: z.number().min(0.25).max(4).optional(),
         response_format: z.enum(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']).optional(),
+        temperature: z.number().min(0).max(2).optional().describe('Sampling temperature. Only supported by some TTS models; unsupported models ignore it.'),
+        streaming: z.boolean().optional().describe('Forward Venice\'s streaming flag. The MCP result is still buffered into one complete audio response, not delivered incrementally.'),
       },
       handler: async (args) => {
         try {
@@ -917,14 +1009,44 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_asr',
       title: 'Venice ASR (Speech-to-Text)',
-      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload.${X402_OK}`,
+      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory. Timestamp arrays and transcripts longer than ${ASR_TEXT_PAGE_CHARS} characters are paged in the MCP result: such a transcription returns result_handle alongside the first page, and every later page must be requested with that handle so the clip is transcribed — and charged — exactly once. Handles are held in memory, per MCP session, for ${ASR_RESULT_TTL_MS / 60_000} minutes and only the ${ASR_RESULT_MAX_ENTRIES} most recent survive, after which paging fails and a fresh transcription is needed.${X402_OK}`,
       inputSchema: {
-        audio_url: z.string().url(),
+        audio_url: z.string().url().optional().describe('Audio to transcribe. Required unless result_handle is supplied.'),
+        result_handle: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(`Handle returned by an earlier paged transcription. Pages that retained result without submitting another transcription, so audio_url is ignored when this is set. Expires after ${ASR_RESULT_TTL_MS / 60_000} minutes or once ${ASR_RESULT_MAX_ENTRIES} newer results are retained; an expired handle is an error rather than a silent re-transcription.`),
         model: z.string().optional(),
         language: z.string().optional(),
-        response_format: z.enum(['json', 'text', 'srt', 'verbose_json', 'vtt']).optional(),
+        response_format: z.enum(['json', 'text']).optional(),
+        timestamps: z.boolean().optional().describe('Include word and character timestamps in JSON responses. Defaults to false.'),
+        timestamp_offset: z.number().int().min(0).optional().describe('Start index into each timestamp array (word/segment/char). Defaults to 0. Use result_handle to move past the first page.'),
+        timestamp_limit: z.number().int().min(1).max(ASR_TIMESTAMP_MAX_LIMIT).optional().describe(`Max entries returned per timestamp array. Defaults to ${ASR_TIMESTAMP_DEFAULT_LIMIT}. Follow next_timestamp_offset; it is null on the last page.`),
+        text_offset: z.number().int().min(0).optional().describe(`Start character of the transcript page (${ASR_TEXT_PAGE_CHARS} characters each). Defaults to 0. Use result_handle with next_text_offset to read past the first page.`),
       },
       handler: async (args) => {
+        const offset = args.timestamp_offset ?? 0
+        const limit = args.timestamp_limit ?? ASR_TIMESTAMP_DEFAULT_LIMIT
+        const textOffset = args.text_offset ?? 0
+        const respond = (body: AsrUpstreamBody, handle: string | undefined) => {
+          const { text, structured, paged } = boundAsrResult(body, offset, limit, textOffset)
+          const full = handle ? { ...structured, result_handle: handle } : structured
+          // Hosts that read only text content still need the page and its continuation handle.
+          return ok(paged ? JSON.stringify(full) : text, full)
+        }
+        if (args.result_handle) {
+          const retained = asrResults.get(args.result_handle)
+          if (!retained) {
+            return fail(
+              `Unknown or expired result_handle. Retained transcriptions are dropped after ${ASR_RESULT_TTL_MS / 60_000} minutes, or sooner once ${ASR_RESULT_MAX_ENTRIES} newer results are retained. ` +
+                'Call venice_asr again with audio_url to transcribe the audio afresh; paging never re-submits a transcription on your behalf because each one is charged.',
+              { error: 'asr_result_expired', result_handle: args.result_handle },
+            )
+          }
+          return respond(retained, args.result_handle)
+        }
+        if (!args.audio_url) return fail('audio_url is required unless result_handle is supplied')
         try {
           const source = await fetchUploadSource(args.audio_url, {
             label: 'audio_url',
@@ -938,12 +1060,25 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           form.set('model', args.model ?? cfg.defaultAsrModel)
           if (args.language) form.set('language', args.language)
           if (args.response_format) form.set('response_format', args.response_format)
-          const resp = await client.postMultipart<{ text?: string; transcription?: string }>(
+          if (args.timestamps !== undefined) form.set('timestamps', String(args.timestamps))
+          const resp = await client.postMultipart<
+            string | { text?: string; transcription?: string; duration?: number; timestamps?: unknown }
+          >(
             '/v1/audio/transcriptions',
             form,
+            { maxBytes: 1024 * 1024 },
           )
-          return ok(truncate(resp.text ?? resp.transcription ?? JSON.stringify(resp)))
+          const body: AsrUpstreamBody = typeof resp === 'string' ? { text: resp } : resp
+          const transcript = body.text ?? body.transcription ?? ''
+          // Only results with more than one page are worth retaining.
+          const pageable = body.timestamps !== undefined || transcript.length > ASR_TEXT_PAGE_CHARS
+          return respond(body, pageable ? asrResults.remember(body) : undefined)
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) {
+            return fail(
+              'Transcription response exceeds 1 MiB. Disable timestamps or transcribe a shorter clip; timestamped word/character arrays are unbounded upstream.',
+            )
+          }
           return fail(formatToolError(err))
         }
       },
@@ -952,34 +1087,25 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_voice_clone',
       title: 'Venice Voice Clone / List',
-      description: `Manage TTS voices. Action 'list' returns the static catalog of built-in voices grouped by TTS model (Venice does not expose a list endpoint). Action 'create' clones a voice from a sample audio URL via multipart upload to /v1/audio/voices. ${X402_OK}`,
+      description: `Discover or clone TTS voices. Action 'list' reads live per-model voice metadata from auth-free GET /v1/models?type=tts. Action 'create' requires sample_url, then uploads the sample to POST /v1/audio/voices for the chosen cloning model. Cloned voices come back as a \`vv_<id>\` handle; pass it as venice_tts voice together with the same model.${X402_OK}`,
       inputSchema: {
-        action: z.enum(['list', 'create']).describe('list = show built-in voices, create = clone from sample_url'),
-        sample_url: z.string().url().optional().describe('Audio sample URL for action=create. WAV/MP3/M4A.'),
-        model: z.string().optional().describe('Voice cloning model. Required for action=create. Examples: tts-chatterbox-hd, tts-minimax-speech-02-hd.'),
+        action: z.enum(['list', 'create']).describe('list = fetch live TTS model voice metadata; create requires sample_url'),
+        sample_url: z
+          .string()
+          .url()
+          .optional()
+          .describe('Required for action=create. Audio sample URL; tts-chatterbox-hd accepts MP3/WAV/FLAC/M4A, tts-minimax-speech-02-hd MP3/WAV only.'),
+        model: z
+          .enum(VOICE_CLONE_MODELS)
+          .optional()
+          .describe(`TTS model the cloned voice is paired with (action=create). Defaults to ${VOICE_CLONE_MODELS[0]}.`),
       },
       handler: async (args) => {
         try {
           if (args.action === 'list') {
-            // Static reference — Venice doesn't expose GET /v1/audio/voices.
-            // Voice IDs come from each TTS model's hardcoded list. Group by model
-            // for clarity. Cloned voices use the `vv_<id>` handle returned by
-            // POST /v1/audio/voices.
-            const voices = {
-              note: 'Venice does not expose a list endpoint. These are the built-in voices available across TTS models. Cloned voices come back as `vv_<id>` from action=create.',
-              kokoro: {
-                description: 'Default model "tts-kokoro" — fast, multilingual, 70+ voices',
-                examples: ['af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky', 'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck'],
-              },
-              orpheus: {
-                description: 'Model "tts-orpheus" — expressive, supports emotion tags',
-                voices: ['leah', 'jess', 'mia', 'zoe', 'leo', 'dan', 'zac', 'tara'],
-              },
-              other_models: ['tts-qwen3-0-6b', 'tts-qwen3-1-7b', 'tts-xai-v1', 'tts-inworld-1-5-max', 'tts-chatterbox-hd', 'tts-elevenlabs-turbo-v2-5', 'tts-minimax-speech-02-hd', 'tts-gemini-3-1-flash'],
-              voice_cloning_supported: ['tts-chatterbox-hd', 'tts-minimax-speech-02-hd'],
-              docs: 'https://docs.venice.ai/api-reference/api-spec/tts',
-            }
-            return ok(JSON.stringify(voices, null, 2))
+            const resp = await client.get<ModelCatalogResponse>('/v1/models?type=tts')
+            const voices = shapeTtsVoiceCatalog(resp)
+            return ok(JSON.stringify(voices, null, 2), voices)
           }
           // action === 'create'
           if (!args.sample_url) return fail('sample_url is required for action=create')
@@ -1103,15 +1229,18 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_web_search',
       title: 'Venice Web Search',
-      description: `Search the web (Firecrawl-backed). Returns ranked results with snippets.${X402_OK}`,
+      description: `Search the web with Brave Search (default, Zero Data Retention) or Google Search (proxied and anonymized by Venice). Returns structured results with titles, URLs, snippets, and dates.${X402_OK}`,
       inputSchema: {
-        query: z.string().min(1).max(500),
+        query: z.string().min(1).max(400),
         limit: z.number().int().min(1).max(20).optional(),
+        search_provider: z.enum(['brave', 'google']).optional().describe('brave (default) uses Zero Data Retention; google is proxied/anonymized by Venice.'),
       },
       handler: async (args) => {
         try {
           const resp = await client.post<unknown>('/v1/augment/search', args)
-          return ok(JSON.stringify(resp, null, 2))
+          const structured =
+            resp && typeof resp === 'object' && !Array.isArray(resp) ? (resp as Record<string, unknown>) : undefined
+          return ok(JSON.stringify(resp, null, 2), structured)
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1205,30 +1334,96 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_list_models',
       title: 'Venice List Models',
-      description: `List the live model catalog with capabilities and prices.${NO_AUTH}`,
+      description: `List the live model catalog, one page at a time. Omitting type lists every model type (sent upstream as type=all). Each entry is a compact summary (id, type, name, context length, enabled capabilities, traits, privacy, pricing); set verbose=true for the full upstream model objects. Returns total, next_offset, and every matching model id in ids; call again with offset=next_offset until next_offset is null.${NO_AUTH}`,
       inputSchema: {
         type: modelTypeSchema
           .optional()
           .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}, "code", or "all" (default). Without a type Venice returns only text models, so pass one to find video, image or audio ids.`),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(MODEL_LIST_MAX_LIMIT)
+          .optional()
+          .describe(`Max models per page. Defaults to ${MODEL_LIST_DEFAULT_LIMIT}. A page may hold fewer when entries are large; follow next_offset.`),
+        offset: z.number().int().min(0).optional().describe('Index of the first model to return. Defaults to 0.'),
+        verbose: z.boolean().optional().describe('Return full upstream model objects instead of compact summaries. Defaults to false.'),
       },
-      handler: async ({ type }) => {
+      handler: async ({ type, limit, offset, verbose }) => {
         try {
-          const query = new URLSearchParams({ type: type ?? 'all' }).toString()
-          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>(`/v1/models?${query}`)
+          const requestedType = type ?? 'all'
+          const query = new URLSearchParams({ type: requestedType }).toString()
+          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`)
           const models = resp.data ?? resp.models ?? []
           const ids = models
             .map((m) => (typeof m === 'object' && m !== null ? (m as { id?: unknown }).id : undefined))
             .filter((id): id is string => typeof id === 'string')
-          const shown = models.slice(0, 80)
-          const note =
-            models.length > shown.length
-              ? `\n\nShowing full rows for ${shown.length} of ${models.length} models. All ids: ${ids.join(', ')}`
-              : ''
-          return ok(`${JSON.stringify(shown, null, 2)}${note}`, {
-            type: type ?? 'all',
-            count: models.length,
+          const start = offset ?? 0
+          const end = Math.min(models.length, start + (limit ?? MODEL_LIST_DEFAULT_LIMIT))
+          const page: unknown[] = []
+          let chars = 2
+          for (let i = start; i < end; i++) {
+            const entry = verbose ? models[i] : compactModel(models[i])
+            const size = JSON.stringify(entry).length + 1
+            if (page.length > 0 && chars + size > MODEL_LIST_MAX_PAGE_CHARS) break
+            page.push(entry)
+            chars += size
+          }
+          const next = start + page.length
+          const nextOffset = next < models.length ? next : null
+          return ok(truncate(JSON.stringify(page), MODEL_LIST_MAX_PAGE_CHARS), {
+            requested_type: requestedType,
+            total: models.length,
+            count: page.length,
+            offset: start,
+            next_offset: nextOffset,
             ids,
+            data: page,
           })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_model_traits',
+      title: 'Venice Model Traits',
+      description: `Return the live trait-name to model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
+      inputSchema: {
+        type: concreteModelTypeSchema
+          .optional()
+          .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}. Defaults to text upstream.`),
+      },
+      handler: async ({ type }) => {
+        try {
+          const path = type
+            ? `/v1/models/traits?type=${encodeURIComponent(type)}`
+            : '/v1/models/traits'
+          const resp = await client.get<Record<string, unknown>>(path)
+          return ok(JSON.stringify(resp, null, 2), resp)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_model_compatibility_mapping',
+      title: 'Venice Model Compatibility Mapping',
+      description: `Return the live compatible model-name to Venice model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
+      inputSchema: {
+        type: concreteModelTypeSchema
+          .optional()
+          .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}. Defaults to text upstream.`),
+      },
+      handler: async ({ type }) => {
+        try {
+          const path = type
+            ? `/v1/models/compatibility_mapping?type=${encodeURIComponent(type)}`
+            : '/v1/models/compatibility_mapping'
+          const resp = await client.get<Record<string, unknown>>(path)
+          return ok(JSON.stringify(resp, null, 2), resp)
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1241,15 +1436,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Get one exact model's full catalog row, including model_spec constraints, capabilities, and pricing when available. Requires a concrete type to keep the upstream catalog response bounded.${NO_AUTH}`,
       inputSchema: {
         model_id: z.string().trim().min(1).describe('Exact model id, e.g. from venice_list_models({ type: "video" }).'),
-        type: modelTypeSchema
-          .refine((t) => t !== 'all' && t !== 'code', 'Use a concrete type such as "video"; "all" and "code" are not allowed.')
+        type: concreteModelTypeSchema
           .describe(`Catalog type the model belongs to: ${KNOWN_MODEL_TYPES.join(', ')}.`),
       },
       handler: async ({ model_id, type }) => {
         try {
           const query = new URLSearchParams({ type }).toString()
-          const resp = await client.get<{ data?: unknown[] }>(`/v1/models?${query}`)
-          const model = (resp.data ?? [])
+          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`)
+          const models: unknown[] = resp.data ?? resp.models ?? []
+          const model = models
             .filter((candidate): candidate is Record<string, unknown> =>
               typeof candidate === 'object' && candidate !== null
             )
