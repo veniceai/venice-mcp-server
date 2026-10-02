@@ -259,6 +259,20 @@ describe('boundAsrResult', () => {
     assert.equal(out.structured.timestamp_limit, 2)
   })
 
+  for (const timestamps of [null, 'unexpected', 42, true]) {
+    it(`returns a null continuation for omitted scalar timestamps (${timestamps})`, () => {
+      const out = boundAsrResult({ text: 'ok', timestamps })
+      assert.deepEqual(out.structured, {
+        text: 'ok',
+        timestamp_offset: 0,
+        timestamp_limit: ASR_TIMESTAMP_DEFAULT_LIMIT,
+        timestamps_omitted: true,
+        timestamps_truncated: true,
+        next_timestamp_offset: null,
+      })
+    })
+  }
+
   it('omits unrecognized timestamp objects instead of echoing them', () => {
     const huge = { custom: 'x'.repeat(100) }
     const out = boundAsrResult({ text: 'ok', timestamps: huge })
@@ -266,5 +280,6 @@ describe('boundAsrResult', () => {
     assert.equal(out.structured.timestamps, undefined)
     assert.equal(out.structured.timestamps_omitted, true)
     assert.equal(out.structured.timestamps_truncated, true)
+    assert.equal(out.structured.next_timestamp_offset, null)
   })
 })

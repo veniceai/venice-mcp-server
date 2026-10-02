@@ -303,8 +303,8 @@ function pageAsrTimestamps(raw: unknown, offset: number, limit: number): Record<
       }
     }
 
-    return { ...meta, timestamps_omitted: true, timestamps_truncated: true }
+    return { ...meta, timestamps_omitted: true, timestamps_truncated: true, next_timestamp_offset: null }
   }
 
-  return { ...meta, timestamps_omitted: true, timestamps_truncated: true }
+  return { ...meta, timestamps_omitted: true, timestamps_truncated: true, next_timestamp_offset: null }
 }
