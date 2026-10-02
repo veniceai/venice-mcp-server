@@ -127,6 +127,14 @@ describe('VeniceClient', () => {
         },
       },
       {
+        match: 'POST /v1/mixed-case-malformed-json',
+        reply: {
+          __status: 200,
+          __body: '{"status":',
+          __headers: { 'content-type': 'APPLICATION/JSON; charset=UTF-8' },
+        },
+      },
+      {
         match: 'POST /v1/malformed-json',
         reply: {
           __status: 200,
@@ -385,6 +393,14 @@ describe('VeniceClient', () => {
     if (mixed.kind === 'json') assert.equal(mixed.data.status, 'PROCESSING')
     assert.deepEqual(await c.post('/v1/mixed-case-json', {}), { status: 'PROCESSING' })
     assert.deepEqual(await c.postMultipart('/v1/mixed-case-json', new FormData()), { status: 'PROCESSING' })
+  })
+
+  it('postMixed rejects malformed mixed-case JSON rather than returning it as binary', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMixed('/v1/mixed-case-malformed-json', {}),
+      VeniceMalformedResponseError,
+    )
   })
 
   it('rejects a malformed 2xx JSON body instead of returning {}', async () => {
