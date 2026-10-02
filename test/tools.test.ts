@@ -4,7 +4,6 @@ import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
-import { z } from 'zod'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 
@@ -122,6 +121,20 @@ describe('tools registry', () => {
       model_id: 'flux-2-pro',
       type: 'image',
     })
+  })
+
+  it('venice_audio_quote accepts every duration venice_music_generate accepts', () => {
+    const { get } = setup()
+    const generate = z.object(get('venice_music_generate').inputSchema)
+    const quote = z.object(get('venice_audio_quote').inputSchema)
+    for (const duration_seconds of [1, 300, 301, 600, '45', '480']) {
+      assert.equal(generate.safeParse({ prompt: 'p', model: 'm', duration_seconds }).success, true)
+      assert.equal(quote.safeParse({ model: 'm', duration_seconds }).success, true)
+    }
+    for (const duration_seconds of [0, -1, 1.5, '4.5', 'abc']) {
+      assert.equal(generate.safeParse({ prompt: 'p', model: 'm', duration_seconds }).success, false)
+      assert.equal(quote.safeParse({ model: 'm', duration_seconds }).success, false)
+    }
   })
 })
 
@@ -657,6 +670,48 @@ describe('tool output shaping', () => {
       (r.structuredContent as { url: string }).url,
       'https://private-share.venice.ai/v1/share/read/remembered',
     )
+  })
+
+  it('venice_video_status keeps a Venice-issued queue URL served from a non-venice.ai host', async () => {
+    const cdnUrl = 'https://cdn.example-media.net/v/remembered.mp4'
+    const stub = new StubClient({
+      '/v1/video/queue': () => ({ model: 'grok-imagine-text-to-video-private', queue_id: 'vps-cdn', download_url: cdnUrl }),
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({
+      prompt: 'a gondola',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-cdn',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { url: string }).url, cdnUrl)
+  })
+
+  it('remembered queue URLs are not visible to another session', async () => {
+    const stub = new StubClient({
+      '/v1/video/queue': () => ({
+        model: 'grok-imagine-text-to-video-private',
+        queue_id: 'vps-private',
+        download_url: 'https://private-share.venice.ai/v1/share/read/private',
+      }),
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const owner = buildTools(stub.asClient(), cfg)
+    const other = buildTools(stub.asClient(), cfg)
+    await owner.find((t) => t.name === 'venice_video_generate')!.handler({
+      prompt: 'a gondola',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    const r = await other.find((t) => t.name === 'venice_video_status')!.handler({
+      queue_id: 'vps-private',
+      model: 'grok-imagine-text-to-video-private',
+    } as never)
+    assert.equal(r.isError, true)
+    assert.doesNotMatch(JSON.stringify(r), /share\/read\/private/)
   })
 
   it('venice_video_generate evicts the oldest remembered queue URL instead of growing forever', async () => {

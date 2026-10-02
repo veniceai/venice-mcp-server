@@ -108,30 +108,33 @@ function videoCleanupSucceeded(body: { success?: boolean } | null | undefined): 
 
 const QUEUE_DOWNLOAD_URL_TTL_MS = 24 * 60 * 60 * 1000
 const QUEUE_DOWNLOAD_URL_MAX_ENTRIES = 1000
-const queueDownloadUrls = new Map<string, { url: string; expiresAt: number }>()
+/** Queue-time download URLs, scoped to one MCP session so another session cannot resolve them by queue_id. */
+class QueueDownloadUrlStore {
+  private readonly urls = new Map<string, { url: string; expiresAt: number }>()
 
-function pruneQueueDownloadUrls(now = Date.now()): void {
-  for (const [queueId, entry] of queueDownloadUrls) {
-    if (entry.expiresAt <= now) queueDownloadUrls.delete(queueId)
+  /** Venice-issued URLs are stored as returned; only caller-supplied URLs go through trustedQueueDownloadUrl. */
+  remember(queueId: string, url: string | undefined): void {
+    if (!url) return
+    this.prune()
+    // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
+    while (this.urls.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
+      const oldest = this.urls.keys().next()
+      if (oldest.done) break
+      this.urls.delete(oldest.value)
+    }
+    this.urls.set(queueId, { url, expiresAt: Date.now() + QUEUE_DOWNLOAD_URL_TTL_MS })
   }
-}
 
-function rememberQueueDownloadUrl(queueId: string, url: string | undefined): void {
-  const trusted = trustedQueueDownloadUrl(url)
-  if (!trusted) return
-  pruneQueueDownloadUrls()
-  // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
-  while (queueDownloadUrls.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
-    const oldest = queueDownloadUrls.keys().next()
-    if (oldest.done) break
-    queueDownloadUrls.delete(oldest.value)
+  get(queueId: string): string | undefined {
+    this.prune()
+    return this.urls.get(queueId)?.url
   }
-  queueDownloadUrls.set(queueId, { url: trusted, expiresAt: Date.now() + QUEUE_DOWNLOAD_URL_TTL_MS })
-}
 
-function rememberedQueueDownloadUrl(queueId: string): string | undefined {
-  pruneQueueDownloadUrls()
-  return queueDownloadUrls.get(queueId)?.url
+  private prune(now = Date.now()): void {
+    for (const [queueId, entry] of this.urls) {
+      if (entry.expiresAt <= now) this.urls.delete(queueId)
+    }
+  }
 }
 
 /** Caller-supplied queue URLs must be Venice HTTPS hosts. Retrieve URLs come from Venice and are not re-checked here. */
@@ -185,6 +188,11 @@ const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 w
 const NO_AUTH = ' No authentication required.'
 /** Types in the live catalog (GET /v1/models?type=all). Accepted as strings so a new Venice type still works. */
 const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'music', 'tts', 'asr', 'embedding', 'decision'] as const
+/** Shared by music generation and quote so a quoted request is always queueable. */
+const musicDurationSecondsSchema = z
+  .union([z.number().int().positive(), z.string().regex(/^\d+$/, 'Must be a numeric string')])
+  .optional()
+  .describe('Optional duration in seconds as a positive integer or numeric string. Model-specific.')
 const modelTypeSchema = z
   .string()
   .trim()
@@ -245,6 +253,7 @@ const responsesVeniceParametersSchema = z
 
 export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
+  const queueDownloadUrls = new QueueDownloadUrlStore()
 
   const tools: ToolDef[] = [
     // ========================================================================
@@ -639,7 +648,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned by Venice.')
-          rememberQueueDownloadUrl(id, resp.download_url)
+          queueDownloadUrls.remember(id, resp.download_url)
           return ok(
             `Queued: queue_id=${id}, model=${resp.model}\n` +
               'Poll with venice_video_status using queue_id and model. This process remembers download_url; pass it from structuredContent only if another process will poll. Do not invent a download_url.',
@@ -760,7 +769,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const url =
             resp.download_url ??
             resp.url ??
-            rememberedQueueDownloadUrl(args.queue_id) ??
+            queueDownloadUrls.get(args.queue_id) ??
             trustedQueueDownloadUrl(queueDownloadUrl)
           if (resp.status === 'COMPLETED') {
             if (!url) {
@@ -990,10 +999,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: {
         prompt: z.string().min(1).max(4000),
         model: z.string().describe('Required. Music model id, e.g. "elevenlabs-music".'),
-        duration_seconds: z.union([
-          z.number().int().positive(),
-          z.string().regex(/^\d+$/, 'Must be a numeric string'),
-        ]).optional().describe('Optional duration in seconds as a positive integer or numeric string. Model-specific.'),
+        duration_seconds: musicDurationSecondsSchema,
         force_instrumental: z.boolean().optional().describe('Only for models reporting supports_force_instrumental.'),
         lyrics_prompt: z.string().optional().describe('Lyrics/text for lyric-capable models. Length limits come from model metadata.'),
         lyrics_optimizer: z.boolean().optional().describe('Auto-generate lyrics. lyrics_prompt must be empty when enabled.'),
@@ -1269,7 +1275,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Get a price quote for a music generation BEFORE queuing. Useful for budgeting.${NO_AUTH}`,
       inputSchema: {
         model: z.string().min(1).describe('Music model id, e.g. "elevenlabs-music".'),
-        duration_seconds: z.number().min(1).max(300).optional(),
+        duration_seconds: musicDurationSecondsSchema,
         character_count: z.number().int().positive().optional().describe('Required for character-based pricing models.'),
       },
       handler: async (args) => {
