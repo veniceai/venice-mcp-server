@@ -601,6 +601,35 @@ describe('tool output shaping', () => {
     assert.equal(resource?.resource.blob, mp4.toString('base64'))
   })
 
+  it('venice_video_status rejects an empty MP4 without cleanup and preserves the queued URL for retry', async () => {
+    let empty = true
+    const url = 'https://private-share.venice.ai/v1/share/read/retry'
+    const stub = new StubClient({
+      '/v1/video/queue': () => ({ model: 'm', queue_id: 'empty-video', download_url: url }),
+      '/v1/video/retrieve': () => empty
+        ? { kind: 'binary', status: 200, buffer: Buffer.alloc(0), contentType: 'video/mp4' }
+        : { status: 'COMPLETED' },
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({ prompt: 'p', model: 'm', duration: '8s' })
+    const status = tools.find((t) => t.name === 'venice_video_status')!
+    const args = { queue_id: 'empty-video', model: 'm', delete_media_on_completion: true }
+    const result = await status.handler(args)
+    assert.equal(result.isError, true)
+    assert.equal(result.structuredContent?.retry_safe, true)
+    assert.equal(result.structuredContent?.server_media_deleted, false)
+    assert.match(result.content[0].type === "text" && result.content[0].text, /empty video\/mp4 body/)
+    assert.equal(result.content.some((item) => item.type === 'resource'), false)
+    assert.equal(stub.callsTo('/v1/video/complete').length, 0)
+    assert.equal((stub.callsTo('/v1/video/retrieve')[0].body as typeof args).delete_media_on_completion, false)
+
+    empty = false
+    const retry = await status.handler(args)
+    assert.equal(retry.isError, undefined)
+    assert.equal(retry.structuredContent?.url, url)
+    assert.equal(stub.callsTo('/v1/video/complete').length, 0)
+  })
+
   it('venice_video_status returns a JSON completed download_url as a resource link', async () => {
     const { get } = setup()
     const r = await get('venice_video_status').handler({ queue_id: 'x', model: 'm' } as never)

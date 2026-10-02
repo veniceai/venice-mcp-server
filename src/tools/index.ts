@@ -752,6 +752,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             if (!response.contentType.toLowerCase().includes('video/mp4')) {
               return fail(`Venice returned unsupported video content type: ${response.contentType}`)
             }
+            if (response.buffer.length === 0) {
+              return fail(
+                'Venice returned an empty video/mp4 body. The queued media was not deleted; retry venice_video_status with the same queue_id.',
+                { error: 'empty_video_response', retry_safe: true, queue_id: args.queue_id, server_media_deleted: false },
+              )
+            }
             const blob = response.buffer.toString('base64')
             const { deleted, cleanupNote } = await cleanupAfterSuccess(
               'Server-side media was deleted after the MP4 was buffered.',
