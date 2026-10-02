@@ -95,22 +95,44 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
         },
       },
       {
-        match: 'POST /v1/chat/completions',
-        reply: ({ headers, body }) => {
-          return {
-            choices: [
-              {
-                message: {
-                  content:
-                    `auth=${headers.authorization ?? 'none'};` +
-                    `siwx=${headers['x-sign-in-with-x'] ?? 'none'};` +
-                    `model=${(body as { model?: string }).model};`,
-                },
+        match: 'GET /v1/models?type=image',
+        reply: {
+          data: [{
+            created: 1764086377,
+            id: 'flux-2-pro',
+            model_spec: {
+              pricing: { generation: { usd: 0.03, diem: 0.03 } },
+              constraints: {
+                promptCharacterLimit: 3000,
+                aspectRatios: ['1:1', '16:9'],
               },
-            ],
-            usage: { prompt_tokens: 1, completion_tokens: 9 },
-          }
+              supportsWebSearch: false,
+              name: 'Flux 2 Pro',
+              privacy: 'anonymized',
+            },
+            object: 'model',
+            owned_by: 'venice.ai',
+            type: 'image',
+          }],
+          object: 'list',
+          type: 'image',
         },
+      },
+      {
+        match: 'POST /v1/chat/completions',
+        reply: ({ headers, body }) => ({
+          choices: [
+            {
+              message: {
+                content:
+                  `auth=${headers.authorization ?? 'none'};` +
+                  `siwx=${headers['x-sign-in-with-x'] ?? 'none'};` +
+                  `model=${(body as { model?: string }).model};`,
+              },
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 9 },
+        }),
       },
       {
         match: 'POST /v1/image/generate',
@@ -201,13 +223,14 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 33 tools over JSON-RPC', async () => {
+  it('lists 34 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 33)
+    assert.equal(list.length, 34)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
+    assert.ok(names.includes('venice_model_details'))
     assert.ok(names.includes('venice_video_status'))
     assert.ok(names.includes('venice_x402_balance'))
     assert.ok(names.includes('venice_tee_attestation'))
@@ -298,6 +321,35 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(img, 'expected image content')
     assert.equal(img!.data, 'bW9jay1iYXNlNjQ=')
     assert.equal(result.structuredContent?.id, 'mock-img-id')
+  })
+
+  it('venice_model_details returns the exact full catalog row from the mock API', async () => {
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_model_details',
+      arguments: { model_id: 'flux-2-pro', type: 'image' },
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as {
+      content: Array<{ text: string }>
+      structuredContent?: {
+        id?: string
+        model_spec?: {
+          constraints?: { aspectRatios?: string[] }
+          pricing?: { generation?: { usd?: number } }
+        }
+      }
+    }
+    assert.match(result.content[0].text, /"name": "Flux 2 Pro"/)
+    assert.equal(result.structuredContent?.id, 'flux-2-pro')
+    assert.deepEqual(result.structuredContent?.model_spec?.constraints?.aspectRatios, ['1:1', '16:9'])
+    assert.equal(result.structuredContent?.model_spec?.pricing?.generation?.usd, 0.03)
+    assert.ok(
+      venice.calls.some(
+        (call) =>
+          call.method === 'GET' &&
+          call.path === '/v1/models?type=image'
+      )
+    )
   })
 
   it('reads venice://models resource', async () => {
