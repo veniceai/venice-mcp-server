@@ -43,6 +43,15 @@ export class VeniceResponseTooLargeError extends Error {
   }
 }
 
+export class VeniceMalformedResponseError extends Error {
+  constructor(readonly path: string) {
+    super(
+      `Venice returned an unreadable JSON response on ${path}. The request may have completed upstream and been charged; check its result before retrying.`,
+    )
+    this.name = 'VeniceMalformedResponseError'
+  }
+}
+
 /**
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
@@ -89,8 +98,12 @@ export class VeniceClient {
     }
 
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), init.timeoutMs ?? this.cfg.timeoutMs)
+    const timeoutMs = init.timeoutMs ?? this.cfg.timeoutMs
+    // The timer stays armed until the body is consumed so a stalled body cannot hang the call.
+    const timeout = setTimeout(() => ac.abort(), timeoutMs)
     let res: Response
+    let contentType: string
+    let body: unknown
     try {
       res = await fetch(url, {
         method: init.method ?? (init.json !== undefined ? 'POST' : 'GET'),
@@ -98,28 +111,24 @@ export class VeniceClient {
         body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
         signal: ac.signal,
       })
-    } catch (err) {
-      clearTimeout(timeout)
-      if ((err as Error).name === 'AbortError') {
-        throw new VeniceUpstreamError({
-          message: `Upstream request timed out after ${init.timeoutMs ?? this.cfg.timeoutMs}ms`,
-          status: 504,
-          body: { error: 'timeout' },
-        })
+      contentType = res.headers.get('content-type') ?? ''
+      if (res.ok) {
+        const text =
+          init.maxBytes !== undefined
+            ? (await readBoundedResponseBuffer(res, path, init.maxBytes)).toString('utf8')
+            : await res.text()
+        body = contentType.includes('application/json') ? parseSuccessJson(text, path) : text
+      } else if (contentType.includes('application/json')) {
+        body = await res.json().catch(() => ({}))
+      } else {
+        body = await res.text().catch(() => '')
       }
+      if (ac.signal.aborted) throw timeoutError(timeoutMs)
+    } catch (err) {
+      if (ac.signal.aborted || (err as Error).name === 'AbortError') throw timeoutError(timeoutMs)
       throw err
-    }
-    clearTimeout(timeout)
-
-    const contentType = res.headers.get('content-type') ?? ''
-    let body: unknown
-    if (res.ok && init.maxBytes !== undefined) {
-      const text = (await readBoundedResponseBuffer(res, path, init.maxBytes)).toString('utf8')
-      body = contentType.includes('application/json') ? parseJsonOrEmpty(text) : text
-    } else if (contentType.includes('application/json')) {
-      body = await res.json().catch(() => ({}))
-    } else {
-      body = await res.text().catch(() => '')
+    } finally {
+      clearTimeout(timeout)
     }
 
     if (!res.ok) {
@@ -288,7 +297,7 @@ export class VeniceClient {
     if (response.contentType.includes('application/json')) {
       return {
         kind: 'json',
-        data: JSON.parse(response.buffer.toString('utf8')) as T,
+        data: parseSuccessJson(response.buffer.toString('utf8'), path) as T,
         status: response.status,
         contentType: response.contentType,
         headers: response.headers,
@@ -335,12 +344,22 @@ async function readBoundedResponseBuffer(
   return Buffer.concat(chunks, total)
 }
 
-function parseJsonOrEmpty(text: string): unknown {
+/** Parse a 2xx JSON body. Empty bodies stay `{}`; anything else unparseable is an error, never a silent `{}`. */
+function parseSuccessJson(text: string, path: string): unknown {
+  if (!text.trim()) return {}
   try {
     return JSON.parse(text)
   } catch {
-    return {}
+    throw new VeniceMalformedResponseError(path)
   }
+}
+
+function timeoutError(timeoutMs: number): VeniceUpstreamError {
+  return new VeniceUpstreamError({
+    message: `Upstream request timed out after ${timeoutMs}ms`,
+    status: 504,
+    body: { error: 'timeout' },
+  })
 }
 
 function responseHeaders(res: Response): Record<string, string> {
@@ -358,7 +377,9 @@ function responseHeaders(res: Response): Record<string, string> {
 async function parseResponse<T>(res: Response, path: string): Promise<T> {
   const contentType = res.headers.get('content-type') ?? ''
   let body: unknown
-  if (contentType.includes('application/json')) {
+  if (res.ok && contentType.includes('application/json')) {
+    body = parseSuccessJson(await res.text(), path)
+  } else if (contentType.includes('application/json')) {
     body = await res.json().catch(() => ({}))
   } else {
     body = await res.text().catch(() => '')
