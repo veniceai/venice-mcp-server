@@ -4,6 +4,7 @@ import https from 'node:https'
 import { isIP } from 'node:net'
 import { Readable } from 'node:stream'
 import type { RequestOptions } from 'node:http'
+import { readBoundedBuffer } from '../bounded-read.js'
 
 const DEFAULT_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
 const MAX_REDIRECTS = 5
@@ -218,30 +219,6 @@ function assertAllowedContentType(
   if (!ok) throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
   if (usedFallbackContentType) throw new Error(`Could not fetch ${label}: missing content-type did not match allowed file signatures`)
   if (normalized === 'application/octet-stream') throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
-}
-
-async function readBoundedBuffer(res: Response, maxBytes: number, label: string): Promise<Buffer> {
-  const contentLength = res.headers.get('content-length')
-  if (contentLength !== null) {
-    const size = Number(contentLength)
-    if (Number.isFinite(size) && size > maxBytes) {
-      throw new Error(`Could not fetch ${label}: response is larger than ${maxBytes} bytes`)
-    }
-  }
-
-  if (!res.body) return Buffer.alloc(0)
-
-  const chunks: Buffer[] = []
-  let total = 0
-  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-    const buf = Buffer.from(chunk)
-    total += buf.length
-    if (total > maxBytes) {
-      throw new Error(`Could not fetch ${label}: response is larger than ${maxBytes} bytes`)
-    }
-    chunks.push(buf)
-  }
-  return Buffer.concat(chunks, total)
 }
 
 function filenameFromUrl(url: URL, fallback: string): string {
