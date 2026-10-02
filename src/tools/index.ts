@@ -1246,7 +1246,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Model Details',
       description: `Get one exact model's full catalog row, including model_spec constraints, capabilities, and pricing when available. Requires a concrete type to keep the upstream catalog response bounded.${NO_AUTH}`,
       inputSchema: {
-        model_id: z.string().trim().min(1).describe('Exact model id, e.g. from venice_list_models({ type: "video" }).'),
+        model_id: z.string().trim().toLowerCase().min(1).describe('Exact model id, e.g. from venice_list_models({ type: "video" }).'),
         type: modelTypeSchema
           .refine((t) => t !== 'all' && t !== 'code', 'Use a concrete type such as "video"; "all" and "code" are not allowed.')
           .describe(`Catalog type the model belongs to: ${KNOWN_MODEL_TYPES.join(', ')}.`),
