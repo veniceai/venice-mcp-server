@@ -97,6 +97,15 @@ describe('VeniceClient', () => {
         },
       },
       {
+        match: 'POST /v1/text-stalled-body',
+        reply: {
+          __status: 200,
+          __body: 'partial text',
+          __headers: { 'content-type': 'text/plain' },
+          __stallBody: true,
+        },
+      },
+      {
         match: 'POST /v1/stalled-402',
         reply: {
           __status: 402,
@@ -334,6 +343,20 @@ describe('VeniceClient', () => {
         return true
       },
     )
+  })
+
+  it('postMultipart keeps an explicit timeout override armed through a stalled text body', { timeout: 2000 }, async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 10_000 }))
+    await assert.rejects(
+      () => c.postMultipart('/v1/text-stalled-body', new FormData(), { timeoutMs: 30 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 504)
+        assert.match(err.message, /timed out after 30ms/)
+        return true
+      },
+    )
+    assert.equal(server.calls.at(-1)?.path, '/v1/text-stalled-body')
   })
 
   it('keeps the HTTP status when a non-OK error body stalls past the timeout', async () => {
