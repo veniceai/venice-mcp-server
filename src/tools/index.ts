@@ -117,10 +117,11 @@ const CRYPTO_RPC_BROADCAST_METHODS = new Set([
 ])
 
 const cryptoRpcIdSchema = z.union([z.string(), z.number().int()])
+const cryptoRpcParamsSchema = z.union([z.array(z.unknown()), z.record(z.unknown())])
 const cryptoRpcRequestSchema = z.object({
   jsonrpc: z.literal('2.0').optional().describe('JSON-RPC version. Defaults to "2.0" when using rpc_method.'),
   method: z.string().min(1).describe('JSON-RPC method name.'),
-  params: z.array(z.unknown()).optional().describe('Method parameters.'),
+  params: cryptoRpcParamsSchema.optional().describe('Method parameters, by position (array) or by name (object).'),
   id: cryptoRpcIdSchema.optional().describe('Caller-supplied request ID. Defaults to 1 for a single request.'),
 })
 const cryptoRpcBatchRequestSchema = cryptoRpcRequestSchema.extend({
@@ -968,7 +969,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           .optional()
           .describe('A single JSON-RPC request object (ID optional) or a non-empty batch of at most 100 request objects (ID required per item).'),
         rpc_method: z.string().min(1).optional().describe('Convenience form for a single request. Do not combine with request.'),
-        rpc_params: z.array(z.unknown()).optional().describe('Parameters for rpc_method.'),
+        rpc_params: cryptoRpcParamsSchema.optional().describe('Parameters for rpc_method, by position (array) or by name (object).'),
         idempotency_key: cryptoRpcIdempotencyKeySchema.optional(),
       },
       handler: async (args) => {

@@ -727,6 +727,33 @@ describe('tool output shaping', () => {
     assert.deepEqual(stub.calls.at(-1)?.body, { method: 'eth_chainId', id: 0 })
   })
 
+  it('venice_crypto_rpc passes by-name params through unchanged', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_crypto_rpc')
+    const schema = z.object(tool.inputSchema)
+    const params = { address: '0xabc', block: 'latest', options: { full: true } }
+
+    const convenience = schema.parse({ network: 'ethereum-mainnet', rpc_method: 'getBalance', rpc_params: params })
+    await tool.handler(convenience as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, { jsonrpc: '2.0', method: 'getBalance', params, id: 1 })
+
+    const explicit = schema.parse({ network: 'ethereum-mainnet', request: { method: 'getBalance', params, id: 7 } })
+    await tool.handler(explicit as never)
+    assert.deepEqual((stub.calls.at(-1)?.body as { params?: unknown }).params, params)
+
+    const batch = schema.parse({
+      network: 'ethereum-mainnet',
+      request: [
+        { method: 'getBalance', params, id: 1 },
+        { method: 'getSlot', params: [], id: 2 },
+      ],
+    })
+    await tool.handler(batch as never)
+    assert.deepEqual((stub.calls.at(-1)?.body as Array<{ params?: unknown }>)[0].params, params)
+
+    assert.equal(schema.safeParse({ network: 'ethereum-mainnet', rpc_method: 'x', rpc_params: 'nope' }).success, false)
+  })
+
   it('venice_crypto_rpc rejects network slugs that URL normalisation could resolve', () => {
     const { get } = setup()
     const rpcSchema = z.object(get('venice_crypto_rpc').inputSchema)
