@@ -214,6 +214,23 @@ export function formatToolError(err: unknown): string {
 const MAX_TEXT_CHARS = 8000
 const TRUNCATION_MARKER = '…[truncated]'
 const MIN_SHORTENED_STRING_CHARS = 32
+// Only these keys hold free text; anything else (ids, slugs, URLs, addresses, hashes) must stay byte-exact.
+const PROSE_KEYS = new Set([
+  'bio',
+  'body',
+  'content',
+  'description',
+  'firstmessage',
+  'first_message',
+  'greeting',
+  'instructions',
+  'message',
+  'prompt',
+  'summary',
+  'systemprompt',
+  'system_prompt',
+  'text',
+])
 
 /** Truncate large strings for safe inclusion in tool responses. */
 export function truncate(s: string, max = MAX_TEXT_CHARS): string {
@@ -224,12 +241,13 @@ export function truncate(s: string, max = MAX_TEXT_CHARS): string {
 /**
  * Pretty-print a list as JSON within `max` chars by dropping whole trailing items.
  * When items are dropped the output becomes `{ truncated, returned, total, data }`.
+ * If even the first item is too large, its prose fields are shortened so it can still be returned.
  */
 export function fitJsonList(items: unknown[], max = MAX_TEXT_CHARS): { text: string; returned: number; truncated: boolean } {
   const full = JSON.stringify(items, null, 2)
   if (full.length <= max) return { text: full, returned: items.length, truncated: false }
-  const render = (n: number) =>
-    JSON.stringify({ truncated: true, returned: n, total: items.length, data: items.slice(0, n) }, null, 2)
+  const envelope = (data: unknown[]) => ({ truncated: true, returned: data.length, total: items.length, data })
+  const render = (n: number) => JSON.stringify(envelope(items.slice(0, n)), null, 2)
   let lo = 0
   let hi = items.length - 1
   while (lo < hi) {
@@ -237,27 +255,25 @@ export function fitJsonList(items: unknown[], max = MAX_TEXT_CHARS): { text: str
     if (render(mid).length <= max) lo = mid
     else hi = mid - 1
   }
+  if (lo === 0 && items.length > 0) {
+    const root = envelope([JSON.parse(JSON.stringify(items[0])) as unknown])
+    if (shortenProse(root, max) <= max) return { text: JSON.stringify(root, null, 2), returned: 1, truncated: true }
+  }
   return { text: render(lo), returned: lo, truncated: true }
 }
 
 /**
- * Pretty-print a value as JSON within `max` chars by shortening its longest strings,
- * then dropping trailing items from its largest arrays if that is not enough.
- * Object roots gain `truncated: true` when anything was shortened or dropped.
+ * Shorten the longest prose strings in `root` in place until its pretty-printed JSON fits `max`
+ * or nothing more can be shortened. Returns the resulting length.
  */
-export function fitJson(value: unknown, max = MAX_TEXT_CHARS): { text: string; truncated: boolean } {
-  const full = JSON.stringify(value, null, 2)
-  if (full.length <= max) return { text: full, truncated: false }
-
-  const parsed: unknown = JSON.parse(full)
-  const root = isObject(parsed) && !Array.isArray(parsed) ? { ...parsed, truncated: true } : parsed
-  const leaves: Array<{ holder: Record<string | number, unknown>; key: string | number; value: string }> = []
+function shortenProse(root: unknown, max: number): number {
+  const leaves: Array<{ holder: Record<string, unknown>; key: string; value: string }> = []
   const walk = (node: unknown): void => {
     if (!isObject(node)) return
     for (const [key, child] of Object.entries(node)) {
-      const k = Array.isArray(node) ? Number(key) : key
-      if (typeof child === 'string') leaves.push({ holder: node as Record<string | number, unknown>, key: k, value: child })
-      else walk(child)
+      if (typeof child === 'string') {
+        if (!Array.isArray(node) && PROSE_KEYS.has(key.toLowerCase())) leaves.push({ holder: node, key, value: child })
+      } else walk(child)
     }
   }
   walk(root)
@@ -272,7 +288,21 @@ export function fitJson(value: unknown, max = MAX_TEXT_CHARS): { text: string; t
     size -= JSON.stringify(leaf.value).length - JSON.stringify(shortened).length
     leaf.holder[leaf.key] = shortened
   }
-  if (size <= max) return { text: JSON.stringify(root, null, 2), truncated: true }
+  return size
+}
+
+/**
+ * Pretty-print a value as JSON within `max` chars by shortening its longest prose strings
+ * (see PROSE_KEYS), then dropping trailing items from its largest arrays if that is not enough.
+ * Other strings are never modified. Object roots gain `truncated: true` when anything was shortened or dropped.
+ */
+export function fitJson(value: unknown, max = MAX_TEXT_CHARS): { text: string; truncated: boolean } {
+  const full = JSON.stringify(value, null, 2)
+  if (full.length <= max) return { text: full, truncated: false }
+
+  const parsed: unknown = JSON.parse(full)
+  const root = isObject(parsed) && !Array.isArray(parsed) ? { ...parsed, truncated: true } : parsed
+  if (shortenProse(root, max) <= max) return { text: JSON.stringify(root, null, 2), truncated: true }
 
   const arrays: unknown[][] = []
   const collect = (node: unknown): void => {

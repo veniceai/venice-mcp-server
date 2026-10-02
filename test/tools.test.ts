@@ -853,7 +853,7 @@ describe('tool output shaping', () => {
     const stub = new StubClient({
       '/v1/characters/alan-watts/reviews': () => ({
         object: 'list',
-        data: Array.from({ length: 100 }, (_, i) => ({ id: i, body: `"quoted"\n${description}` })),
+        data: Array.from({ length: 100 }, (_, i) => ({ id: i, message: `"quoted"\n${description}` })),
         pagination: { page: 1, pageSize: 100, total: 100 },
       }),
       '/v1/characters/alan-watts': () => ({ data: { slug: 'alan-watts', description: description.repeat(40) } }),
@@ -885,13 +885,13 @@ describe('tool output shaping', () => {
     assert.ok(text(reviews).length <= 8000)
     const reviewsJson = JSON.parse(text(reviews)) as {
       truncated: boolean
-      data: Array<{ id: number; body: string }>
+      data: Array<{ id: number; message: string }>
       pagination: { total: number }
     }
     assert.equal(reviewsJson.truncated, true)
     assert.ok(reviewsJson.data.length > 0 && reviewsJson.data.length < 100)
     assert.deepEqual(reviewsJson.data.map((review) => review.id), [...reviewsJson.data.keys()])
-    assert.match(reviewsJson.data[0].body, /^"quoted"\nd+…\[truncated\]$/)
+    assert.match(reviewsJson.data[0].message, /^"quoted"\nd+…\[truncated\]$/)
     assert.equal(reviewsJson.pagination.total, 100)
     assert.deepEqual(reviews.structuredContent, { truncated: true })
   })

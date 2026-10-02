@@ -199,15 +199,80 @@ describe('fitJson', () => {
     assert.deepEqual(fitJson({ a: 'b' }, 100), { text: JSON.stringify({ a: 'b' }, null, 2), truncated: false })
   })
   it('keeps escaped and non-ASCII strings valid and within the limit', () => {
-    const { text, truncated } = fitJson({ quote: '"\\\n'.repeat(200), emoji: '🙂'.repeat(200) }, 300)
+    const { text, truncated } = fitJson({ description: '"\\\n'.repeat(200), text: '🙂'.repeat(200) }, 300)
     assert.equal(truncated, true)
     assert.ok(text.length <= 300)
     assert.equal((JSON.parse(text) as { truncated: boolean }).truncated, true)
   })
-  it('shortens strings inside an array root without adding a marker key', () => {
-    const { text, truncated } = fitJson(['x'.repeat(1000)], 200)
+  it('shortens prose inside an array root without adding a marker key', () => {
+    const { text, truncated } = fitJson([{ description: 'x'.repeat(1000) }], 200)
     assert.equal(truncated, true)
-    assert.match((JSON.parse(text) as string[])[0], /^x+…\[truncated\]$/)
+    assert.match((JSON.parse(text) as Array<{ description: string }>)[0].description, /^x+…\[truncated\]$/)
+  })
+  it('shortens an oversized character review message instead of dropping the review', () => {
+    const value = {
+      data: [{
+        characterId: '2f460055-7595-4640-9cb6-c442c4c869b0',
+        createdAt: '2025-02-09T03:23:53.708Z',
+        id: '1e38fb78-043f-4ce2-b3bc-966089c25467',
+        isOwner: false,
+        locale: 'en',
+        message: 'Thoughtful and practical. '.repeat(400),
+        rating: 5,
+        userAvatarUrl: null,
+        username: 'product_user_42',
+      }],
+      object: 'list',
+      pagination: { page: 1, pageSize: 20, total: 1, totalPages: 1 },
+      summary: { averageRating: 5, totalReviews: 1 },
+    }
+    const original = JSON.stringify(value)
+    const { text, truncated } = fitJson(value)
+    const parsed = JSON.parse(text) as typeof value & { truncated: boolean }
+    assert.equal(truncated, true)
+    assert.ok(text.length <= 8000)
+    assert.equal(parsed.data.length, 1)
+    assert.ok(parsed.data[0].message.length < value.data[0].message.length)
+    assert.ok(parsed.data[0].message.endsWith('…[truncated]'))
+    assert.ok(value.data[0].message.startsWith(parsed.data[0].message.slice(0, -'…[truncated]'.length)))
+    assert.deepEqual(parsed, {
+      ...value,
+      data: [{ ...value.data[0], message: parsed.data[0].message }],
+      truncated: true,
+    })
+    assert.equal(JSON.stringify(value), original)
+  })
+  it('shortens only prose fields and leaves identifiers untouched', () => {
+    const value = {
+      id: 'i'.repeat(400),
+      slug: 's'.repeat(400),
+      shareUrl: `https://venice.ai/c/${'u'.repeat(400)}`,
+      address: `0x${'a'.repeat(400)}`,
+      description: 'd'.repeat(3000),
+    }
+    const { text, truncated } = fitJson(value, 2000)
+    const parsed = JSON.parse(text) as typeof value & { truncated: boolean }
+    assert.equal(truncated, true)
+    assert.ok(text.length <= 2000)
+    assert.equal(parsed.id, value.id)
+    assert.equal(parsed.slug, value.slug)
+    assert.equal(parsed.shareUrl, value.shareUrl)
+    assert.equal(parsed.address, value.address)
+    assert.match(parsed.description, /^d+…\[truncated\]$/)
+  })
+  it('drops array items instead of cutting identifiers when prose is not enough', () => {
+    const urls = Array.from({ length: 20 }, (_, i) => `https://example.com/${i}/${'u'.repeat(100)}`)
+    const { text, truncated } = fitJson({ urls }, 1000)
+    const parsed = JSON.parse(text) as { urls: string[] }
+    assert.equal(truncated, true)
+    assert.ok(text.length <= 1000)
+    assert.ok(parsed.urls.length > 0 && parsed.urls.length < 20)
+    assert.deepEqual(parsed.urls, urls.slice(0, parsed.urls.length))
+  })
+  it('returns the error notice rather than cutting a lone oversized identifier', () => {
+    const { text, truncated } = fitJson({ url: `https://example.com/${'u'.repeat(1000)}` }, 200)
+    assert.equal(truncated, true)
+    assert.match((JSON.parse(text) as { error: string }).error, /exceeds 200 characters/)
   })
   it('falls back to a valid notice when nothing can be shortened or dropped', () => {
     const value = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`key${i}`, i]))
@@ -227,5 +292,29 @@ describe('fitJsonList', () => {
     assert.deepEqual(parsed.data, items.slice(0, returned))
     assert.equal(parsed.returned, returned)
     assert.equal(parsed.total, 50)
+  })
+  it('shortens the prose of an oversized first item so it is still returned', () => {
+    const items = [
+      { slug: 'alan-watts', shareUrl: 'https://venice.ai/c/alan-watts', description: 'd'.repeat(5000) },
+      { slug: 'second', description: 'short' },
+    ]
+    const { text, returned, truncated } = fitJsonList(items, 1000)
+    const parsed = JSON.parse(text) as { returned: number; total: number; data: Array<{ slug: string; shareUrl: string; description: string }> }
+    assert.equal(truncated, true)
+    assert.equal(returned, 1)
+    assert.ok(text.length <= 1000)
+    assert.equal(parsed.returned, 1)
+    assert.equal(parsed.total, 2)
+    assert.equal(parsed.data[0].slug, 'alan-watts')
+    assert.equal(parsed.data[0].shareUrl, 'https://venice.ai/c/alan-watts')
+    assert.match(parsed.data[0].description, /^d+…\[truncated\]$/)
+    assert.equal(items[0].description.length, 5000)
+  })
+  it('returns no items when even a shortened first item cannot fit', () => {
+    const items = [{ slug: 's'.repeat(2000), description: 'd'.repeat(2000) }]
+    const { text, returned, truncated } = fitJsonList(items, 1000)
+    assert.equal(truncated, true)
+    assert.equal(returned, 0)
+    assert.deepEqual((JSON.parse(text) as { data: unknown[] }).data, [])
   })
 })
