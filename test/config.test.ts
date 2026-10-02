@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { loadConfig } from '../src/config.js'
 
 describe('loadConfig', () => {
@@ -54,5 +55,12 @@ describe('loadConfig', () => {
     assert.equal(cfg.defaultImageModel, 'flux-2-max')
     assert.equal(cfg.defaultTtsModel, 'venice-tts-2')
     assert.equal(cfg.defaultAsrModel, 'venice-asr-2')
+  })
+})
+
+describe('server version', () => {
+  it('comes from package.json so releases only bump one place', () => {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
+    assert.equal(loadConfig({}).serverVersion, pkg.version)
   })
 })

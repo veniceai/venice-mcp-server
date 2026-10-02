@@ -21,6 +21,8 @@
  * Therefore this MCP server NEVER sends `X-402-Payment` on inference routes —
  * Venice rejects that header on anything except `/x402/top-up`.
  */
+
+import { createRequire } from 'node:module'
 export interface Config {
   /** Base URL of the Venice API. */
   baseUrl: string
@@ -49,6 +51,8 @@ export interface Config {
   serverVersion: string
 }
 
+const PACKAGE_VERSION: string = createRequire(import.meta.url)('../package.json').version
+
 const DEFAULT_TIMEOUT_MS = 60_000
 
 function parseTimeoutMs(value: string | undefined): number {
@@ -69,6 +73,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     timeoutMs: parseTimeoutMs(env.VENICE_HTTP_TIMEOUT_MS),
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     serverName: '@veniceai/mcp-server',
-    serverVersion: '0.2.0',
+    serverVersion: PACKAGE_VERSION,
   }
 }
