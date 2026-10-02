@@ -111,6 +111,27 @@ describe('VeniceClient', () => {
         },
       },
       {
+        match: 'POST /v1/stalled-402',
+        reply: {
+          __status: 402,
+          __body: '{"reason":"insufficient',
+          __headers: { 'content-type': 'application/json' },
+          __stallBody: true,
+        },
+      },
+      {
+        match: 'POST /v1/stalled-500',
+        reply: { __status: 500, __body: 'upstream fail', __headers: { 'content-type': 'text/plain' }, __stallBody: true },
+      },
+      {
+        match: 'POST /v1/mixed-case-json',
+        reply: {
+          __status: 200,
+          __body: '{"status":"PROCESSING"}',
+          __headers: { 'content-type': 'Application/JSON; charset=utf-8' },
+        },
+      },
+      {
         match: 'POST /v1/malformed-json',
         reply: {
           __status: 200,
@@ -356,6 +377,7 @@ describe('VeniceClient', () => {
       (err: unknown) => {
         assert.ok(err instanceof VeniceUpstreamError)
         assert.equal(err.status, 504)
+        assert.match(err.message, /timed out after 30ms/)
         return true
       },
     )
@@ -382,6 +404,36 @@ describe('VeniceClient', () => {
         return true
       },
     )
+  })
+
+  it('keeps the HTTP status when a non-OK error body stalls past the timeout', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
+    for (const [path, status] of [['/v1/stalled-402', 402], ['/v1/stalled-500', 500]] as const) {
+      for (const call of [
+        () => c.post(path, {}),
+        () => c.postMultipart(path, form()),
+        () => c.postMultipart(path, form(), { maxBytes: 1024 }),
+        () => c.postBinary(path, { json: {} }, { maxBytes: 1024 }),
+        () => c.postMixed(path, {}),
+      ]) {
+        await assert.rejects(call, (err: unknown) => {
+          assert.ok(err instanceof VeniceUpstreamError)
+          assert.equal(err.status, status)
+          assert.doesNotMatch(err.message, /timed out/)
+          return true
+        })
+      }
+    }
+  })
+
+  it('treats a mixed-case JSON content type as JSON', async () => {
+    const c = new VeniceClient(makeCfg())
+    const mixed = await c.postMixed<{ status: string }>('/v1/mixed-case-json', {})
+    assert.equal(mixed.kind, 'json')
+    if (mixed.kind === 'json') assert.equal(mixed.data.status, 'PROCESSING')
+    assert.deepEqual(await c.post('/v1/mixed-case-json', {}), { status: 'PROCESSING' })
+    assert.deepEqual(await c.postMultipart('/v1/mixed-case-json', form()), { status: 'PROCESSING' })
+    assert.deepEqual(await c.postMultipart('/v1/mixed-case-json', form(), { maxBytes: 1024 }), { status: 'PROCESSING' })
   })
 
   it('rejects a malformed 2xx JSON body instead of returning {}', async () => {

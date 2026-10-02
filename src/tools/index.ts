@@ -178,6 +178,14 @@ function imageResponseTooLarge(err: VeniceResponseTooLargeError): ToolResult {
   )
 }
 
+function audioResponseTooLarge(err: VeniceResponseTooLargeError): ToolResult {
+  return fail(
+    `Audio response exceeds the configured ${err.maxBytes}-byte MCP response limit and was discarded. ` +
+      'Venice may still charge for the generation. Retry with shorter input or a compressed response_format such as mp3 or opus, or raise VENICE_MAX_AUDIO_RESPONSE_BYTES and restart the server.',
+    { error: 'audio_response_too_large', max_bytes: err.maxBytes, retry_safe: false },
+  )
+}
+
 interface NeedsConsentBody {
   error?: { code?: string; message?: string }
   consent_flow?: string
@@ -655,11 +663,14 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           form.set('image', new Blob([source.buffer], { type: source.contentType }), source.filename)
           if (args.scale !== undefined) form.set('scale', String(args.scale))
           if (args.creativity !== undefined) form.set('creativity', String(args.creativity))
-          const { buffer, contentType } = await client.postBinary('/v1/image/upscale', { form })
+          const { buffer, contentType } = await client.postBinary('/v1/image/upscale', { form }, {
+            maxBytes: cfg.maxImageResponseBytes,
+          })
           return {
             content: [{ type: 'image', data: buffer.toString('base64'), mimeType: contentType }],
           }
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },
@@ -675,11 +686,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const { buffer, contentType } = await client.postBinary('/v1/image/background-remove', {
             method: 'POST',
             json: { image_url: args.image_url },
-          })
+          }, { maxBytes: cfg.maxImageResponseBytes })
           return {
             content: [{ type: 'image', data: buffer.toString('base64'), mimeType: contentType }],
           }
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },
@@ -978,11 +990,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const { buffer, contentType } = await client.postBinary('/v1/audio/speech', {
             method: 'POST',
             json: { ...args, model: args.model ?? cfg.defaultTtsModel },
-          })
+          }, { maxBytes: cfg.maxAudioResponseBytes })
           return {
             content: [{ type: 'audio', data: buffer.toString('base64'), mimeType: contentType }],
           }
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return audioResponseTooLarge(err)
           return fail(formatToolError(err))
         }
       },
