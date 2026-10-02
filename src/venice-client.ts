@@ -18,8 +18,8 @@ export interface RequestInitJSON {
   maxResponseBytes?: number
 }
 
-/** Cap on a buffered SSE body; the whole stream is held in memory and returned as one MCP text block. */
-export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
+/** Cap on a buffered SSE body. The E2EE tool returns compact deltas, not this raw buffer. */
+export const DEFAULT_MAX_EVENT_STREAM_BYTES = 1024 * 1024
 
 /**
  * Thin HTTP client over the Venice API.
@@ -161,6 +161,26 @@ export class VeniceClient {
     opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'POST', json, headers, ...opts })
+  }
+
+  /**
+   * POST JSON and preserve the complete SSE response as UTF-8 text.
+   * No SSE framing or data payload is parsed or normalized.
+   */
+  postEventStream(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'timeoutMs' | 'maxResponseBytes'> = {},
+  ): Promise<string> {
+    return this.request<string>(path, {
+      method: 'POST',
+      json,
+      headers,
+      responseType: 'event-stream',
+      timeoutMs: opts.timeoutMs,
+      maxResponseBytes: opts.maxResponseBytes ?? DEFAULT_MAX_EVENT_STREAM_BYTES,
+    })
   }
 
   /**

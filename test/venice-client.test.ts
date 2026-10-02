@@ -1,24 +1,9 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { DEFAULT_MAX_EVENT_STREAM_BYTES, VeniceClient } from '../src/venice-client.js'
+import { VeniceClient } from '../src/venice-client.js'
 import { loadConfig } from '../src/config.js'
 import { VeniceUpstreamError } from '../src/types.js'
 import { startMockVenice, type MockVeniceServer } from './helpers/mock-venice-server.js'
-
-function eventStream(
-  client: VeniceClient,
-  path: string,
-  json: unknown,
-  _headers?: Record<string, string>,
-  opts: { timeoutMs?: number; maxResponseBytes?: number } = {},
-) {
-  return client.request<string>(path, {
-    json,
-    responseType: 'event-stream',
-    timeoutMs: opts.timeoutMs,
-    maxResponseBytes: opts.maxResponseBytes ?? DEFAULT_MAX_EVENT_STREAM_BYTES,
-  })
-}
 
 const ENCRYPTED_CHUNK = 'ab'.repeat(12_000)
 const RAW_E2EE_SSE =
@@ -236,7 +221,7 @@ describe('VeniceClient', () => {
 
   it('preserves complete SSE framing and encrypted content without truncation or normalization', async () => {
     const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc' }))
-    const raw = await eventStream(c, '/v1/e2ee-stream', { stream: true })
+    const raw = await c.postEventStream('/v1/e2ee-stream', { stream: true })
     assert.equal(raw, RAW_E2EE_SSE)
     assert.ok(raw.includes(ENCRYPTED_CHUNK))
     const last = server.calls.at(-1)!
@@ -247,7 +232,7 @@ describe('VeniceClient', () => {
   it('rejects a successful non-SSE response when event-stream transport is required', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
-      () => eventStream(c, '/v1/not-a-stream', { stream: true }),
+      () => c.postEventStream('/v1/not-a-stream', { stream: true }),
       (err: unknown) => {
         const e = err as VeniceUpstreamError
         assert.equal(e.status, 502)
@@ -260,7 +245,7 @@ describe('VeniceClient', () => {
   it('requires the exact normalized text/event-stream media type', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
-      () => eventStream(c, '/v1/lookalike-stream', { stream: true }),
+      () => c.postEventStream('/v1/lookalike-stream', { stream: true }),
       (err: unknown) => {
         const e = err as VeniceUpstreamError
         assert.equal(e.status, 502)
@@ -273,7 +258,7 @@ describe('VeniceClient', () => {
   it('rejects an SSE stream that contains an error envelope even when it ends with [DONE]', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
-      () => eventStream(c, '/v1/error-envelope-stream', { stream: true }),
+      () => c.postEventStream('/v1/error-envelope-stream', { stream: true }),
       (err: unknown) => {
         const e = err as VeniceUpstreamError
         assert.equal(e.status, 502)
@@ -289,7 +274,7 @@ describe('VeniceClient', () => {
   it('rejects an SSE response without a terminal data: [DONE] event', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
-      () => eventStream(c, '/v1/incomplete-stream', { stream: true }),
+      () => c.postEventStream('/v1/incomplete-stream', { stream: true }),
       (err: unknown) => {
         const e = err as VeniceUpstreamError
         assert.equal(e.status, 502)
@@ -303,7 +288,7 @@ describe('VeniceClient', () => {
   it('parses E2EE 402 JSON before SSE success validation', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
-      () => eventStream(c, '/v1/e2ee-insufficient', { stream: true }),
+      () => c.postEventStream('/v1/e2ee-insufficient', { stream: true }),
       (err: unknown) => {
         const e = err as VeniceUpstreamError
         assert.equal(e.status, 402)
@@ -342,7 +327,7 @@ describe('VeniceClient', () => {
       }) as typeof fetch
       const c = new VeniceClient({ ...loadConfig({}), baseUrl: 'https://stall.test', timeoutMs: 20 })
       await assert.rejects(
-        () => eventStream(c, '/stream', { stream: true }),
+        () => c.postEventStream('/stream', { stream: true }),
         (err: unknown) => {
           const e = err as VeniceUpstreamError
           assert.equal(e.status, 504)
@@ -372,7 +357,7 @@ describe('VeniceClient', () => {
       }) as typeof fetch
       const c = new VeniceClient({ ...loadConfig({}), baseUrl: 'https://truncated.test' })
       await assert.rejects(
-        () => eventStream(c, '/stream', { stream: true }),
+        () => c.postEventStream('/stream', { stream: true }),
         (err: unknown) => {
           const e = err as VeniceUpstreamError
           assert.equal(e.status, 502)
@@ -389,7 +374,7 @@ describe('VeniceClient', () => {
   it('rejects an SSE body larger than the byte cap with a clear error', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
-      () => eventStream(c, '/v1/e2ee-stream', { stream: true }, undefined, { maxResponseBytes: 1_000 }),
+      () => c.postEventStream('/v1/e2ee-stream', { stream: true }, undefined, { maxResponseBytes: 1_000 }),
       /Venice response on \/v1\/e2ee-stream: response is larger than 1000 bytes/,
     )
   })
@@ -409,7 +394,7 @@ describe('VeniceClient', () => {
       }) as typeof fetch
       const c = new VeniceClient({ ...loadConfig({}), baseUrl: 'https://unbounded.test' })
       await assert.rejects(
-        () => eventStream(c, '/stream', { stream: true }, undefined, { maxResponseBytes: 4_096 }),
+        () => c.postEventStream('/stream', { stream: true }, undefined, { maxResponseBytes: 4_096 }),
         /response is larger than 4096 bytes/,
       )
       assert.ok(enqueued < 20, `read ${enqueued} chunks past the cap`)
@@ -421,10 +406,10 @@ describe('VeniceClient', () => {
   it('lets a per-call timeout outlast the configured default for long SSE streams', async () => {
     const c = new VeniceClient(makeCfg({ timeoutMs: 50 }))
     await assert.rejects(
-      () => eventStream(c, '/v1/slow-stream', { stream: true }),
+      () => c.postEventStream('/v1/slow-stream', { stream: true }),
       (err: unknown) => (err as VeniceUpstreamError).status === 504,
     )
-    const raw = await eventStream(c, '/v1/slow-stream', { stream: true }, undefined, { timeoutMs: 2_000 })
+    const raw = await c.postEventStream('/v1/slow-stream', { stream: true }, undefined, { timeoutMs: 2_000 })
     assert.equal(raw, RAW_E2EE_SSE)
   })
 

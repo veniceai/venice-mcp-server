@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
-import { StubClient } from './helpers/stub-client.js'
+import { StubClient, STUB_E2EE, STUB_E2EE_SSE } from './helpers/stub-client.js'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 
@@ -440,6 +440,9 @@ describe('tools endpoint + method mapping', () => {
   }
 })
 
+const E2EE_CIPHERTEXT = STUB_E2EE.encryptToModel('hello')
+const E2EE_HEADERS = STUB_E2EE.headers
+const DEFAULT_E2EE_SSE = STUB_E2EE_SSE
 
 describe('chat and responses request contracts', () => {
   it('accepts every documented chat content block and forwards advanced fields exactly', async () => {
@@ -490,38 +493,85 @@ describe('chat and responses request contracts', () => {
     assert.equal((result.content[0] as { text: string }).text, 'reply')
   })
 
-  it('forwards a bounded per-call timeout_ms on plaintext chat', async () => {
+  it('forwards a valid E2EE chat after catalog and ciphertext checks', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_chat')
+    const args = {
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: E2EE_HEADERS,
+    }
+    const parsed = zObject(tool).parse(args)
+    const result = await tool.handler(parsed as never)
+    assert.equal(result.isError, undefined)
+    const chatCall = stub.calls.find((call) => call.path === '/v1/chat/completions')!
+    assert.deepEqual(JSON.parse(JSON.stringify(chatCall.body)), {
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: args.messages,
+      venice_parameters: { enable_e2ee: true, include_venice_system_prompt: false, enable_web_search: 'off' },
+      stream: true,
+    })
+    assert.deepEqual(chatCall.headers, {
+      'X-Venice-TEE-Client-Pub-Key': E2EE_HEADERS.client_public_key,
+      'X-Venice-TEE-Model-Pub-Key': E2EE_HEADERS.model_public_key,
+      'X-Venice-TEE-Signing-Algo': 'ecdsa',
+    })
+    assert.equal(chatCall.eventStream, true)
+    const payload = JSON.parse((result.content[0] as { text: string }).text) as {
+      id: string
+      deltas: Array<{ content?: string }>
+    }
+    assert.equal(payload.id, 'chatcmpl-stub')
+    assert.equal(payload.deltas.length, 1)
+    assert.match(DEFAULT_E2EE_SSE, new RegExp(payload.deltas[0].content!))
+    assert.doesNotMatch((result.content[0] as { text: string }).text, /data: \[DONE\]/)
+    const structured = result.structuredContent as { id: string; deltas: unknown; ciphertext_shape_valid: boolean }
+    assert.equal(structured.id, 'chatcmpl-stub')
+    assert.deepEqual(structured.deltas, payload.deltas)
+    assert.equal(structured.ciphertext_shape_valid, true)
+  })
+
+  it('rejects E2EE sampling limits before any completion request', async () => {
+    for (const extra of [{ temperature: 0.2 }, { max_tokens: 32 }, { top_p: 0.9 }, { max_completion_tokens: 32 }]) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+      const result = await tool.handler({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+        ...extra,
+      } as never)
+      assert.equal(result.isError, true, JSON.stringify(extra))
+      assert.match((result.content[0] as { text: string }).text, /would be silently ignored/)
+      assert.equal(stub.calls.length, 0, JSON.stringify(extra))
+    }
+  })
+
+  it('forwards a bounded per-call timeout_ms to both chat transports', async () => {
     const { stub, get } = setup()
     const tool = get('venice_chat')
     const schema = zObject(tool)
     assert.equal(schema.safeParse({ messages: [{ role: 'user', content: 'x' }], timeout_ms: 600_001 }).success, false)
     assert.equal(schema.safeParse({ messages: [{ role: 'user', content: 'x' }], timeout_ms: 999 }).success, false)
 
+    await tool.handler(schema.parse({
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: E2EE_HEADERS,
+      timeout_ms: 300_000,
+    }) as never)
+    const e2eeCall = stub.calls.find((call) => call.eventStream)!
+    assert.equal(e2eeCall.timeoutMs, 300_000)
+    assert.equal('timeout_ms' in (e2eeCall.body as Record<string, unknown>), false)
+
     await tool.handler(schema.parse({ messages: [{ role: 'user', content: 'hi' }], timeout_ms: 120_000 }) as never)
     const plainCall = stub.calls.at(-1)!
     assert.equal(plainCall.eventStream, undefined)
     assert.equal(plainCall.timeoutMs, 120_000)
     assert.equal('timeout_ms' in (plainCall.body as Record<string, unknown>), false)
-  })
-
-  it('rejects enable_e2ee before any chat request', async () => {
-    const { stub, get } = setup()
-    const tool = get('venice_chat')
-    const schema = zObject(tool)
-    assert.equal(
-      schema.safeParse({
-        messages: [{ role: 'user', content: 'hello' }],
-        venice_parameters: { enable_e2ee: true },
-      }).success,
-      false,
-    )
-    const result = await tool.handler({
-      messages: [{ role: 'user', content: 'hello' }],
-      venice_parameters: { enable_e2ee: true },
-    } as never)
-    assert.equal(result.isError, true)
-    assert.match((result.content[0] as { text: string }).text, /does not accept enable_e2ee/)
-    assert.equal(stub.calls.some((call) => call.path === '/v1/chat/completions'), false)
   })
 
   it('keeps plaintext chat non-streaming with unchanged completion shaping', async () => {
@@ -537,6 +587,222 @@ describe('chat and responses request contracts', () => {
       prompt_tokens: 1,
       completion_tokens: 1,
     })
+  })
+
+  it('returns compact ciphertext deltas instead of the raw SSE buffer', async () => {
+    const encrypted = STUB_E2EE.encryptToClient('x'.repeat(12_000))
+    const rawSse =
+      `event: message\r\ndata: {"id":"chatcmpl-long","choices":[{"delta":{"content":"${encrypted}"}}]}\r\n\r\n` +
+      'data: [DONE]\r\n\r\n'
+    const stub = new StubClient({ '/v1/chat/completions': () => rawSse })
+    const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+    const result = await tool.handler({
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: E2EE_HEADERS,
+    } as never)
+    assert.equal(result.isError, undefined)
+    const text = (result.content[0] as { text: string }).text
+    assert.doesNotMatch(text, /data: \[DONE\]/)
+    assert.deepEqual(JSON.parse(text), { id: 'chatcmpl-long', deltas: [{ content: encrypted }] })
+    assert.equal((result.structuredContent as { message?: unknown }).message, undefined)
+    assert.equal((result.structuredContent as { ciphertext_shape_valid: boolean }).ciphertext_shape_valid, true)
+  })
+
+  it('rejects incoherent E2EE flag/header combinations before any upstream call', async () => {
+    const invalidArgs = [
+      {
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+      },
+      {
+        messages: [{ role: 'user', content: 'plaintext' }],
+        e2ee_headers: E2EE_HEADERS,
+      },
+      {
+        messages: [{ role: 'user', content: 'plaintext' }],
+        venice_parameters: { enable_e2ee: false },
+        e2ee_headers: E2EE_HEADERS,
+      },
+      {
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: { client_public_key: E2EE_HEADERS.client_public_key },
+      },
+    ]
+    for (const args of invalidArgs) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+      const result = await tool.handler(args as never)
+      assert.equal(result.isError, true)
+      assert.equal(stub.calls.length, 0)
+    }
+  })
+
+  it('rejects E2EE plaintext, files, tools, web features, and implicit/non-E2EE models before chat', async () => {
+    const invalidArgs = [
+      {
+        messages: [{ role: 'user', content: 'hello in plaintext' }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+      },
+      {
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: 'hello in plaintext' }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+      },
+      {
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: E2EE_CIPHERTEXT },
+            { type: 'file', file: { file_data: 'https://example.com/report.pdf' } },
+          ],
+        }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+      },
+      {
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        tools: [{ type: 'function', function: { name: 'lookup' } }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+      },
+      {
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true, enable_web_search: 'on' },
+        e2ee_headers: E2EE_HEADERS,
+      },
+      {
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+      },
+      {
+        model: 'deepseek-v4-flash-0731',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+      },
+    ]
+    for (const args of invalidArgs) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+      const result = await tool.handler(args as never)
+      assert.equal(result.isError, true, `expected rejection for ${JSON.stringify(args.model ?? 'no-model')}`)
+      assert.equal(
+        stub.calls.some((call) => call.path === '/v1/chat/completions'),
+        false,
+      )
+    }
+  })
+
+  it('rejects off-curve header keys and hex-encoded plaintext before any upstream call', async () => {
+    const hexPlaintext = Buffer.from('my secret prompt, merely hex-encoded. '.repeat(3)).toString('hex')
+    const invalidArgs = [
+      { e2ee_headers: { ...E2EE_HEADERS, client_public_key: `04${'1'.repeat(128)}` } },
+      { e2ee_headers: { ...E2EE_HEADERS, model_public_key: `04${'2'.repeat(128)}` } },
+      { messages: [{ role: 'user', content: hexPlaintext }] },
+    ]
+    for (const extra of invalidArgs) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+      const result = await tool.handler({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+        ...extra,
+      } as never)
+      assert.equal(result.isError, true, JSON.stringify(extra))
+      assert.match((result.content[0] as { text: string }).text, /secp256k1|encrypted hex ciphertext/)
+      assert.equal(stub.calls.length, 0)
+    }
+    const schema = zObject(setup().get('venice_chat'))
+    assert.equal(
+      schema.safeParse({
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        e2ee_headers: { ...E2EE_HEADERS, client_public_key: `04${'1'.repeat(128)}` },
+      }).success,
+      false,
+    )
+  })
+
+  it('rejects plaintext-bearing E2EE fields without sending them anywhere', async () => {
+    const canaries = ['PLAIN STOP', 'user-alice@example.com', 'alice-plaintext']
+    const invalidArgs = [
+      { stop: ['PLAIN STOP'] },
+      { prompt_cache_key: 'user-alice@example.com' },
+      { messages: [{ role: 'user', content: E2EE_CIPHERTEXT, name: 'alice-plaintext' }] },
+    ]
+    for (const extra of invalidArgs) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+      const result = await tool.handler(zObject(tool).parse({
+        model: 'e2ee-qwen3-5-122b-a10b',
+        messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+        venice_parameters: { enable_e2ee: true },
+        e2ee_headers: E2EE_HEADERS,
+        ...extra,
+      }) as never)
+      assert.equal(result.isError, true, JSON.stringify(extra))
+      assert.match((result.content[0] as { text: string }).text, /does not allow|may only contain role and content/)
+      assert.equal(stub.calls.length, 0)
+      for (const canary of canaries) {
+        assert.doesNotMatch((result.content[0] as { text: string }).text, new RegExp(canary))
+      }
+    }
+  })
+
+  it('rejects an E2EE response_format schema without issuing any completion request', async () => {
+    const canary = 'canary-schema-must-not-be-forwarded'
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+    const result = await tool.handler({
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'confidential_extraction',
+          schema: {
+            type: 'object',
+            properties: { finding: { type: 'string', description: canary } },
+          },
+        },
+      },
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: E2EE_HEADERS,
+    } as never)
+
+    assert.equal(result.isError, true)
+    assert.match((result.content[0] as { text: string }).text, /does not support structured output/)
+    assert.equal((result.structuredContent as { ciphertext_shape_valid?: boolean } | undefined)?.ciphertext_shape_valid, undefined)
+    assert.equal(stub.callsTo('/v1/chat/completions').length, 0)
+    assert.equal(stub.calls.length, 0)
+    assert.doesNotMatch(JSON.stringify(stub.calls), new RegExp(canary))
+  })
+
+  it('does not label a plaintext SSE payload as an encrypted E2EE result', async () => {
+    const rawSse =
+      'data: {"choices":[{"delta":{"content":"this is plaintext"}}]}\n\n' +
+      'data: [DONE]\n\n'
+    const stub = new StubClient({ '/v1/chat/completions': () => rawSse })
+    const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+    const result = await tool.handler({
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: E2EE_HEADERS,
+    } as never)
+    assert.equal(result.isError, true)
+    assert.match((result.content[0] as { text: string }).text, /plaintext or invalid ciphertext/)
+    assert.equal((result.structuredContent as { ciphertext_shape_valid?: boolean } | undefined)?.ciphertext_shape_valid, undefined)
   })
 
   it('supports assistant tool history and returns tool calls instead of dropping them', async () => {
@@ -656,6 +922,36 @@ describe('tool output shaping', () => {
     } as never)
     assert.equal(r.isError, true)
     assert.match((r.content[0] as { text: string }).text, /402 Payment Required/)
+  })
+
+  it('venice_chat preserves structured 402 diagnostics on the E2EE SSE path', async () => {
+    const stub = new StubClient({
+      '/v1/chat/completions': async () => {
+        const { VeniceUpstreamError } = await import('../src/types.js')
+        throw new VeniceUpstreamError({
+          message: 'pay',
+          status: 402,
+          body: {
+            reason: 'insufficient_balance',
+            currentBalanceUsd: 0,
+            minimumBalanceUsd: 0.1,
+            suggestedTopUpUsd: 10,
+          },
+        })
+      },
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+    const result = await tool.handler({
+      model: 'e2ee-qwen3-5-122b-a10b',
+      messages: [{ role: 'user', content: E2EE_CIPHERTEXT }],
+      venice_parameters: { enable_e2ee: true },
+      e2ee_headers: E2EE_HEADERS,
+    } as never)
+    assert.equal(result.isError, true)
+    const text = (result.content[0] as { text: string }).text
+    assert.match(text, /402 Payment Required/)
+    assert.match(text, /Current balance:\s+\$0\.0000/)
+    assert.match(text, /Suggested top-up:\s+\$10\.00/)
   })
 
   it('venice_list_models forwards type to the catalog so non-text models are discoverable', async () => {
