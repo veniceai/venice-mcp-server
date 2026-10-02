@@ -117,8 +117,8 @@ describe('tools registry', () => {
     assert.equal(schema.safeParse({ model_id: 'flux-2-pro', type: 'code' }).success, false)
     assert.equal(schema.safeParse({ model_id: 'jev-latest', type: 'decision' }).success, true)
     assert.equal(schema.safeParse({ model_id: 'x', type: 'some-new-type' }).success, true)
-    assert.deepEqual(schema.parse({ model_id: '  flux-2-pro  ', type: 'image' }), {
-      model_id: 'flux-2-pro',
+    assert.deepEqual(schema.parse({ model_id: '  FLUX-2-Pro  ', type: 'image' }), {
+      model_id: 'FLUX-2-Pro',
       type: 'image',
     })
   })
@@ -1006,7 +1006,7 @@ describe('tool output shaping', () => {
   it('venice_model_details returns the full matching catalog row', async () => {
     const { get } = setup()
     const r = await get('venice_model_details').handler({
-      model_id: 'flux-2-pro',
+      model_id: 'FLUX-2-Pro',
       type: 'image',
     } as never)
     assert.equal(r.isError, undefined)
@@ -1025,6 +1025,15 @@ describe('tool output shaping', () => {
     assert.equal(model.model_spec.supportsWebSearch, false)
   })
 
+  it('venice_model_details resolves a mixed-case id after schema normalization', async () => {
+    const { get } = setup()
+    const tool = get('venice_model_details')
+    const args = z.object(tool.inputSchema).parse({ model_id: '  FLUX-2-Pro  ', type: 'IMAGE' })
+    const result = await tool.handler(args)
+    assert.equal(result.isError, undefined)
+    assert.equal(result.structuredContent?.id, 'flux-2-pro')
+  })
+
   it('venice_model_details requires an exact id match', async () => {
     const stub = new StubClient({
       '/v1/models?type=image': () => ({
@@ -1033,7 +1042,7 @@ describe('tool output shaping', () => {
     })
     const tools = buildTools(stub.asClient(), cfg)
     const r = await tools.find((t) => t.name === 'venice_model_details')!.handler({
-      model_id: 'flux-2-pro',
+      model_id: 'FLUX-2-Pro',
       type: 'image',
     } as never)
     assert.equal(r.isError, true)
@@ -1057,7 +1066,7 @@ describe('tool output shaping', () => {
     })
     const tools = buildTools(stub.asClient(), cfg)
     const r = await tools.find((t) => t.name === 'venice_model_details')!.handler({
-      model_id: 'flux-2-pro',
+      model_id: 'FLUX-2-Pro',
       type: 'image',
     } as never)
     assert.equal(r.isError, true)

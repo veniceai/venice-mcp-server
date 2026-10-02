@@ -1259,7 +1259,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             .filter((candidate): candidate is Record<string, unknown> =>
               typeof candidate === 'object' && candidate !== null
             )
-            .find((candidate) => candidate.id === model_id)
+            .find((candidate) => typeof candidate.id === 'string' && candidate.id.toLowerCase() === model_id.toLowerCase())
           if (!model) {
             return fail(
               `No model "${model_id}" in the "${type}" catalog. If the id is right, it may belong to another type ` +
