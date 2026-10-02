@@ -198,7 +198,7 @@ const NO_AUTH = ' No authentication required.'
 const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'music', 'tts', 'asr', 'embedding', 'decision'] as const
 /** Shared by music generation and quote so a quoted request is always queueable. */
 const musicDurationSecondsSchema = z
-  .union([z.number().int().positive(), z.string().regex(/^\d+$/, 'Must be a numeric string')])
+  .union([z.number().int().positive(), z.string().regex(/^[1-9]\d*$/, 'Must be a positive integer string')])
   .optional()
   .describe('Optional duration in seconds as a positive integer or numeric string. Model-specific.')
 const modelTypeSchema = z

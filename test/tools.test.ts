@@ -127,11 +127,11 @@ describe('tools registry', () => {
     const { get } = setup()
     const generate = z.object(get('venice_music_generate').inputSchema)
     const quote = z.object(get('venice_audio_quote').inputSchema)
-    for (const duration_seconds of [1, 300, 301, 600, '45', '480']) {
+    for (const duration_seconds of [1, 300, 301, 600, '1', '45', '480']) {
       assert.equal(generate.safeParse({ prompt: 'p', model: 'm', duration_seconds }).success, true)
       assert.equal(quote.safeParse({ model: 'm', duration_seconds }).success, true)
     }
-    for (const duration_seconds of [0, -1, 1.5, '4.5', 'abc']) {
+    for (const duration_seconds of [0, -1, 1.5, '0', '00', '01', '-1', '4.5', 'abc', '']) {
       assert.equal(generate.safeParse({ prompt: 'p', model: 'm', duration_seconds }).success, false)
       assert.equal(quote.safeParse({ model: 'm', duration_seconds }).success, false)
     }
