@@ -215,6 +215,11 @@ const modelTypeSchema = z
   .trim()
   .toLowerCase()
   .regex(/^[a-z][a-z0-9_-]*$/, 'Must be a catalog type such as "video".')
+/** Single-type endpoints reject the list-only "all" and "code" filters. */
+const concreteModelTypeSchema = modelTypeSchema.refine(
+  (t) => t !== 'all' && t !== 'code',
+  'Use a concrete type such as "video"; "all" and "code" are not allowed.',
+)
 
 // First entry is the upstream default for POST /audio/voices when model is omitted.
 const VOICE_CLONE_MODELS = ['tts-chatterbox-hd', 'tts-minimax-speech-02-hd'] as const
@@ -1386,7 +1391,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Model Traits',
       description: `Return the live trait-name to model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
       inputSchema: {
-        type: z.enum(KNOWN_MODEL_TYPES).optional(),
+        type: concreteModelTypeSchema
+          .optional()
+          .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}. Defaults to text upstream.`),
       },
       handler: async ({ type }) => {
         try {
@@ -1406,7 +1413,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Model Compatibility Mapping',
       description: `Return the live compatible model-name to Venice model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
       inputSchema: {
-        type: z.enum(KNOWN_MODEL_TYPES).optional(),
+        type: concreteModelTypeSchema
+          .optional()
+          .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}. Defaults to text upstream.`),
       },
       handler: async ({ type }) => {
         try {
@@ -1427,15 +1436,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Get one exact model's full catalog row, including model_spec constraints, capabilities, and pricing when available. Requires a concrete type to keep the upstream catalog response bounded.${NO_AUTH}`,
       inputSchema: {
         model_id: z.string().trim().min(1).describe('Exact model id, e.g. from venice_list_models({ type: "video" }).'),
-        type: modelTypeSchema
-          .refine((t) => t !== 'all' && t !== 'code', 'Use a concrete type such as "video"; "all" and "code" are not allowed.')
+        type: concreteModelTypeSchema
           .describe(`Catalog type the model belongs to: ${KNOWN_MODEL_TYPES.join(', ')}.`),
       },
       handler: async ({ model_id, type }) => {
         try {
           const query = new URLSearchParams({ type }).toString()
-          const resp = await client.get<{ data?: unknown[] }>(`/v1/models?${query}`)
-          const model = (resp.data ?? [])
+          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`)
+          const models: unknown[] = resp.data ?? resp.models ?? []
+          const model = models
             .filter((candidate): candidate is Record<string, unknown> =>
               typeof candidate === 'object' && candidate !== null
             )

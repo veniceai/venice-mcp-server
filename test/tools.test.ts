@@ -990,7 +990,17 @@ describe('tool output shaping', () => {
         assert.equal(schema.safeParse(type).success, true, `${name} missing model type ${type}`)
       }
       assert.equal(schema.safeParse('all').success, false, `${name} does not accept all`)
+      assert.equal(schema.safeParse('code').success, false, `${name} does not accept code`)
+      assert.equal(schema.safeParse('some-new-type').success, true, `${name} accepts a new catalog type`)
+      assert.equal(schema.parse(' Image '), 'image')
     }
+  })
+
+  it('venice_model_traits forwards a new catalog type upstream', async () => {
+    const { stub, get } = setup()
+    const args = z.object(get('venice_model_traits').inputSchema).parse({ type: 'some-new-type' })
+    await get('venice_model_traits').handler(args as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models/traits?type=some-new-type')
   })
 
   it('venice_list_models pages compact summaries and reports next_offset', async () => {
@@ -1391,6 +1401,19 @@ describe('tool output shaping', () => {
     assert.deepEqual(model.model_spec.constraints.aspectRatios, ['1:1', '16:9'])
     assert.equal(model.model_spec.pricing.generation.usd, 0.03)
     assert.equal(model.model_spec.supportsWebSearch, false)
+  })
+
+  it('venice_model_details reads a catalog returned under models', async () => {
+    const stub = new StubClient({
+      '/v1/models?type=video': () => ({ models: [{ id: 'video-model', type: 'video', model_spec: {} }] }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_model_details')!.handler({
+      model_id: 'video-model',
+      type: 'video',
+    } as never)
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { id: string }).id, 'video-model')
   })
 
   it('venice_model_details requires an exact id match', async () => {
