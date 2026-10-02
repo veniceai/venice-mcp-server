@@ -839,17 +839,24 @@ describe('tool output shaping', () => {
     }
   })
 
-  it('venice_list_characters validates search length and drops the unsupported tag filter', async () => {
+  it('venice_list_characters validates search length and merges the deprecated tag alias into tags', async () => {
     const { stub, get } = setup()
     const tool = get('venice_list_characters')
     const schema = z.object(tool.inputSchema)
     assert.equal(schema.safeParse({ search: 'a'.repeat(200) }).success, true)
     assert.equal(schema.safeParse({ search: 'a'.repeat(201) }).success, false)
-    assert.equal('tag' in tool.inputSchema, false)
+    assert.equal(schema.safeParse({ tag: 'a'.repeat(100) }).success, true)
+    assert.equal(schema.safeParse({ tag: 'a'.repeat(101) }).success, false)
+    assert.match(tool.inputSchema.tag.description ?? '', /Deprecated: use tags/)
 
-    const parsed = schema.parse({ tag: 'legacy' })
-    await tool.handler(parsed as never)
-    assert.equal(stub.calls.at(-1)?.path, '/v1/characters')
+    await tool.handler(schema.parse({ tag: 'legacy' }))
+    assert.equal(stub.calls.at(-1)?.path, '/v1/characters?tags=legacy')
+
+    await tool.handler(schema.parse({ tag: 'helpful', tags: ['helpful', 'productivity'] }))
+    assert.equal(stub.calls.at(-1)?.path, '/v1/characters?tags=helpful&tags=productivity')
+
+    await tool.handler(schema.parse({ tag: 'legacy', tags: ['helpful'] }))
+    assert.equal(stub.calls.at(-1)?.path, '/v1/characters?tags=helpful&tags=legacy')
   })
 
   it('truncates large character outputs to valid JSON', async () => {

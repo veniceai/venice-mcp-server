@@ -1162,6 +1162,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: {
         search: z.string().max(200).optional(),
         tags: z.array(z.string().max(100)).max(20).optional(),
+        tag: z.string().max(100).optional().describe('Deprecated: use tags. A single tag, merged into tags.'),
         categories: z.array(z.string().max(100)).max(20).optional(),
         isAdult: z.boolean().optional(),
         isPro: z.boolean().optional(),
@@ -1180,7 +1181,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         try {
           const params = new URLSearchParams()
           if (args.search) params.set('search', args.search)
-          for (const tag of args.tags ?? []) params.append('tags', tag)
+          const tags = new Set<string>(args.tags ?? [])
+          if (args.tag) tags.add(args.tag)
+          for (const tag of tags) params.append('tags', tag)
           for (const category of args.categories ?? []) params.append('categories', category)
           if (args.isAdult !== undefined) params.set('isAdult', String(args.isAdult))
           if (args.isPro !== undefined) params.set('isPro', String(args.isPro))
