@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
@@ -19,7 +20,7 @@ function setup() {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented set (31 tools)', () => {
+  it('registers exactly the documented set (32 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
@@ -37,6 +38,7 @@ describe('tools registry', () => {
       'venice_image_upscale',
       'venice_list_characters',
       'venice_list_models',
+      'venice_model_details',
       'venice_music_complete',
       'venice_music_generate',
       'venice_music_status',
@@ -56,7 +58,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 31)
+    assert.equal(tools.length, 32)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -104,6 +106,22 @@ describe('tools registry', () => {
     assert.match(get('venice_list_characters').description, /API key required/i)
     // chat_with_character notes the discovery limitation
     assert.match(get('venice_chat_with_character').description, /API[- ]key/i)
+  })
+
+  it('requires a non-empty model id and bounded type for venice_model_details', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_model_details').inputSchema)
+    assert.equal(schema.safeParse({ model_id: '', type: 'image' }).success, false)
+    assert.equal(schema.safeParse({ model_id: '   ', type: 'image' }).success, false)
+    assert.equal(schema.safeParse({ model_id: 'flux-2-pro' }).success, false)
+    assert.equal(schema.safeParse({ model_id: 'flux-2-pro', type: 'all' }).success, false)
+    assert.equal(schema.safeParse({ model_id: 'flux-2-pro', type: 'code' }).success, false)
+    assert.equal(schema.safeParse({ model_id: 'jev-latest', type: 'decision' }).success, true)
+    assert.equal(schema.safeParse({ model_id: 'x', type: 'some-new-type' }).success, true)
+    assert.deepEqual(schema.parse({ model_id: '  flux-2-pro  ', type: 'image' }), {
+      model_id: 'flux-2-pro',
+      type: 'image',
+    })
   })
 })
 
@@ -317,7 +335,13 @@ const MAPPINGS: Mapping[] = [
   },
 
   // catalog
-  { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models' },
+  { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models?type=all' },
+  {
+    tool: 'venice_model_details',
+    args: { model_id: 'flux-2-pro', type: 'image' },
+    expectMethod: 'GET',
+    expectPath: '/v1/models?type=image',
+  },
 
   // characters
   { tool: 'venice_list_characters', args: {}, expectMethod: 'GET', expectPath: '/v1/characters' },
@@ -442,11 +466,77 @@ describe('tool output shaping', () => {
     assert.match((r.content[0] as { text: string }).text, /402 Payment Required/)
   })
 
-  it('venice_list_models filters by capability type', async () => {
-    const { get } = setup()
+  it('venice_list_models forwards type to the catalog so non-text models are discoverable', async () => {
+    const { stub, get } = setup()
     const r = await get('venice_list_models').handler({ type: 'image' } as never)
-    assert.equal((r.structuredContent as { count: number; total: number }).total, 3)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
     assert.equal((r.structuredContent as { count: number }).count, 1)
+    assert.match((r.content[0] as { text: string }).text, /flux-2-pro/)
+    assert.deepEqual((r.structuredContent as { ids: string[] }).ids, ['flux-2-pro'])
+
+    await get('venice_list_models').handler({} as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=all')
+  })
+
+  it('venice_model_details returns the full matching catalog row', async () => {
+    const { get } = setup()
+    const r = await get('venice_model_details').handler({
+      model_id: 'flux-2-pro',
+      type: 'image',
+    } as never)
+    assert.equal(r.isError, undefined)
+    assert.match((r.content[0] as { text: string }).text, /"constraints"/)
+    const model = r.structuredContent as {
+      id: string
+      model_spec: {
+        pricing: { generation: { usd: number } }
+        constraints: { aspectRatios: string[] }
+        supportsWebSearch: boolean
+      }
+    }
+    assert.equal(model.id, 'flux-2-pro')
+    assert.deepEqual(model.model_spec.constraints.aspectRatios, ['1:1', '16:9'])
+    assert.equal(model.model_spec.pricing.generation.usd, 0.03)
+    assert.equal(model.model_spec.supportsWebSearch, false)
+  })
+
+  it('venice_model_details requires an exact id match', async () => {
+    const stub = new StubClient({
+      '/v1/models?type=image': () => ({
+        data: [{ id: 'flux-2-pro-preview', model_spec: {}, type: 'image' }],
+      }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_model_details')!.handler({
+      model_id: 'flux-2-pro',
+      type: 'image',
+    } as never)
+    assert.equal(r.isError, true)
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /No model "flux-2-pro" in the "image" catalog/)
+    assert.match(text, /retry with that type/)
+    assert.doesNotMatch(text, /\(.*\bimage\b.*\)/)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
+  })
+
+  it('venice_model_details formats upstream errors consistently', async () => {
+    const stub = new StubClient({
+      '/v1/models?type=image': async () => {
+        const { VeniceUpstreamError } = await import('../src/types.js')
+        throw new VeniceUpstreamError({
+          message: 'missing',
+          status: 404,
+          body: { error: 'Model not found' },
+        })
+      },
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_model_details')!.handler({
+      model_id: 'flux-2-pro',
+      type: 'image',
+    } as never)
+    assert.equal(r.isError, true)
+    assert.equal((r.content[0] as { text: string }).text, 'Venice API error 404: upstream request failed.')
   })
 
   it('x402 wallet helper tools request SIWX auth override', async () => {
