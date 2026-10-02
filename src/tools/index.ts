@@ -130,6 +130,10 @@ class QueueDownloadUrlStore {
     return this.urls.get(queueId)?.url
   }
 
+  delete(queueId: string): void {
+    this.urls.delete(queueId)
+  }
+
   private prune(now = Date.now()): void {
     for (const [queueId, entry] of this.urls) {
       if (entry.expiresAt <= now) this.urls.delete(queueId)
@@ -740,6 +744,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                     ' Assume the media is still stored server-side and retry with venice_video_complete.',
                 }
               }
+              queueDownloadUrls.delete(args.queue_id)
               return { deleted: true, cleanupNote: ` ${successNote}` }
             } catch (cleanupError) {
               return {
@@ -859,6 +864,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               { server_media_deleted: false },
             )
           }
+          queueDownloadUrls.delete(args.queue_id)
           return ok(`Marked ${args.queue_id} complete; server-side media removed.`, {
             server_media_deleted: true,
           })

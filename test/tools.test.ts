@@ -886,6 +886,43 @@ describe('tool output shaping', () => {
     assert.match((r.content[1] as { text: string }).text, /cleanup was not confirmed/)
   })
 
+  for (const automatic of [false, true]) {
+    for (const cleanup of [{ success: true }, { success: false }, {}, null, new Error('cleanup failed')]) {
+      it(`${automatic ? 'automatic' : 'explicit'} video cleanup evicts the remembered URL only on confirmed success: ${JSON.stringify(cleanup)}`, async () => {
+        const url = 'https://private-share.venice.ai/v1/share/read/cleanup'
+        let binary = automatic
+        const stub = new StubClient({
+          '/v1/video/queue': () => ({ model: 'm', queue_id: 'cleanup', download_url: url }),
+          '/v1/video/retrieve': () => binary
+            ? { kind: 'binary', buffer: Buffer.from('mp4'), contentType: 'video/mp4' }
+            : { status: 'COMPLETED' },
+          '/v1/video/complete': () => {
+            if (cleanup instanceof Error) throw cleanup
+            return cleanup
+          },
+        })
+        const tools = buildTools(stub.asClient(), cfg)
+        const get = (name: string) => tools.find((tool) => tool.name === name)!
+        const args = { queue_id: 'cleanup', model: 'm' }
+        await get('venice_video_generate').handler({ prompt: 'p', model: 'm', duration: '8s' })
+        await get(automatic ? 'venice_video_status' : 'venice_video_complete').handler({
+          ...args,
+          ...(automatic ? { delete_media_on_completion: true } : {}),
+        })
+        assert.equal(stub.callsTo('/v1/video/complete').length, 1)
+        binary = false
+        const result = await get('venice_video_status').handler(args)
+        if (cleanup && 'success' in cleanup && cleanup.success === true) {
+          assert.equal(result.isError, true)
+          assert.doesNotMatch(JSON.stringify(result), /share\/read\/cleanup/)
+        } else {
+          assert.equal(result.isError, undefined)
+          assert.equal(result.structuredContent?.url, url)
+        }
+      })
+    }
+  }
+
   it('venice_video_complete reports removal only when Venice confirms success', async () => {
     const stub = new StubClient({
       '/v1/video/complete': () => ({ success: true }),
