@@ -876,7 +876,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if (resp.status === 'COMPLETED') {
             if (!url) {
               return fail(
-                'Video completed but Venice returned neither a video/mp4 body nor a download_url.',
+                queueDownloadUrl !== undefined
+                  ? 'download_url rejected: must be https on venice.ai or a subdomain.'
+                  : 'Video completed but Venice returned neither a video/mp4 body nor a download_url.',
                 { status: 'COMPLETED' },
               )
             }
@@ -1031,7 +1033,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         const textOffset = args.text_offset ?? 0
         const respond = (body: AsrUpstreamBody, handle: string | undefined) => {
           const { text, structured, paged } = boundAsrResult(body, offset, limit, textOffset)
-          const full = handle ? { ...structured, result_handle: handle } : structured
+          const pageable = structured.timestamps_truncated || structured.next_text_offset != null
+          const resultHandle = handle ?? (pageable ? asrResults.remember(body) : undefined)
+          const full = resultHandle ? { ...structured, result_handle: resultHandle } : structured
           // Hosts that read only text content still need the page and its continuation handle.
           return ok(paged ? JSON.stringify(full) : text, full)
         }
@@ -1069,10 +1073,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             { maxBytes: 1024 * 1024 },
           )
           const body: AsrUpstreamBody = typeof resp === 'string' ? { text: resp } : resp
-          const transcript = body.text ?? body.transcription ?? ''
-          // Only results with more than one page are worth retaining.
-          const pageable = body.timestamps !== undefined || transcript.length > ASR_TEXT_PAGE_CHARS
-          return respond(body, pageable ? asrResults.remember(body) : undefined)
+          return respond(body, undefined)
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) {
             return fail(
@@ -1361,7 +1362,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const start = offset ?? 0
           const end = Math.min(models.length, start + (limit ?? MODEL_LIST_DEFAULT_LIMIT))
           const page: unknown[] = []
-          let chars = 2
+          const result = {
+            requested_type: requestedType,
+            total: models.length,
+            count: end - start,
+            offset: start,
+            next_offset: end as number | null,
+            ids,
+            data: page,
+          }
+          let chars = JSON.stringify(result).length
           for (let i = start; i < end; i++) {
             const entry = verbose ? models[i] : compactModel(models[i])
             const size = JSON.stringify(entry).length + 1
@@ -1371,15 +1381,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           const next = start + page.length
           const nextOffset = next < models.length ? next : null
-          return ok(truncate(JSON.stringify(page), MODEL_LIST_MAX_PAGE_CHARS), {
-            requested_type: requestedType,
-            total: models.length,
-            count: page.length,
-            offset: start,
-            next_offset: nextOffset,
-            ids,
-            data: page,
-          })
+          result.count = page.length
+          result.next_offset = nextOffset
+          return ok(JSON.stringify(result), result)
         } catch (err) {
           return fail(formatToolError(err))
         }

@@ -768,19 +768,30 @@ describe('tool output shaping', () => {
     )
   })
 
-  it('venice_video_status ignores a caller download_url that is not a Venice host', async () => {
-    const stub = new StubClient({
-      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+  for (const downloadUrl of [
+    'https://evil.example/payload.mp4?secret=do-not-echo',
+    'http://venice.ai/payload.mp4',
+    'https://venice.ai.evil.example/payload.mp4',
+  ]) {
+    it(`venice_video_status explicitly rejects an untrusted caller download_url (${downloadUrl})`, async () => {
+      const stub = new StubClient({
+        '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+      })
+      const tools = buildTools(stub.asClient(), cfg)
+      const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+        queue_id: 'vps-1',
+        model: 'grok-imagine-text-to-video-private',
+        download_url: downloadUrl,
+      } as never)
+      assert.equal(r.isError, true)
+      assert.equal(
+        (r.content[0] as { text: string }).text,
+        'download_url rejected: must be https on venice.ai or a subdomain.',
+      )
+      assert.equal(JSON.stringify(r).includes(downloadUrl), false)
+      assert.deepEqual(r.structuredContent, { status: 'COMPLETED' })
     })
-    const tools = buildTools(stub.asClient(), cfg)
-    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
-      queue_id: 'vps-1',
-      model: 'grok-imagine-text-to-video-private',
-      download_url: 'https://evil.example/payload.mp4',
-    } as never)
-    assert.equal(r.isError, true)
-    assert.match((r.content[0] as { text: string }).text, /download_url/)
-  })
+  }
 
   it('venice_video_generate tells the host to pass queue-time download_url into status', async () => {
     const stub = new StubClient({
@@ -1032,7 +1043,7 @@ describe('tool output shaping', () => {
     assert.equal(s1.next_offset, 50)
     const text = (first.content[0] as { text: string }).text
     assert.doesNotMatch(text, /\n/, 'compact JSON')
-    assert.deepEqual(JSON.parse(text)[0], {
+    assert.deepEqual(JSON.parse(text).data[0], {
       id: 'model-0',
       type: 'text',
       name: 'Model 0',
@@ -1053,6 +1064,35 @@ describe('tool output shaping', () => {
     assert.equal(tool.inputSchema.limit.safeParse(201).success, false)
   })
 
+  for (const verbose of [false, true]) {
+    it(`venice_list_models follows every page using only text content (verbose=${verbose})`, async () => {
+      const models = Array.from({ length: 120 }, (_, i) => ({
+        id: `model-${i}`,
+        type: 'text',
+        model_spec: { description: 'x'.repeat(1500) },
+      }))
+      const stub = new StubClient({ '/v1/models?type=all': () => ({ data: models }) })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')!
+      const seen: string[] = []
+      let offset: number | null = 0
+      while (offset !== null) {
+        const result = await tool.handler({ offset, verbose })
+        const text = result.content.filter((c) => c.type === 'text').map((c) => c.text).join('')
+        const page = JSON.parse(text)
+        assert.equal(page.total, models.length)
+        assert.deepEqual(page.ids, models.map((m) => m.id))
+        assert.equal(page.offset, offset)
+        assert.equal(page.count, page.data.length)
+        assert.ok(page.count > 0)
+        seen.push(...page.data.map((m: { id: string }) => m.id))
+        assert.ok(page.next_offset === null || page.next_offset === offset + page.count)
+        assert.ok(seen.length <= models.length)
+        offset = page.next_offset
+      }
+      assert.deepEqual(seen, models.map((m) => m.id))
+    })
+  }
+
   it('venice_list_models caps verbose pages by size and continues via next_offset', async () => {
     const models = Array.from({ length: 200 }, (_, i) => ({
       id: `model-${i}`,
@@ -1067,7 +1107,7 @@ describe('tool output shaping', () => {
     assert.ok(s.count > 0 && s.count < 200)
     assert.equal(s.next_offset, s.count)
     assert.ok(text.length <= 64 * 1024)
-    assert.equal((JSON.parse(text) as unknown[]).length, s.count)
+    assert.equal(JSON.parse(text).data.length, s.count)
   })
 
   it('venice_voice_clone list shapes live model-scoped voice metadata', async () => {
@@ -1166,8 +1206,33 @@ describe('tool output shaping', () => {
       const textContent = JSON.parse((r.content[0] as { text: string }).text)
       assert.equal(textContent.text, 'hello')
       assert.deepEqual(textContent.timestamps, { word: [{ word: 'hello', start: 0, end: 1.5 }] })
-      assert.equal(typeof textContent.result_handle, 'string')
+      assert.equal(textContent.result_handle, undefined)
+      assert.equal(r.structuredContent?.result_handle, undefined)
+      assert.equal(textContent.timestamps_truncated, false)
+      assert.equal(textContent.next_timestamp_offset, null)
       assert.equal(tool.inputSchema.response_format.safeParse('srt').success, false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr does not retain timestamp results that fit the requested page', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = async () =>
+        new Response('mock audio', { headers: { 'content-type': 'audio/wav' } })
+      const words = Array.from({ length: 200 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: words } }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      for (const args of [{}, { timestamp_offset: 199, timestamp_limit: 1 }]) {
+        const result = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true, ...args })
+        assert.equal(result.isError, undefined)
+        assert.equal(result.structuredContent?.timestamps_truncated, false)
+        assert.equal(result.structuredContent?.result_handle, undefined)
+        assert.equal(JSON.parse((result.content[0] as { text: string }).text).result_handle, undefined)
+      }
     } finally {
       globalThis.fetch = originalFetch
     }
@@ -1251,12 +1316,13 @@ describe('tool output shaping', () => {
           headers: { 'content-type': 'audio/wav' },
         })) as typeof fetch
       const stub = new StubClient({
-        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: [{ word: 'hi', start: 0, end: 1 }] } }),
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: Array.from({ length: 201 }, () => ({ word: 'hi', start: 0, end: 1 })) } }),
       })
       const sessionA = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
       const sessionB = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
       const r = await sessionA.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true } as never)
       const handle = (r.structuredContent as { result_handle: string }).result_handle
+      assert.equal(typeof handle, 'string')
 
       const own = await sessionA.handler({ result_handle: handle } as never)
       assert.equal(own.isError, undefined)
@@ -1299,11 +1365,12 @@ describe('tool output shaping', () => {
       globalThis.fetch = (async () =>
         new Response('mock audio', { status: 200, headers: { 'content-type': 'audio/wav' } })) as typeof fetch
       const stub = new StubClient({
-        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: [{ word: 'hi', start: 0, end: 1 }] } }),
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: Array.from({ length: 201 }, () => ({ word: 'hi', start: 0, end: 1 })) } }),
       })
       const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
       const r = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true } as never)
       const handle = (r.structuredContent as { result_handle: string }).result_handle
+      assert.equal(typeof handle, 'string')
       t.mock.timers.tick(10 * 60 * 1000)
       const expired = await tool.handler({ result_handle: handle } as never)
       assert.equal((expired.structuredContent as { error: string }).error, 'asr_result_expired')
