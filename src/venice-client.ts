@@ -10,18 +10,25 @@ export interface RequestInitJSON {
   /** Override request timeout for this call. */
   timeoutMs?: number
   /** Override default API-key-first auth behavior for endpoint-specific requirements. */
-  auth?: 'default' | 'siwx' | 'none'
+  auth?: 'default' | 'apiKey' | 'siwx' | 'none'
+  /** Observe response metadata without changing the existing body-only return type. */
+  onResponse?: (metadata: ResponseMetadata) => void
+}
+
+export interface ResponseMetadata {
+  status: number
+  headers: Record<string, string>
 }
 
 /**
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
- * - Otherwise adds `X-Sign-In-With-X` when a SIWX token is configured.
+ * - Otherwise adds the canonical `SIGN-IN-WITH-X` when a SIWX token is configured.
  * - Surfaces 402 responses as `VeniceUpstreamError(isPaymentRequired)` so tools
  *   can format a helpful top-up message back to the MCP host.
  *
- * We deliberately never set `X-402-Payment` on inference routes; Venice
- * rejects that header outside `/x402/top-up`.
+ * We deliberately never set a payment header. Payment submission belongs only
+ * on `/x402/top-up`, and this client currently exposes discovery—not settlement.
  */
 export class VeniceClient {
   constructor(private readonly cfg: Config) {}
@@ -35,76 +42,92 @@ export class VeniceClient {
     }
     if (init.json !== undefined) headers['Content-Type'] = 'application/json'
     const auth = init.auth ?? 'default'
-    if (auth === 'siwx') {
+    if (auth === 'apiKey') {
+      for (const key of Object.keys(headers)) {
+        if (
+          [
+            'authorization',
+            'sign-in-with-x',
+            'x-sign-in-with-x',
+            'payment-signature',
+            'x-402-payment',
+            'x-payment',
+          ].includes(key.toLowerCase())
+        ) {
+          delete headers[key]
+        }
+      }
+      if (!this.cfg.apiKey) {
+        throw new Error('VENICE_API_KEY is required for this API-key-only endpoint.')
+      }
+      headers.Authorization = `Bearer ${this.cfg.apiKey}`
+    } else if (auth === 'siwx') {
       delete headers.Authorization
       delete headers.authorization
-      if (this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
-        headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+      if (this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
+        headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
       }
     } else if (auth === 'default' && this.cfg.apiKey && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    } else if (auth === 'default' && this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
-      headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    } else if (auth === 'default' && this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
+      headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
     }
 
+    const timeoutMs = init.timeoutMs ?? this.cfg.timeoutMs
+    // The timer stays armed until the body is fully read: a 200 whose body
+    // stalls after the headers must still time out.
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), init.timeoutMs ?? this.cfg.timeoutMs)
-    let res: Response
+    const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
-      res = await fetch(url, {
-        method: init.method ?? (init.json !== undefined ? 'POST' : 'GET'),
-        headers,
-        body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
-        signal: ac.signal,
+      const res = await fetchWithTimeout(
+        url,
+        {
+          method: init.method ?? (init.json !== undefined ? 'POST' : 'GET'),
+          headers,
+          body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
+          signal: ac.signal,
+        },
+        timeoutMs,
+      )
+
+      const responseHeaders: Record<string, string> = {}
+      res.headers.forEach((value, key) => {
+        responseHeaders[key] = value
       })
-    } catch (err) {
-      clearTimeout(timeout)
-      if ((err as Error).name === 'AbortError') {
+      init.onResponse?.({ status: res.status, headers: responseHeaders })
+
+      const body = await readBody(res, ac.signal, timeoutMs)
+      if (!res.ok) {
         throw new VeniceUpstreamError({
-          message: `Upstream request timed out after ${init.timeoutMs ?? this.cfg.timeoutMs}ms`,
-          status: 504,
-          body: { error: 'timeout' },
+          message: `Venice ${res.status} on ${path}`,
+          status: res.status,
+          body,
+          headers: responseHeaders,
         })
       }
-      throw err
+      return body as T
+    } finally {
+      clearTimeout(timeout)
     }
-    clearTimeout(timeout)
-
-    const contentType = res.headers.get('content-type') ?? ''
-    let body: unknown
-    if (contentType.includes('application/json')) {
-      body = await res.json().catch(() => ({}))
-    } else {
-      body = await res.text().catch(() => '')
-    }
-
-    if (!res.ok) {
-      const headerObj: Record<string, string> = {}
-      res.headers.forEach((v, k) => {
-        headerObj[k] = v
-      })
-      throw new VeniceUpstreamError({
-        message: `Venice ${res.status} on ${path}`,
-        status: res.status,
-        body,
-        headers: headerObj,
-      })
-    }
-    return body as T
   }
 
   /** GET request returning JSON. */
   get<T = unknown>(
     path: string,
     headers?: Record<string, string>,
-    opts: { auth?: RequestInitJSON['auth']; timeoutMs?: number } = {},
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'GET', headers, ...opts })
   }
 
   /** POST request with JSON body. */
-  post<T = unknown>(path: string, json: unknown, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: 'POST', json, headers })
+  post<T = unknown>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse'> = {},
+  ): Promise<T> {
+    return this.request<T>(path, { method: 'POST', json, headers, ...opts })
   }
 
   /**
@@ -122,28 +145,18 @@ export class VeniceClient {
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
     }
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    else if (this.cfg.siwxToken) headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
     // NOTE: don't set Content-Type — fetch sets the boundary automatically.
 
+    const timeoutMs = opts.timeoutMs ?? this.cfg.timeoutMs
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), opts.timeoutMs ?? this.cfg.timeoutMs)
-    let res: Response
+    const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
-      res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal })
-    } catch (err) {
+      const res = await fetchWithTimeout(url, { method: 'POST', headers, body: form, signal: ac.signal }, timeoutMs)
+      return await parseResponse<T>(res, path, ac.signal, timeoutMs)
+    } finally {
       clearTimeout(timeout)
-      if ((err as Error).name === 'AbortError') {
-        throw new VeniceUpstreamError({
-          message: `Upstream request timed out after ${opts.timeoutMs ?? this.cfg.timeoutMs}ms`,
-          status: 504,
-          body: { error: 'timeout' },
-        })
-      }
-      throw err
     }
-    clearTimeout(timeout)
-
-    return parseResponse<T>(res, path)
   }
 
   /**
@@ -162,7 +175,7 @@ export class VeniceClient {
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
     }
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    else if (this.cfg.siwxToken) headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
 
     let body: any
     if ('form' in init) {
@@ -173,57 +186,77 @@ export class VeniceClient {
       body = init.json !== undefined ? JSON.stringify(init.json) : undefined
     }
 
+    const timeoutMs = opts.timeoutMs ?? this.cfg.timeoutMs
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), opts.timeoutMs ?? this.cfg.timeoutMs)
-    let res: Response
+    const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
-      res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal })
-    } catch (err) {
-      clearTimeout(timeout)
-      if ((err as Error).name === 'AbortError') {
+      const res = await fetchWithTimeout(url, { method: 'POST', headers, body, signal: ac.signal }, timeoutMs)
+
+      if (!res.ok) {
+        // For errors, still parse as JSON so we get a useful error body
+        const errBody = await readBody(res, ac.signal, timeoutMs)
+        const headerObj: Record<string, string> = {}
+        res.headers.forEach((v, k) => (headerObj[k] = v))
         throw new VeniceUpstreamError({
-          message: `Upstream request timed out after ${opts.timeoutMs ?? this.cfg.timeoutMs}ms`,
-          status: 504,
-          body: { error: 'timeout' },
+          message: `Venice ${res.status} on ${path}`,
+          status: res.status,
+          body: errBody,
+          headers: headerObj,
         })
       }
-      throw err
-    }
-    clearTimeout(timeout)
 
-    if (!res.ok) {
-      // For errors, still parse as JSON so we get a useful error body
-      const ct = res.headers.get('content-type') ?? ''
-      let errBody: unknown
-      if (ct.includes('application/json')) errBody = await res.json().catch(() => ({}))
-      else errBody = await res.text().catch(() => '')
-      const headerObj: Record<string, string> = {}
-      res.headers.forEach((v, k) => (headerObj[k] = v))
-      throw new VeniceUpstreamError({
-        message: `Venice ${res.status} on ${path}`,
-        status: res.status,
-        body: errBody,
-        headers: headerObj,
-      })
+      let ab: ArrayBuffer
+      try {
+        ab = await res.arrayBuffer()
+      } catch (err) {
+        if (ac.signal.aborted) throw timeoutError(timeoutMs)
+        throw err
+      }
+      return { buffer: Buffer.from(ab), contentType: res.headers.get('content-type') ?? 'application/octet-stream' }
+    } finally {
+      clearTimeout(timeout)
     }
+  }
+}
 
-    const ab = await res.arrayBuffer()
-    return { buffer: Buffer.from(ab), contentType: res.headers.get('content-type') ?? 'application/octet-stream' }
+function timeoutError(timeoutMs: number): VeniceUpstreamError {
+  return new VeniceUpstreamError({
+    message: `Upstream request timed out after ${timeoutMs}ms`,
+    status: 504,
+    body: { error: 'timeout' },
+  })
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') throw timeoutError(timeoutMs)
+    throw err
   }
 }
 
 /**
- * Shared response parser used by `request` and `postMultipart`.
+ * Read a JSON or text body. An unreadable body degrades to `{}` / `''`, but a
+ * body cut off by the request timeout surfaces as a 504 so callers can tell a
+ * stalled response from an empty one.
+ */
+async function readBody(res: Response, signal: AbortSignal, timeoutMs: number): Promise<unknown> {
+  const isJson = (res.headers.get('content-type') ?? '').includes('application/json')
+  try {
+    return isJson ? await res.json() : await res.text()
+  } catch {
+    if (signal.aborted) throw timeoutError(timeoutMs)
+    return isJson ? {} : ''
+  }
+}
+
+/**
+ * Shared response parser used by `postMultipart`.
  * Handles JSON vs text content, surfaces 402 / 4xx / 5xx as VeniceUpstreamError.
  */
-async function parseResponse<T>(res: Response, path: string): Promise<T> {
-  const contentType = res.headers.get('content-type') ?? ''
-  let body: unknown
-  if (contentType.includes('application/json')) {
-    body = await res.json().catch(() => ({}))
-  } else {
-    body = await res.text().catch(() => '')
-  }
+async function parseResponse<T>(res: Response, path: string, signal: AbortSignal, timeoutMs: number): Promise<T> {
+  const body = await readBody(res, signal, timeoutMs)
   if (!res.ok) {
     const headerObj: Record<string, string> = {}
     res.headers.forEach((v, k) => (headerObj[k] = v))

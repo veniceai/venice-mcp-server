@@ -13,21 +13,25 @@
  *      - crypto/rpc/:network
  *   ⚠️  API key only (no x402):
  *      - characters (list, get, reviews)
- *      - billing/* (balance, cost, usage, usage-analytics)
- *      - api_keys/*, support-bot
+ *      - api_keys/rate_limits (INFERENCE or ADMIN); rate_limits/log requires ADMIN
+ *      - billing/* and api_keys list/get require an ADMIN key
+ *      - support-bot
  *   🔓 Auth-free:
  *      - models, models/traits
  *      - image/styles
  *      - audio/quote, video/quote
- *      - x402/balance, x402/top-up, x402/transactions
+ *      - x402/top-up requirement discovery
  *      - tee/attestation, tee/signature
+ *   👛 SIWX only:
+ *      - x402/balance, x402/transactions
  */
 import { z } from 'zod'
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { formatToolError, truncate } from '../format.js'
+import { VeniceUpstreamError } from '../types.js'
 import { fetchUploadSource } from './remote-fetch.js'
-
 /**
  * Sniff the MIME type of a base64-encoded image from its magic bytes.
  * Falls back to 'image/png' if the format is unrecognised.
@@ -77,6 +81,7 @@ export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
   name: string
   title: string
   description: string
+  annotations?: ToolAnnotations
   inputSchema: S
   handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
 }
@@ -92,7 +97,92 @@ const fail = (text: string): ToolResult => ({
 
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
+const ADMIN_API_KEY_ONLY =
+  ' ADMIN API key required — inference keys cannot call this endpoint. This endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
+const walletAddressSchema = z
+  .string()
+  .regex(
+    /^(0x[a-fA-F0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/,
+    'Must be an EVM (0x + 40 hex characters) or Solana base58 wallet address.',
+  )
+function isCalendarDate(value: string): boolean {
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+const dateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Must use YYYY-MM-DD format.')
+  .refine(isCalendarDate, 'Must be a real calendar date.')
+const utcTimestampSchema = z
+  .string()
+  .max(40)
+  .regex(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/,
+    'Must be an ISO 8601 UTC timestamp with a Z suffix.',
+  )
+  // Date.parse rolls impossible days such as Feb 30 into the next month.
+  .refine(
+    (value) => isCalendarDate(value) && Number.isFinite(Date.parse(value)),
+    'Must be a real calendar date and time.',
+  )
+
+function normalizeExpiresAt(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const match = value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/)
+  if (!match || !match[2] || match[2].length === 3) return value
+  return `${match[1]}.${match[2].padEnd(3, '0').slice(0, 3)}Z`
+}
+
+function normalizeWalletAddress(address: string): string {
+  return address.startsWith('0x') ? address.toLowerCase() : address
+}
+
+const TOP_UP_ACCEPT_FIELDS = ['scheme', 'network', 'amount', 'asset', 'payTo', 'maxTimeoutSeconds', 'extra'] as const
+
+/** Keeps only the documented x402 requirement fields rather than reflecting the raw 402 body. */
+function topUpRequirements(body: unknown): { x402Version: unknown; accepts: Record<string, unknown>[] } | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const { x402Version, accepts } = body as { x402Version?: unknown; accepts?: unknown }
+  if (!Array.isArray(accepts)) return undefined
+  return {
+    x402Version,
+    accepts: accepts
+      .filter((option): option is Record<string, unknown> => typeof option === 'object' && option !== null)
+      .map((option) =>
+        Object.fromEntries(TOP_UP_ACCEPT_FIELDS.filter((field) => field in option).map((field) => [field, option[field]])),
+      ),
+  }
+}
+
+function redactSecretFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSecretFields)
+  if (typeof value !== 'object' || value === null) return value
+  const redacted: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase()
+    redacted[key] = ['apikey', 'signature', 'token', 'paymentsignature', 'authorization', 'secret', 'privatekey', 'password', 'key'].includes(normalizedKey)
+      ? '[REDACTED]'
+      : redactSecretFields(child)
+  }
+  return redacted
+}
+
+function safeJson(value: unknown): string {
+  return JSON.stringify(redactSecretFields(value), null, 2)
+}
+
+/** nextCursor resumes after the whole page, so rows cut here are skipped by a continuation. */
+function truncateUsagePage(raw: string): { text: string; truncated: boolean } {
+  const text = truncate(raw)
+  if (text === raw) return { text, truncated: false }
+  return {
+    text: `${text}\nThis page was too large to return in full, so rows are missing. Repeat the first-page request with a smaller page_size instead of following nextCursor.`,
+    truncated: true,
+  }
+}
 /** Types in the live catalog (GET /v1/models?type=all). Accepted as strings so a new Venice type still works. */
 const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'music', 'tts', 'asr', 'embedding', 'decision'] as const
 const modelTypeSchema = z
@@ -1013,7 +1103,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if (args.offset !== undefined) params.set('offset', String(args.offset))
           const qs = params.toString()
           const resp = await client.get<{ data?: unknown[]; characters?: unknown[] }>(
-            `/v1/characters${qs ? `?${qs}` : ''}`
+            `/v1/characters${qs ? `?${qs}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
           )
           const list = resp.data ?? resp.characters ?? []
           return ok(JSON.stringify(list, null, 2), { count: list.length })
@@ -1058,21 +1150,249 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     },
 
     // ========================================================================
-    // x402 wallet helpers — auth-free
+    // BILLING — ADMIN API KEY ONLY
+    // ========================================================================
+
+    {
+      name: 'venice_billing_balance',
+      title: 'Venice Billing Balance',
+      description: `Get current USD, DIEM, and bundled-credit availability for the authenticated Venice account.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<unknown>('/v1/billing/balance', undefined, { auth: 'apiKey' })
+          return ok(JSON.stringify(resp, null, 2))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_billing_usage_analytics',
+      title: 'Venice Billing Usage Analytics',
+      description: `Get beta aggregated usage by date, model, and API key. Data is cached for 10 minutes. Choose either lookback or a complete start/end date range.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        lookback: z
+          .string()
+          .regex(/^[1-9]\d*d$/, 'Must be a number of days such as 7d or 30d.')
+          .optional()
+          .describe('Relative lookback from 1d through 90d. Cannot be combined with start_date/end_date.'),
+        start_date: dateSchema.optional().describe('Inclusive custom range start in YYYY-MM-DD format. Requires end_date.'),
+        end_date: dateSchema.optional().describe('Custom range end in YYYY-MM-DD format. Requires start_date.'),
+      },
+      handler: async (args) => {
+        try {
+          if (args.lookback && (args.start_date || args.end_date)) {
+            return fail('Choose either lookback or start_date/end_date, not both.')
+          }
+          if ((args.start_date && !args.end_date) || (!args.start_date && args.end_date)) {
+            return fail('start_date and end_date must be provided together.')
+          }
+          if (args.start_date && args.end_date && args.start_date > args.end_date) {
+            return fail('start_date cannot be later than end_date.')
+          }
+          if (args.lookback && Number(args.lookback.slice(0, -1)) > 90) {
+            return fail('lookback cannot exceed 90d.')
+          }
+          const params = new URLSearchParams()
+          if (args.lookback) params.set('lookback', args.lookback)
+          if (args.start_date) params.set('startDate', args.start_date)
+          if (args.end_date) params.set('endDate', args.end_date)
+          const query = params.toString()
+          const resp = await client.get<unknown>(
+            `/v1/billing/usage-analytics${query ? `?${query}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(truncate(JSON.stringify(resp, null, 2)))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_billing_usage_history',
+      title: 'Venice Billing Usage History',
+      description: `Walk detailed billing usage in ascending timestamp order using cursor pagination. Supports JSON or upstream CSV. On continuation, send cursor without the original filters; CSV nextCursor values already encode format=csv so a cursor-only follow-up stays on text/csv. This uses /billing/usage-history, never deprecated /billing/usage.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        currency: z.enum(['USD', 'DIEM', 'BUNDLED_CREDITS']).optional(),
+        cursor: z
+          .string()
+          .regex(
+            /^(?:csv:)?[A-Za-z0-9_-]{1,512}$/,
+            'Must be a nextCursor from a previous page: up to 512 URL-safe characters, optionally prefixed with csv:.',
+          )
+          .optional()
+          .describe('Opaque nextCursor from the previous page. CSV pages return a csv: prefix so continuation stays on text/csv. Cannot be combined with filters or page_size.'),
+        start_timestamp: utcTimestampSchema
+          .optional()
+          .describe('Inclusive first-page lower bound, ISO 8601 UTC with Z suffix.'),
+        end_timestamp: utcTimestampSchema
+          .optional()
+          .describe('Exclusive first-page upper bound, ISO 8601 UTC with Z suffix.'),
+        page_size: z.number().int().min(10).max(1000).optional(),
+        format: z.enum(['json', 'csv']).optional().describe('Defaults to json. Optional on continuation; CSV nextCursor values already stay on CSV.'),
+      },
+      handler: async (args) => {
+        try {
+          if (
+            args.cursor &&
+            (args.currency || args.start_timestamp || args.end_timestamp || args.page_size !== undefined)
+          ) {
+            return fail('cursor must be sent without currency, timestamps, or page_size. format may be resent.')
+          }
+          if (
+            args.start_timestamp &&
+            args.end_timestamp &&
+            Date.parse(args.start_timestamp) >= Date.parse(args.end_timestamp)
+          ) {
+            return fail('end_timestamp must be later than start_timestamp.')
+          }
+          const CSV_CURSOR_PREFIX = 'csv:'
+          const rawCursor = args.cursor?.startsWith(CSV_CURSOR_PREFIX)
+            ? args.cursor.slice(CSV_CURSOR_PREFIX.length)
+            : args.cursor
+          if (args.cursor?.startsWith(CSV_CURSOR_PREFIX) && args.format === 'json') {
+            return fail('csv-prefixed cursor cannot be combined with format=json.')
+          }
+          const wantCsv = args.format === 'csv' || Boolean(args.cursor?.startsWith(CSV_CURSOR_PREFIX))
+          const params = new URLSearchParams()
+          if (rawCursor) params.set('cursor', rawCursor)
+          if (args.currency) params.set('currency', args.currency)
+          if (args.start_timestamp) params.set('startTimestamp', args.start_timestamp)
+          if (args.end_timestamp) params.set('endTimestamp', args.end_timestamp)
+          if (args.page_size !== undefined) params.set('pageSize', String(args.page_size))
+          const query = params.toString()
+          const path = `/v1/billing/usage-history${query ? `?${query}` : ''}`
+          if (wantCsv) {
+            let nextCursor: string | undefined
+            const csv = await client.get<string>(
+              path,
+              { Accept: 'text/csv' },
+              {
+                auth: 'apiKey',
+                onResponse: ({ headers }) => {
+                  nextCursor = headers['x-next-cursor']
+                },
+              },
+            )
+            const page = truncateUsagePage(csv)
+            return ok(page.text, {
+              format: 'csv',
+              nextCursor: nextCursor ? `${CSV_CURSOR_PREFIX}${nextCursor}` : null,
+              truncated: page.truncated,
+            })
+          }
+          const resp = await client.get<{ data?: unknown[]; nextCursor?: string | null }>(
+            path,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          const page = truncateUsagePage(JSON.stringify(resp, null, 2))
+          return ok(page.text, {
+            format: 'json',
+            count: resp.data?.length ?? 0,
+            nextCursor: resp.nextCursor ?? null,
+            truncated: page.truncated,
+          })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    // ========================================================================
+    // API KEYS — safe reads. Web3 challenge and mint live on a follow-up.
+    // ========================================================================
+
+    {
+      name: 'venice_list_api_keys',
+      title: 'Venice List API Keys',
+      description: `List active API-key metadata, including only the documented last six characters—not full key secrets.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<{ data?: unknown[] }>('/v1/api_keys', undefined, { auth: 'apiKey' })
+          return ok(safeJson(resp), { count: resp.data?.length ?? 0 })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_get_api_key',
+      title: 'Venice Get API Key Details',
+      description: `Get metadata, usage, balances, and rate-limit details for one API-key ID. The documented response does not reveal the full key secret.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        id: z.string().min(1).max(256).describe('API-key ID, not the key secret.'),
+      },
+      handler: async ({ id }) => {
+        try {
+          const resp = await client.get<unknown>(
+            `/v1/api_keys/${encodeURIComponent(id)}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(safeJson(resp))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_api_key_rate_limits',
+      title: 'Venice API Key Rate Limits',
+      description: `Get the current key's balances, access status, tier, expiration, and model-specific rate limits.${API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<unknown>('/v1/api_keys/rate_limits', undefined, { auth: 'apiKey' })
+          return ok(safeJson(resp))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_api_key_rate_limit_logs',
+      title: 'Venice API Key Rate Limit Logs',
+      description: `Get the last 50 exceeded rate-limit events for the account. This read-only endpoint is experimental.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<{ data?: unknown[] }>(
+            '/v1/api_keys/rate_limits/log',
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(safeJson(resp), { count: resp.data?.length ?? 0 })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    // ========================================================================
+    // x402 wallet helpers — SIWX reads + auth-free top-up discovery
     // ========================================================================
 
     {
       name: 'venice_x402_balance',
       title: 'Venice x402 Wallet Balance',
       description:
-        `Check the prepaid x402 credit balance for a wallet address. SIWX-ONLY: this endpoint rejects API key auth and requires X-Sign-In-With-X (forwarded from VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
+        `Check the prepaid x402 credit balance for an EVM or Solana wallet address. SIWX-ONLY: this endpoint rejects API key auth and requires SIGN-IN-WITH-X (forwarded from VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
       inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+        wallet_address: walletAddressSchema,
       },
       handler: async ({ wallet_address }) => {
         try {
           const resp = await client.get<unknown>(
-            `/v1/x402/balance/${encodeURIComponent(wallet_address.toLowerCase())}`,
+            `/v1/x402/balance/${encodeURIComponent(normalizeWalletAddress(wallet_address))}`,
             undefined,
             { auth: 'siwx' },
           )
@@ -1087,20 +1407,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       name: 'venice_x402_top_up_info',
       title: 'Venice x402 Top-up Requirements',
       description:
-        `Fetch step-1 top-up requirements (network, USDC token address, receiver wallet, min amount). Steps 2 (sign USDC authorization) and 3 (POST signed payment) require a wallet and happen OUTSIDE this MCP server.`,
-      inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-        amount_usd: z.number().min(1).max(1_000_000).optional(),
-      },
-      handler: async (args) => {
+        `Fetch the x402 top-up payment requirements: the accepted USDC payment options (currently Base and Solana), each with network, asset, receiver wallet (payTo), minimum amount in base units, and settlement timeout. Sends an empty POST with no payment header, so nothing is charged. Signing and PAYMENT-SIGNATURE submission happen OUTSIDE this MCP server.${NO_AUTH}`,
+      inputSchema: {},
+      handler: async () => {
         try {
-          await client.post('/v1/x402/top-up', {
-            walletAddress: args.wallet_address,
-            amountUsd: args.amount_usd ?? 10,
-          })
+          await client.post('/v1/x402/top-up', {}, undefined, { auth: 'none' })
           return ok('Unexpected non-402 response. Top-up may already be processed.')
         } catch (err) {
-          if (err instanceof Error && (err as { status?: number }).status === 402) {
+          if (err instanceof VeniceUpstreamError && err.status === 402) {
+            const requirements = topUpRequirements(err.body)
+            if (requirements) return ok(JSON.stringify(requirements, null, 2), requirements)
             return ok(formatToolError(err))
           }
           return fail(formatToolError(err))
@@ -1111,16 +1427,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_x402_transactions',
       title: 'Venice x402 Transaction History',
-      description: `List recent x402 top-up + debit transactions for a wallet. SIWX-ONLY: rejects API key, requires X-Sign-In-With-X (VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
+      description: `List recent x402 top-up + debit transactions for an EVM or Solana wallet. SIWX-ONLY: rejects API key, requires SIGN-IN-WITH-X (VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
       inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+        wallet_address: walletAddressSchema,
         limit: z.number().int().min(1).max(100).optional(),
       },
       handler: async ({ wallet_address, limit }) => {
         try {
           const qs = limit ? `?limit=${limit}` : ''
           const resp = await client.get<unknown>(
-            `/v1/x402/transactions/${encodeURIComponent(wallet_address.toLowerCase())}${qs}`,
+            `/v1/x402/transactions/${encodeURIComponent(normalizeWalletAddress(wallet_address))}${qs}`,
             undefined,
             { auth: 'siwx' },
           )

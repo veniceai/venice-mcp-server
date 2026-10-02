@@ -7,6 +7,10 @@ export interface MockRoute {
   /**
    * Either a static response or a function that gets the parsed request and returns one.
    * Return a plain object → 200 JSON. Return { __status, __body, __headers } → custom.
+   * Use `__rawBody` instead of `__body` to write bytes verbatim, e.g. a truncated
+   * JSON payload served with a JSON content-type.
+   * Use `__stallBody` to send the headers plus that partial body and then
+   * never finish the response.
    */
   reply:
     | unknown
@@ -82,14 +86,31 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
         const r = reply as {
           __status: number
           __body?: unknown
+          __rawBody?: string
+          __stallBody?: string
           __headers?: Record<string, string>
         }
         res.statusCode = r.__status
         for (const [k, v] of Object.entries(r.__headers ?? {})) {
           res.setHeader(k, v)
         }
-        res.setHeader('content-type', 'application/json')
-        res.end(JSON.stringify(r.__body ?? {}))
+        if (!res.hasHeader('content-type')) res.setHeader('content-type', 'application/json')
+        if (typeof r.__stallBody === 'string') {
+          res.flushHeaders()
+          res.write(r.__stallBody)
+          return
+        }
+        if (typeof r.__rawBody === 'string') {
+          res.end(r.__rawBody)
+          return
+        }
+        const responseBody = r.__body ?? {}
+        const contentType = String(res.getHeader('content-type') ?? '')
+        res.end(
+          typeof responseBody === 'string' && !contentType.includes('application/json')
+            ? responseBody
+            : JSON.stringify(responseBody),
+        )
         return
       }
 
@@ -105,6 +126,10 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
     url: `http://127.0.0.1:${addr.port}`,
     port: addr.port,
     calls,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve())
+        server.closeAllConnections()
+      }),
   }
 }
