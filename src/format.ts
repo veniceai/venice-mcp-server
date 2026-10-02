@@ -211,8 +211,95 @@ export function formatToolError(err: unknown): string {
   return `Error: ${String(err)}`
 }
 
+const MAX_TEXT_CHARS = 8000
+const TRUNCATION_MARKER = '…[truncated]'
+const MIN_SHORTENED_STRING_CHARS = 32
+
 /** Truncate large strings for safe inclusion in tool responses. */
-export function truncate(s: string, max = 8000): string {
+export function truncate(s: string, max = MAX_TEXT_CHARS): string {
   if (s.length <= max) return s
   return `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`
+}
+
+/**
+ * Pretty-print a list as JSON within `max` chars by dropping whole trailing items.
+ * When items are dropped the output becomes `{ truncated, returned, total, data }`.
+ */
+export function fitJsonList(items: unknown[], max = MAX_TEXT_CHARS): { text: string; returned: number; truncated: boolean } {
+  const full = JSON.stringify(items, null, 2)
+  if (full.length <= max) return { text: full, returned: items.length, truncated: false }
+  const render = (n: number) =>
+    JSON.stringify({ truncated: true, returned: n, total: items.length, data: items.slice(0, n) }, null, 2)
+  let lo = 0
+  let hi = items.length - 1
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (render(mid).length <= max) lo = mid
+    else hi = mid - 1
+  }
+  return { text: render(lo), returned: lo, truncated: true }
+}
+
+/**
+ * Pretty-print a value as JSON within `max` chars by shortening its longest strings,
+ * then dropping trailing items from its largest arrays if that is not enough.
+ * Object roots gain `truncated: true` when anything was shortened or dropped.
+ */
+export function fitJson(value: unknown, max = MAX_TEXT_CHARS): { text: string; truncated: boolean } {
+  const full = JSON.stringify(value, null, 2)
+  if (full.length <= max) return { text: full, truncated: false }
+
+  const parsed: unknown = JSON.parse(full)
+  const root = isObject(parsed) && !Array.isArray(parsed) ? { ...parsed, truncated: true } : parsed
+  const leaves: Array<{ holder: Record<string | number, unknown>; key: string | number; value: string }> = []
+  const walk = (node: unknown): void => {
+    if (!isObject(node)) return
+    for (const [key, child] of Object.entries(node)) {
+      const k = Array.isArray(node) ? Number(key) : key
+      if (typeof child === 'string') leaves.push({ holder: node as Record<string | number, unknown>, key: k, value: child })
+      else walk(child)
+    }
+  }
+  walk(root)
+  leaves.sort((a, b) => b.value.length - a.value.length)
+
+  let size = JSON.stringify(root, null, 2).length
+  for (const leaf of leaves) {
+    if (size <= max || leaf.value.length <= MIN_SHORTENED_STRING_CHARS) break
+    const keep = Math.max(MIN_SHORTENED_STRING_CHARS, leaf.value.length - (size - max) - TRUNCATION_MARKER.length)
+    const shortened = `${leaf.value.slice(0, keep)}${TRUNCATION_MARKER}`
+    if (shortened.length >= leaf.value.length) continue
+    size -= JSON.stringify(leaf.value).length - JSON.stringify(shortened).length
+    leaf.holder[leaf.key] = shortened
+  }
+  if (size <= max) return { text: JSON.stringify(root, null, 2), truncated: true }
+
+  const arrays: unknown[][] = []
+  const collect = (node: unknown): void => {
+    if (!isObject(node)) return
+    if (Array.isArray(node)) arrays.push(node)
+    for (const child of Object.values(node)) collect(child)
+  }
+  collect(root)
+  arrays.sort((a, b) => b.length - a.length)
+  for (const array of arrays) {
+    const items = array.slice()
+    const fits = (n: number) => {
+      array.length = 0
+      for (let i = 0; i < n; i++) array.push(items[i])
+      return JSON.stringify(root, null, 2).length <= max
+    }
+    let lo = 0
+    let hi = items.length - 1
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2)
+      if (fits(mid)) lo = mid
+      else hi = mid - 1
+    }
+    if (fits(lo)) return { text: JSON.stringify(root, null, 2), truncated: true }
+  }
+  return {
+    text: JSON.stringify({ truncated: true, error: `Response exceeds ${max} characters even after truncation.` }, null, 2),
+    truncated: true,
+  }
 }

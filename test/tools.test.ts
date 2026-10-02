@@ -848,26 +848,62 @@ describe('tool output shaping', () => {
     assert.equal(stub.calls.at(-1)?.path, '/v1/characters')
   })
 
-  it('truncates large character outputs', async () => {
+  it('truncates large character outputs to valid JSON', async () => {
     const description = 'd'.repeat(500)
     const stub = new StubClient({
-      '/v1/characters/alan-watts/reviews': () => ({ data: Array.from({ length: 100 }, () => ({ body: description })) }),
+      '/v1/characters/alan-watts/reviews': () => ({
+        object: 'list',
+        data: Array.from({ length: 100 }, (_, i) => ({ id: i, body: `"quoted"\n${description}` })),
+        pagination: { page: 1, pageSize: 100, total: 100 },
+      }),
       '/v1/characters/alan-watts': () => ({ data: { slug: 'alan-watts', description: description.repeat(40) } }),
       '/v1/characters': () => ({ data: Array.from({ length: 100 }, (_, i) => ({ slug: `c${i}`, description })) }),
     })
     const tools = buildTools(stub.asClient(), cfg)
     const run = (name: string, args: unknown) => tools.find((t) => t.name === name)!.handler(args as never)
+    const text = (result: { content: unknown[] }) => (result.content[0] as { text: string }).text
 
     const list = await run('venice_list_characters', { limit: 100 })
-    assert.match((list.content[0] as { text: string }).text, /…\[truncated \d+ chars\]$/)
-    assert.equal(list.structuredContent?.count, 100)
-    for (const [name, args] of [
-      ['venice_get_character', { slug: 'alan-watts' }],
-      ['venice_character_reviews', { slug: 'alan-watts', pageSize: 100 }],
-    ] as const) {
-      const result = await run(name, args)
-      assert.match((result.content[0] as { text: string }).text, /…\[truncated \d+ chars\]$/, name)
+    assert.ok(text(list).length <= 8000)
+    const listJson = JSON.parse(text(list)) as { truncated: boolean; returned: number; total: number; data: Array<{ slug: string }> }
+    assert.equal(listJson.truncated, true)
+    assert.equal(listJson.total, 100)
+    assert.ok(listJson.returned > 0 && listJson.returned < 100)
+    assert.equal(listJson.data.length, listJson.returned)
+    assert.deepEqual(listJson.data.at(-1), { slug: `c${listJson.returned - 1}`, description })
+    assert.deepEqual(list.structuredContent, { count: 100, truncated: true, returned: listJson.returned, total: 100 })
+
+    const character = await run('venice_get_character', { slug: 'alan-watts' })
+    assert.ok(text(character).length <= 8000)
+    const characterJson = JSON.parse(text(character)) as { truncated: boolean; data: { slug: string; description: string } }
+    assert.equal(characterJson.truncated, true)
+    assert.equal(characterJson.data.slug, 'alan-watts')
+    assert.match(characterJson.data.description, /^d+…\[truncated\]$/)
+    assert.deepEqual(character.structuredContent, { truncated: true })
+
+    const reviews = await run('venice_character_reviews', { slug: 'alan-watts', pageSize: 100 })
+    assert.ok(text(reviews).length <= 8000)
+    const reviewsJson = JSON.parse(text(reviews)) as {
+      truncated: boolean
+      data: Array<{ id: number; body: string }>
+      pagination: { total: number }
     }
+    assert.equal(reviewsJson.truncated, true)
+    assert.ok(reviewsJson.data.length > 0 && reviewsJson.data.length < 100)
+    assert.deepEqual(reviewsJson.data.map((review) => review.id), [...reviewsJson.data.keys()])
+    assert.match(reviewsJson.data[0].body, /^"quoted"\nd+…\[truncated\]$/)
+    assert.equal(reviewsJson.pagination.total, 100)
+    assert.deepEqual(reviews.structuredContent, { truncated: true })
+  })
+
+  it('leaves small character outputs untouched', async () => {
+    const { get } = setup()
+    const list = await get('venice_list_characters').handler({} as never)
+    assert.deepEqual(JSON.parse((list.content[0] as { text: string }).text), [{ slug: 'sample', name: 'Sample' }])
+    assert.deepEqual(list.structuredContent, { count: 1 })
+    const character = await get('venice_get_character').handler({ slug: 'sample' } as never)
+    assert.deepEqual(JSON.parse((character.content[0] as { text: string }).text), { data: [{ slug: 'sample', name: 'Sample' }] })
+    assert.equal(character.structuredContent, undefined)
   })
 
   it('venice_crypto_rpc rejects ambiguous or missing request forms without calling upstream', async () => {

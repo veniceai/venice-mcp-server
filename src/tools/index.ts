@@ -26,7 +26,7 @@
 import { z } from 'zod'
 import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
-import { formatToolError, truncate } from '../format.js'
+import { fitJson, fitJsonList, formatToolError, truncate } from '../format.js'
 import { VeniceResponseTooLargeError } from '../types.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
@@ -1195,7 +1195,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             { auth: 'apiKey' },
           )
           const list = resp.data ?? resp.characters ?? []
-          return ok(truncate(JSON.stringify(list, null, 2)), { count: list.length })
+          const fitted = fitJsonList(list)
+          return ok(fitted.text, {
+            count: list.length,
+            ...(fitted.truncated ? { truncated: true, returned: fitted.returned, total: list.length } : {}),
+          })
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1218,7 +1222,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'apiKey' },
           )
-          return ok(truncate(JSON.stringify(resp, null, 2)))
+          const fitted = fitJson(resp)
+          return ok(fitted.text, fitted.truncated ? { truncated: true } : undefined)
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1247,7 +1252,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'apiKey' },
           )
-          return ok(truncate(JSON.stringify(resp, null, 2)))
+          const fitted = fitJson(resp)
+          return ok(fitted.text, fitted.truncated ? { truncated: true } : undefined)
         } catch (err) {
           return fail(formatToolError(err))
         }

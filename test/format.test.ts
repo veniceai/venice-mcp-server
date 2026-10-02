@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { formatToolError, truncate } from '../src/format.js'
+import { fitJson, fitJsonList, formatToolError, truncate } from '../src/format.js'
 import { VeniceUpstreamError } from '../src/types.js'
 
 describe('formatToolError', () => {
@@ -191,5 +191,41 @@ describe('truncate', () => {
     const out = truncate(s, 10)
     assert.equal(out.startsWith('xxxxxxxxxx'), true)
     assert.match(out, /truncated 90 chars/)
+  })
+})
+
+describe('fitJson', () => {
+  it('returns untouched JSON when it fits', () => {
+    assert.deepEqual(fitJson({ a: 'b' }, 100), { text: JSON.stringify({ a: 'b' }, null, 2), truncated: false })
+  })
+  it('keeps escaped and non-ASCII strings valid and within the limit', () => {
+    const { text, truncated } = fitJson({ quote: '"\\\n'.repeat(200), emoji: '🙂'.repeat(200) }, 300)
+    assert.equal(truncated, true)
+    assert.ok(text.length <= 300)
+    assert.equal((JSON.parse(text) as { truncated: boolean }).truncated, true)
+  })
+  it('shortens strings inside an array root without adding a marker key', () => {
+    const { text, truncated } = fitJson(['x'.repeat(1000)], 200)
+    assert.equal(truncated, true)
+    assert.match((JSON.parse(text) as string[])[0], /^x+…\[truncated\]$/)
+  })
+  it('falls back to a valid notice when nothing can be shortened or dropped', () => {
+    const value = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`key${i}`, i]))
+    const { text, truncated } = fitJson(value, 200)
+    assert.equal(truncated, true)
+    assert.equal((JSON.parse(text) as { truncated: boolean }).truncated, true)
+  })
+})
+
+describe('fitJsonList', () => {
+  it('drops whole trailing items until the list fits', () => {
+    const items = Array.from({ length: 50 }, (_, i) => ({ i, pad: 'p'.repeat(50) }))
+    const { text, returned, truncated } = fitJsonList(items, 1000)
+    const parsed = JSON.parse(text) as { truncated: boolean; returned: number; total: number; data: unknown[] }
+    assert.equal(truncated, true)
+    assert.ok(text.length <= 1000)
+    assert.deepEqual(parsed.data, items.slice(0, returned))
+    assert.equal(parsed.returned, returned)
+    assert.equal(parsed.total, 50)
   })
 })
