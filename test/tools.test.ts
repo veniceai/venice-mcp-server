@@ -718,6 +718,40 @@ describe('tool output shaping', () => {
     assert.equal(stub.calls.length, 1)
   })
 
+  it('venice_crypto_rpc sends a one-item batch as a single request and returns a batch', async () => {
+    const response = { jsonrpc: '2.0', id: 9, result: '0xhash' }
+    const stub = new StubClient({ '/v1/crypto/rpc/': () => response })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
+    const item = { method: 'eth_sendRawTransaction', params: ['0xabc'], id: 9 }
+
+    const missingKey = await tool.handler({ network: 'ethereum-mainnet', request: [item] } as never)
+    assert.equal(missingKey.isError, true)
+    assert.match((missingKey.content[0] as { text: string }).text, /idempotency_key/)
+    assert.equal(stub.calls.length, 0)
+
+    const sent = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: [item],
+      idempotency_key: 'agent-tx-1',
+    } as never)
+    assert.equal(sent.isError, undefined)
+    assert.equal(stub.calls.length, 1)
+    assert.deepEqual(stub.calls[0].body, { jsonrpc: '2.0', ...item })
+    assert.equal(stub.calls[0].headers?.['Idempotency-Key'], 'agent-tx-1')
+    assert.deepEqual(JSON.parse((sent.content[0] as { text: string }).text), [response])
+  })
+
+  it('venice_crypto_rpc does not double-wrap an array response to a one-item batch', async () => {
+    const response = [{ jsonrpc: '2.0', id: 1, result: '0x1' }]
+    const stub = new StubClient({ '/v1/crypto/rpc/': () => response })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
+    const result = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: [{ method: 'eth_chainId', id: 1 }],
+    } as never)
+    assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), response)
+  })
+
   it('venice_crypto_rpc defaults a single request id so it is not a notification', async () => {
     const { stub, get } = setup()
     const tool = get('venice_crypto_rpc')

@@ -983,11 +983,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if (args.request !== undefined && args.rpc_params !== undefined) {
             return fail('rpc_params can only be used with rpc_method.')
           }
+          // A one-item batch is sent as a single request so broadcasts keep the single-request idempotency contract.
+          const batchOfOne = Array.isArray(args.request) && args.request.length === 1
           const body =
             args.request === undefined
               ? { jsonrpc: '2.0' as const, method: args.rpc_method!, params: args.rpc_params ?? [], id: 1 }
               : Array.isArray(args.request)
-                ? args.request.map((item) => ({ jsonrpc: '2.0' as const, ...item }))
+                ? batchOfOne
+                  ? { jsonrpc: '2.0' as const, ...args.request[0] }
+                  : args.request.map((item) => ({ jsonrpc: '2.0' as const, ...item }))
                 : { jsonrpc: '2.0' as const, ...args.request, id: args.request.id ?? 1 }
           if (cryptoRpcBatchesBroadcast(body)) {
             return fail(
@@ -1006,9 +1010,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             headers,
             { maxResponseBytes: CRYPTO_RPC_MAX_RESPONSE_BYTES },
           )
+          const result = batchOfOne && !Array.isArray(resp.body) ? [resp.body] : resp.body
           const billing = cryptoRpcBilling(resp.headers)
           const billingLine = formatCryptoRpcBilling(billing)
-          const text = `${JSON.stringify(resp.body)}${billingLine ? `\n\nVenice RPC: ${billingLine}` : ''}`
+          const text = `${JSON.stringify(result)}${billingLine ? `\n\nVenice RPC: ${billingLine}` : ''}`
           if (Buffer.byteLength(text, 'utf8') > CRYPTO_RPC_MAX_RESPONSE_BYTES) {
             return fail(cryptoRpcTooLargeMessage(billing))
           }
