@@ -622,6 +622,7 @@ describe('tool output shaping', () => {
     const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
     const result = await tool.handler({ network: 'ethereum-mainnet', rpc_method: 'eth_getBlockByNumber' } as never)
     assert.equal((result.content[0] as { text: string }).text, JSON.stringify(response))
+    assert.equal(result.content.length, 1)
     assert.equal(result.structuredContent, undefined)
   })
 
@@ -683,9 +684,11 @@ describe('tool output shaping', () => {
       rpcCredits: 20,
       rpcCostUsd: '0.00001400',
     })
-    assert.match(
-      (result.content[0] as { text: string }).text,
-      /Venice RPC: replayed from idempotency cache, credits: 20, cost: \$0\.00001400$/,
+    assert.equal(result.content.length, 2)
+    assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), { jsonrpc: '2.0', result: '0x1', id: 1 })
+    assert.equal(
+      (result.content[1] as { text: string }).text,
+      'Venice RPC: replayed from idempotency cache, credits: 20, cost: $0.00001400',
     )
   })
 

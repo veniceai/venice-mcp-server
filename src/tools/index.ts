@@ -83,8 +83,8 @@ export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
   handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
 }
 
-const ok = (text: string, structured?: Record<string, unknown>): ToolResult => ({
-  content: [{ type: 'text', text }],
+const ok = (text: string, structured?: Record<string, unknown>, extraText: string[] = []): ToolResult => ({
+  content: [text, ...extraText].map((t) => ({ type: 'text', text: t })),
   ...(structured ? { structuredContent: structured } : {}),
 })
 const fail = (text: string): ToolResult => ({
@@ -1013,11 +1013,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const result = batchOfOne && !Array.isArray(resp.body) ? [resp.body] : resp.body
           const billing = cryptoRpcBilling(resp.headers)
           const billingLine = formatCryptoRpcBilling(billing)
-          const text = `${JSON.stringify(result)}${billingLine ? `\n\nVenice RPC: ${billingLine}` : ''}`
-          if (Buffer.byteLength(text, 'utf8') > CRYPTO_RPC_MAX_RESPONSE_BYTES) {
+          const text = JSON.stringify(result)
+          const extraText = billingLine ? [`Venice RPC: ${billingLine}`] : []
+          if (Buffer.byteLength(text + extraText.join(''), 'utf8') > CRYPTO_RPC_MAX_RESPONSE_BYTES) {
             return fail(cryptoRpcTooLargeMessage(billing))
           }
-          return ok(text, Object.keys(billing).length > 0 ? billing : undefined)
+          return ok(text, Object.keys(billing).length > 0 ? billing : undefined, extraText)
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) {
             return fail(cryptoRpcTooLargeMessage(cryptoRpcBilling(err.headers)))
