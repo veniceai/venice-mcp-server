@@ -102,6 +102,30 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
         reply: { object: 'list', data: [], pagination: { page: 2, pageSize: 10, total: 0, totalPages: 0 } },
       },
       {
+        match: 'GET /v1/models?type=image',
+        reply: {
+          data: [{
+            created: 1764086377,
+            id: 'flux-2-pro',
+            model_spec: {
+              pricing: { generation: { usd: 0.03, diem: 0.03 } },
+              constraints: {
+                promptCharacterLimit: 3000,
+                aspectRatios: ['1:1', '16:9'],
+              },
+              supportsWebSearch: false,
+              name: 'Flux 2 Pro',
+              privacy: 'anonymized',
+            },
+            object: 'model',
+            owned_by: 'venice.ai',
+            type: 'image',
+          }],
+          object: 'list',
+          type: 'image',
+        },
+      },
+      {
         match: 'POST /v1/chat/completions',
         reply: ({ headers, body }) => ({
           choices: [
@@ -190,13 +214,14 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 34 tools over JSON-RPC', async () => {
+  it('lists 35 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 34)
+    assert.equal(list.length, 35)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
+    assert.ok(names.includes('venice_model_details'))
     assert.ok(names.includes('venice_video_status'))
     assert.ok(names.includes('venice_x402_balance'))
     assert.ok(names.includes('venice_crypto_networks'))
@@ -305,6 +330,35 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
       assert.ok(r.error !== undefined || result?.isError === true, `${call.name} should reject ${JSON.stringify(call.arguments)}`)
     }
     assert.equal(venice.calls.length, callsBefore)
+  })
+
+  it('venice_model_details returns the exact full catalog row from the mock API', async () => {
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_model_details',
+      arguments: { model_id: 'flux-2-pro', type: 'image' },
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as {
+      content: Array<{ text: string }>
+      structuredContent?: {
+        id?: string
+        model_spec?: {
+          constraints?: { aspectRatios?: string[] }
+          pricing?: { generation?: { usd?: number } }
+        }
+      }
+    }
+    assert.match(result.content[0].text, /"name": "Flux 2 Pro"/)
+    assert.equal(result.structuredContent?.id, 'flux-2-pro')
+    assert.deepEqual(result.structuredContent?.model_spec?.constraints?.aspectRatios, ['1:1', '16:9'])
+    assert.equal(result.structuredContent?.model_spec?.pricing?.generation?.usd, 0.03)
+    assert.ok(
+      venice.calls.some(
+        (call) =>
+          call.method === 'GET' &&
+          call.path === '/v1/models?type=image'
+      )
+    )
   })
 
   it('reads venice://models resource', async () => {
