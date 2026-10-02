@@ -586,11 +586,12 @@ describe('tool output shaping', () => {
         contentType: 'video/mp4',
       }),
     })
-    const tools = buildTools(stub.asClient(), cfg)
+    const tools = buildTools(stub.asClient(), { ...cfg, maxVideoResponseBytes: 4096 })
     const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
       queue_id: 'x',
       model: 'm',
     } as never)
+    assert.equal(stub.callsTo('/v1/video/retrieve')[0].maxBytes, 4096)
     assert.equal((r.structuredContent as { status: string }).status, 'COMPLETED')
     const resource = r.content.find((c) => c.type === 'resource') as {
       type: 'resource'
@@ -1077,6 +1078,59 @@ describe('tool output shaping', () => {
       assert.match(text, /fewer variants/)
       assert.match(text, /VENICE_MAX_IMAGE_RESPONSE_BYTES/)
     }
+  })
+
+  it('image upscale/background-remove cap response bytes with the image limit', async () => {
+    const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+    const stub = new StubClient({
+      '/v1/image/upscale': () => {
+        throw new VeniceResponseTooLargeError('/v1/image/upscale', 2048)
+      },
+      '/v1/image/background-remove': () => {
+        throw new VeniceResponseTooLargeError('/v1/image/background-remove', 2048)
+      },
+    })
+    const tools = buildTools(stub.asClient(), { ...cfg, maxImageResponseBytes: 2048 })
+    const get = (name: string) => tools.find((t) => t.name === name)!
+    const originalFetch = globalThis.fetch
+    const results = []
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock upload bytes', { status: 200, headers: { 'content-type': 'image/png' } })) as typeof fetch
+      results.push(await get('venice_image_upscale').handler({ image_url: 'https://93.184.216.34/image.png' } as never))
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+    results.push(await get('venice_image_remove_bg').handler({ image_url: 'https://x/img.png' } as never))
+
+    for (const path of ['/v1/image/upscale', '/v1/image/background-remove']) {
+      assert.equal(stub.callsTo(path)[0]?.maxBytes, 2048)
+    }
+    for (const r of results) {
+      assert.equal(r.isError, true)
+      assert.equal((r.structuredContent as { error: string }).error, 'image_response_too_large')
+      assert.match((r.content[0] as { text: string }).text, /VENICE_MAX_IMAGE_RESPONSE_BYTES/)
+    }
+  })
+
+  it('venice_tts caps response bytes with the audio limit', async () => {
+    const { stub, get } = setup()
+    await get('venice_tts').handler({ input: 'hello' } as never)
+    assert.equal(stub.callsTo('/v1/audio/speech')[0].maxBytes, cfg.maxAudioResponseBytes)
+
+    const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+    const tooLarge = new StubClient({
+      '/v1/audio/speech': () => {
+        throw new VeniceResponseTooLargeError('/v1/audio/speech', 1024)
+      },
+    })
+    const tools = buildTools(tooLarge.asClient(), { ...cfg, maxAudioResponseBytes: 1024 })
+    const r = await tools.find((t) => t.name === 'venice_tts')!.handler({ input: 'hello' } as never)
+    assert.equal(tooLarge.callsTo('/v1/audio/speech')[0].maxBytes, 1024)
+    assert.equal(r.isError, true)
+    assert.equal((r.structuredContent as { error: string }).error, 'audio_response_too_large')
+    assert.equal((r.structuredContent as { retry_safe: boolean }).retry_safe, false)
+    assert.match((r.content[0] as { text: string }).text, /VENICE_MAX_AUDIO_RESPONSE_BYTES/)
   })
 
   it('venice_image_edit does not send quality, which EditImageRequest rejects', async () => {

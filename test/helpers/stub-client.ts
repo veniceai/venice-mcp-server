@@ -114,11 +114,11 @@ export class StubClient {
       headers: {},
     }
   }
-  async postMixed<T>(path: string, json: unknown): Promise<
+  async postMixed<T>(path: string, json: unknown, opts: { maxBytes?: number } = {}): Promise<
     | { kind: 'json'; data: T; status: number; contentType: string; headers: Record<string, string> }
     | { kind: 'binary'; buffer: Buffer; status: number; contentType: string; headers: Record<string, string> }
   > {
-    const call: StubCall = { method: 'POST', path, body: json, binary: true }
+    const call: StubCall = { method: 'POST', path, body: json, binary: true, maxBytes: opts.maxBytes }
     const data = await this.dispatch<T | {
       kind: 'json'
       data: T
