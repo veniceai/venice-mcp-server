@@ -1152,7 +1152,10 @@ describe('tool output shaping', () => {
       assert.deepEqual((r.structuredContent as { timestamps: unknown }).timestamps, {
         word: [{ word: 'hello', start: 0, end: 1.5 }],
       })
-      assert.equal((r.content[0] as { text: string }).text, 'hello')
+      const textContent = JSON.parse((r.content[0] as { text: string }).text)
+      assert.equal(textContent.text, 'hello')
+      assert.deepEqual(textContent.timestamps, { word: [{ word: 'hello', start: 0, end: 1.5 }] })
+      assert.equal(typeof textContent.result_handle, 'string')
       assert.equal(tool.inputSchema.response_format.safeParse('srt').success, false)
     } finally {
       globalThis.fetch = originalFetch
@@ -1187,6 +1190,7 @@ describe('tool output shaping', () => {
         timestamp_total: { word: number }
         timestamps_truncated: boolean
         timestamp_limit: number
+        next_timestamp_offset: number | null
         result_handle: string
       }
       assert.equal(structured.timestamps.word.length, 200)
@@ -1195,8 +1199,10 @@ describe('tool output shaping', () => {
       assert.equal(structured.timestamps_truncated, true)
       assert.equal(structured.timestamp_limit, 200)
       assert.equal(typeof structured.result_handle, 'string')
+      assert.equal(structured.next_timestamp_offset, 200)
       const text = (r.content[0] as { text: string }).text
-      assert.equal(text, 'long transcript')
+      assert.equal(JSON.parse(text).result_handle, structured.result_handle)
+      assert.equal(JSON.parse(text).next_timestamp_offset, 200)
       assert.doesNotMatch(text, /w249/)
 
       const page = await tool.handler({
@@ -1207,11 +1213,15 @@ describe('tool output shaping', () => {
       const paged = page.structuredContent as {
         timestamps: { word: unknown[] }
         timestamp_offset: number
+        timestamps_truncated: boolean
+        next_timestamp_offset: number | null
         result_handle: string
       }
       assert.equal(paged.timestamps.word.length, 50)
       assert.deepEqual(paged.timestamps.word[0], words[200])
       assert.equal(paged.timestamp_offset, 200)
+      assert.equal(paged.timestamps_truncated, false)
+      assert.equal(paged.next_timestamp_offset, null)
       assert.equal(paged.result_handle, structured.result_handle)
       // The point of the handle: continuation must not pay for a second transcription.
       assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 1)
@@ -1245,6 +1255,57 @@ describe('tool output shaping', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('venice_asr pages a long transcript through the handle without transcribing again', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', { status: 200, headers: { 'content-type': 'audio/wav' } })) as typeof fetch
+      const transcript = 'a'.repeat(8000) + 'tail'
+      const stub = new StubClient({ '/v1/audio/transcriptions': () => transcript })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const first = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', response_format: 'text' } as never)
+      const s1 = first.structuredContent as { text: string; next_text_offset: number; result_handle: string }
+      assert.equal(s1.text.length, 8000)
+      assert.equal(s1.next_text_offset, 8000)
+      assert.equal(JSON.parse((first.content[0] as { text: string }).text).result_handle, s1.result_handle)
+
+      const next = await tool.handler({ result_handle: s1.result_handle, text_offset: s1.next_text_offset } as never)
+      const s2 = next.structuredContent as { text: string; next_text_offset: number | null }
+      assert.equal(s2.text, 'tail')
+      assert.equal(s2.next_text_offset, null)
+      assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr drops a retained result when its retention timer fires', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', { status: 200, headers: { 'content-type': 'audio/wav' } })) as typeof fetch
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: [{ word: 'hi', start: 0, end: 1 }] } }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true } as never)
+      const handle = (r.structuredContent as { result_handle: string }).result_handle
+      t.mock.timers.tick(10 * 60 * 1000)
+      const expired = await tool.handler({ result_handle: handle } as never)
+      assert.equal((expired.structuredContent as { error: string }).error, 'asr_result_expired')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_web_search caps query at the API maximum of 400 characters', () => {
+    const tool = buildTools(new StubClient().asClient(), cfg).find((t) => t.name === 'venice_web_search')!
+    const schema = z.object(tool.inputSchema)
+    assert.equal(schema.safeParse({ query: 'q'.repeat(400) }).success, true)
+    assert.equal(schema.safeParse({ query: 'q'.repeat(401) }).success, false)
   })
 
   it('venice_asr refuses to re-transcribe when a result handle is unknown or expired', async () => {

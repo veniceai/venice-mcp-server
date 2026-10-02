@@ -28,7 +28,15 @@ import type { VeniceClient } from '../venice-client.js'
 import { VeniceResponseTooLargeError } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { shapeTtsVoiceCatalog, VeniceUpstreamError, type ModelCatalogItem, type ModelCatalogResponse } from '../types.js'
-import { ASR_TIMESTAMP_DEFAULT_LIMIT, ASR_TIMESTAMP_MAX_LIMIT, boundAsrResult, formatToolError, truncate, type AsrUpstreamBody } from '../format.js'
+import {
+  ASR_TEXT_PAGE_CHARS,
+  ASR_TIMESTAMP_DEFAULT_LIMIT,
+  ASR_TIMESTAMP_MAX_LIMIT,
+  boundAsrResult,
+  formatToolError,
+  truncate,
+  type AsrUpstreamBody,
+} from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -241,30 +249,37 @@ const ASR_RESULT_MAX_ENTRIES = 16
 
 /** Retained ASR results, scoped to one buildTools call so HTTP sessions never share handles. */
 class AsrResultStore {
-  private readonly results = new Map<string, { body: AsrUpstreamBody; expiresAt: number }>()
-
-  private prune(now = Date.now()): void {
-    for (const [handle, entry] of this.results) {
-      if (entry.expiresAt <= now) this.results.delete(handle)
-    }
-  }
+  private readonly results = new Map<string, { body: AsrUpstreamBody; expiresAt: number; timer: NodeJS.Timeout }>()
 
   remember(body: AsrUpstreamBody): string {
-    this.prune()
     // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
     while (this.results.size >= ASR_RESULT_MAX_ENTRIES) {
       const oldest = this.results.keys().next()
       if (oldest.done) break
-      this.results.delete(oldest.value)
+      this.evict(oldest.value)
     }
     const handle = randomUUID()
-    this.results.set(handle, { body, expiresAt: Date.now() + ASR_RESULT_TTL_MS })
+    // Unref'd so a retained transcript never keeps the process alive.
+    const timer = setTimeout(() => this.evict(handle), ASR_RESULT_TTL_MS).unref()
+    this.results.set(handle, { body, expiresAt: Date.now() + ASR_RESULT_TTL_MS, timer })
     return handle
   }
 
   get(handle: string): AsrUpstreamBody | undefined {
-    this.prune()
-    return this.results.get(handle)?.body
+    const entry = this.results.get(handle)
+    if (!entry) return undefined
+    if (entry.expiresAt <= Date.now()) {
+      this.evict(handle)
+      return undefined
+    }
+    return entry.body
+  }
+
+  private evict(handle: string): void {
+    const entry = this.results.get(handle)
+    if (!entry) return
+    clearTimeout(entry.timer)
+    this.results.delete(handle)
   }
 }
 
@@ -976,24 +991,32 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_asr',
       title: 'Venice ASR (Speech-to-Text)',
-      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory. Timestamp arrays are paged in the MCP result: a timestamped transcription returns result_handle alongside the first page, and every later page must be requested with that handle so the clip is transcribed — and charged — exactly once. Handles are held in memory, per MCP session, for ${ASR_RESULT_TTL_MS / 60_000} minutes and only the ${ASR_RESULT_MAX_ENTRIES} most recent survive, after which paging fails and a fresh transcription is needed.${X402_OK}`,
+      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory. Timestamp arrays and transcripts longer than ${ASR_TEXT_PAGE_CHARS} characters are paged in the MCP result: such a transcription returns result_handle alongside the first page, and every later page must be requested with that handle so the clip is transcribed — and charged — exactly once. Handles are held in memory, per MCP session, for ${ASR_RESULT_TTL_MS / 60_000} minutes and only the ${ASR_RESULT_MAX_ENTRIES} most recent survive, after which paging fails and a fresh transcription is needed.${X402_OK}`,
       inputSchema: {
         audio_url: z.string().url().optional().describe('Audio to transcribe. Required unless result_handle is supplied.'),
         result_handle: z
           .string()
           .min(1)
           .optional()
-          .describe(`Handle returned by an earlier timestamped transcription. Pages that retained result without submitting another transcription, so audio_url is ignored when this is set. Expires after ${ASR_RESULT_TTL_MS / 60_000} minutes or once ${ASR_RESULT_MAX_ENTRIES} newer results are retained; an expired handle is an error rather than a silent re-transcription.`),
+          .describe(`Handle returned by an earlier paged transcription. Pages that retained result without submitting another transcription, so audio_url is ignored when this is set. Expires after ${ASR_RESULT_TTL_MS / 60_000} minutes or once ${ASR_RESULT_MAX_ENTRIES} newer results are retained; an expired handle is an error rather than a silent re-transcription.`),
         model: z.string().optional(),
         language: z.string().optional(),
         response_format: z.enum(['json', 'text']).optional(),
         timestamps: z.boolean().optional().describe('Include word and character timestamps in JSON responses. Defaults to false.'),
         timestamp_offset: z.number().int().min(0).optional().describe('Start index into each timestamp array (word/segment/char). Defaults to 0. Use result_handle to move past the first page.'),
-        timestamp_limit: z.number().int().min(1).max(ASR_TIMESTAMP_MAX_LIMIT).optional().describe(`Max entries returned per timestamp array. Defaults to ${ASR_TIMESTAMP_DEFAULT_LIMIT}.`),
+        timestamp_limit: z.number().int().min(1).max(ASR_TIMESTAMP_MAX_LIMIT).optional().describe(`Max entries returned per timestamp array. Defaults to ${ASR_TIMESTAMP_DEFAULT_LIMIT}. Follow next_timestamp_offset; it is null on the last page.`),
+        text_offset: z.number().int().min(0).optional().describe(`Start character of the transcript page (${ASR_TEXT_PAGE_CHARS} characters each). Defaults to 0. Use result_handle with next_text_offset to read past the first page.`),
       },
       handler: async (args) => {
         const offset = args.timestamp_offset ?? 0
         const limit = args.timestamp_limit ?? ASR_TIMESTAMP_DEFAULT_LIMIT
+        const textOffset = args.text_offset ?? 0
+        const respond = (body: AsrUpstreamBody, handle: string | undefined) => {
+          const { text, structured, paged } = boundAsrResult(body, offset, limit, textOffset)
+          const full = handle ? { ...structured, result_handle: handle } : structured
+          // Hosts that read only text content still need the page and its continuation handle.
+          return ok(paged ? JSON.stringify(full) : text, full)
+        }
         if (args.result_handle) {
           const retained = asrResults.get(args.result_handle)
           if (!retained) {
@@ -1003,8 +1026,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               { error: 'asr_result_expired', result_handle: args.result_handle },
             )
           }
-          const { text, structured } = boundAsrResult(retained, offset, limit)
-          return ok(truncate(text), { ...structured, result_handle: args.result_handle })
+          return respond(retained, args.result_handle)
         }
         if (!args.audio_url) return fail('audio_url is required unless result_handle is supplied')
         try {
@@ -1028,11 +1050,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             form,
             { maxBytes: 1024 * 1024 },
           )
-          if (typeof resp === 'string') return ok(truncate(resp))
-          const { text, structured } = boundAsrResult(resp, offset, limit)
-          // Only timestamped results are pageable, so only those are worth retaining.
-          const handle = resp.timestamps !== undefined ? asrResults.remember(resp) : undefined
-          return ok(truncate(text), handle ? { ...structured, result_handle: handle } : structured)
+          const body: AsrUpstreamBody = typeof resp === 'string' ? { text: resp } : resp
+          const transcript = body.text ?? body.transcription ?? ''
+          // Only results with more than one page are worth retaining.
+          const pageable = body.timestamps !== undefined || transcript.length > ASR_TEXT_PAGE_CHARS
+          return respond(body, pageable ? asrResults.remember(body) : undefined)
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) {
             return fail(
@@ -1191,7 +1213,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Web Search',
       description: `Search the web with Brave Search (default, Zero Data Retention) or Google Search (proxied and anonymized by Venice). Returns structured results with titles, URLs, snippets, and dates.${X402_OK}`,
       inputSchema: {
-        query: z.string().min(1).max(500),
+        query: z.string().min(1).max(400),
         limit: z.number().int().min(1).max(20).optional(),
         search_provider: z.enum(['brave', 'google']).optional().describe('brave (default) uses Zero Data Retention; google is proxied/anonymized by Venice.'),
       },

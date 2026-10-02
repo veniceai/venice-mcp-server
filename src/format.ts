@@ -229,30 +229,52 @@ export interface AsrUpstreamBody {
   timestamps?: unknown
 }
 
-/** Keep the transcript and a bounded page of timestamp arrays for MCP responses. */
+/** Characters of transcript returned per page. */
+export const ASR_TEXT_PAGE_CHARS = 8000
+
+/**
+ * Keep a bounded page of the transcript and of each timestamp array for MCP responses.
+ * `paged` is true when the result carries paging state (timestamps, or a transcript longer
+ * than one page), so the caller must expose continuation details in the text content too.
+ */
 export function boundAsrResult(
   resp: AsrUpstreamBody,
   offset = 0,
   limit = ASR_TIMESTAMP_DEFAULT_LIMIT,
-): { text: string; structured: Record<string, unknown> } {
-  const transcript = resp.text ?? resp.transcription ?? ''
+  textOffset = 0,
+): { text: string; structured: Record<string, unknown>; paged: boolean } {
+  const transcript = resp.text ?? resp.transcription
   const structured: Record<string, unknown> = {}
-  if (resp.text !== undefined) structured.text = truncate(resp.text)
-  else if (resp.transcription !== undefined) structured.text = truncate(resp.transcription)
+  let pagedText = false
+  if (transcript !== undefined) {
+    structured.text = transcript.slice(textOffset, textOffset + ASR_TEXT_PAGE_CHARS)
+    if (transcript.length > ASR_TEXT_PAGE_CHARS) {
+      pagedText = true
+      const next = textOffset + ASR_TEXT_PAGE_CHARS
+      structured.text_offset = textOffset
+      structured.text_total = transcript.length
+      structured.next_text_offset = next < transcript.length ? next : null
+    }
+  }
   if (resp.duration !== undefined) structured.duration = resp.duration
   if (resp.timestamps !== undefined) Object.assign(structured, pageAsrTimestamps(resp.timestamps, offset, limit))
-  return { text: transcript || JSON.stringify(structured, null, 2), structured }
+  const paged = pagedText || resp.timestamps !== undefined
+  const text = typeof structured.text === 'string' && structured.text ? structured.text : JSON.stringify(structured)
+  return { text, structured, paged }
 }
 
 function pageAsrTimestamps(raw: unknown, offset: number, limit: number): Record<string, unknown> {
   const meta = { timestamp_offset: offset, timestamp_limit: limit }
+  const end = offset + limit
 
   if (Array.isArray(raw)) {
+    const more = raw.length > end
     return {
-      timestamps: raw.slice(offset, offset + limit),
+      timestamps: raw.slice(offset, end),
       ...meta,
       timestamp_total: raw.length,
-      timestamps_truncated: offset > 0 || raw.length > offset + limit,
+      timestamps_truncated: more,
+      next_timestamp_offset: more ? end : null,
     }
   }
 
@@ -260,15 +282,15 @@ function pageAsrTimestamps(raw: unknown, offset: number, limit: number): Record<
     const timestamps: Record<string, unknown> = {}
     const totals: Record<string, number> = {}
     let pagedAny = false
-    let truncated = offset > 0
+    let more = false
 
     for (const key of ASR_TIMESTAMP_ARRAY_KEYS) {
       const value = raw[key]
       if (!Array.isArray(value)) continue
       pagedAny = true
       totals[key] = value.length
-      timestamps[key] = value.slice(offset, offset + limit)
-      if (value.length > offset + limit) truncated = true
+      timestamps[key] = value.slice(offset, end)
+      if (value.length > end) more = true
     }
 
     if (pagedAny) {
@@ -276,7 +298,8 @@ function pageAsrTimestamps(raw: unknown, offset: number, limit: number): Record<
         timestamps,
         ...meta,
         timestamp_total: totals,
-        timestamps_truncated: truncated,
+        timestamps_truncated: more,
+        next_timestamp_offset: more ? end : null,
       }
     }
 
