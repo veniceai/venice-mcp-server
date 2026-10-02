@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **33 tools across all modalities, one config block.**
+Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **34 tools across all modalities, one config block.**
 
 ## Quick start
 
@@ -31,12 +31,12 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
 
 ### 3. Restart your MCP host
 
-That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 27 more Venice tools.
+That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 28 more Venice tools.
 
 
 ## What you get
 
-**33 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer). The voices resource is built live from each TTS model's catalog metadata.
+**34 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer). The voices resource is built live from each TTS model's catalog metadata.
 
 ### 💬 Chat & embeddings
 
@@ -97,7 +97,8 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_list_models` | Page through the live model catalog, every type by default, with server-side filtering for `asr`, `decision`, `embedding`, `image`, `music`, `text`, `tts`, `upscale`, `inpaint`, `video`, `all`, or `code`. Returns compact summaries (50 per page by default, up to 200) with `total` and `next_offset`; set `verbose` for full model objects. |
+| `venice_list_models` | Page through the live model catalog, every type by default, with server-side filtering for `asr`, `decision`, `embedding`, `image`, `music`, `text`, `tts`, `upscale`, `inpaint`, `video`, `all`, `code`, or any newer catalog type. Returns compact summaries (50 per page by default, up to 200) with `total`, `next_offset`, and every matching model id; set `verbose` for full model objects. |
+| `venice_model_details` | Get one exact model's full catalog row, including `model_spec` constraints, capabilities, and pricing. |
 | `venice_model_traits` | Get the live trait-name to model-id mapping for a model type. |
 | `venice_model_compatibility_mapping` | Get compatible model-name to Venice model-id mappings. |
 | `venice_list_characters` | List public Venice characters. |
@@ -241,7 +242,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 33 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 34 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -294,6 +295,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | Tool | Endpoint |
 |---|---|
 | `venice_list_models` | `GET /v1/models?type=…` (`type=all` when omitted) |
+| `venice_model_details` | `GET /v1/models?type=:type` (exact ID match in the filtered catalog) |
 | `venice_model_traits` | `GET /v1/models/traits` |
 | `venice_model_compatibility_mapping` | `GET /v1/models/compatibility_mapping` |
 | `venice_voice_clone` (`list`) / `venice://voices` | `GET /v1/models?type=tts` |
@@ -339,7 +341,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # 33 tool registry + endpoint+method+body mappings
+├── tools.test.ts              # 34 tool registry + endpoint+method+body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub
@@ -362,7 +364,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 33 tools × both auth modes, side-by-side report
+# Comprehensive — all 34 tools × both auth modes, side-by-side report
 env VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 

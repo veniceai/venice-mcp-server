@@ -16,7 +16,7 @@
  *      - billing/* (balance, cost, usage, usage-analytics)
  *      - api_keys/*, support-bot
  *   🔓 Auth-free:
- *      - models, models/card, models/traits
+ *      - models, models/traits
  *      - image/styles
  *      - audio/quote, video/quote
  *      - x402/balance, x402/top-up, x402/transactions
@@ -109,30 +109,33 @@ function videoCleanupSucceeded(body: { success?: boolean } | null | undefined): 
 
 const QUEUE_DOWNLOAD_URL_TTL_MS = 24 * 60 * 60 * 1000
 const QUEUE_DOWNLOAD_URL_MAX_ENTRIES = 1000
-const queueDownloadUrls = new Map<string, { url: string; expiresAt: number }>()
+/** Queue-time download URLs, scoped to one MCP session so another session cannot resolve them by queue_id. */
+class QueueDownloadUrlStore {
+  private readonly urls = new Map<string, { url: string; expiresAt: number }>()
 
-function pruneQueueDownloadUrls(now = Date.now()): void {
-  for (const [queueId, entry] of queueDownloadUrls) {
-    if (entry.expiresAt <= now) queueDownloadUrls.delete(queueId)
+  /** Venice-issued URLs are stored as returned; only caller-supplied URLs go through trustedQueueDownloadUrl. */
+  remember(queueId: string, url: string | undefined): void {
+    if (!url) return
+    this.prune()
+    // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
+    while (this.urls.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
+      const oldest = this.urls.keys().next()
+      if (oldest.done) break
+      this.urls.delete(oldest.value)
+    }
+    this.urls.set(queueId, { url, expiresAt: Date.now() + QUEUE_DOWNLOAD_URL_TTL_MS })
   }
-}
 
-function rememberQueueDownloadUrl(queueId: string, url: string | undefined): void {
-  const trusted = trustedQueueDownloadUrl(url)
-  if (!trusted) return
-  pruneQueueDownloadUrls()
-  // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
-  while (queueDownloadUrls.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
-    const oldest = queueDownloadUrls.keys().next()
-    if (oldest.done) break
-    queueDownloadUrls.delete(oldest.value)
+  get(queueId: string): string | undefined {
+    this.prune()
+    return this.urls.get(queueId)?.url
   }
-  queueDownloadUrls.set(queueId, { url: trusted, expiresAt: Date.now() + QUEUE_DOWNLOAD_URL_TTL_MS })
-}
 
-function rememberedQueueDownloadUrl(queueId: string): string | undefined {
-  pruneQueueDownloadUrls()
-  return queueDownloadUrls.get(queueId)?.url
+  private prune(now = Date.now()): void {
+    for (const [queueId, entry] of this.urls) {
+      if (entry.expiresAt <= now) this.urls.delete(queueId)
+    }
+  }
 }
 
 /** Caller-supplied queue URLs must be Venice HTTPS hosts. Retrieve URLs come from Venice and are not re-checked here. */
@@ -184,34 +187,18 @@ function needsConsentDetails(err: unknown): NeedsConsentBody | undefined {
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
-
-const MODEL_TYPES = [
-  'text',
-  'image',
-  'video',
-  'music',
-  'embedding',
-  'asr',
-  'tts',
-  'upscale',
-  'inpaint',
-  'decision',
-  'code',
-  'all',
-] as const
-
-const MODEL_METADATA_TYPES = [
-  'asr',
-  'decision',
-  'embedding',
-  'image',
-  'music',
-  'text',
-  'tts',
-  'upscale',
-  'inpaint',
-  'video',
-] as const
+/** Types in the live catalog (GET /v1/models?type=all). Accepted as strings so a new Venice type still works. */
+const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'music', 'tts', 'asr', 'embedding', 'decision'] as const
+/** Shared by music generation and quote so a quoted request is always queueable. */
+const musicDurationSecondsSchema = z
+  .union([z.number().int().positive(), z.string().regex(/^\d+$/, 'Must be a numeric string')])
+  .optional()
+  .describe('Optional duration in seconds as a positive integer or numeric string. Model-specific.')
+const modelTypeSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .regex(/^[a-z][a-z0-9_-]*$/, 'Must be a catalog type such as "video".')
 
 // First entry is the upstream default for POST /audio/voices when model is omitted.
 const VOICE_CLONE_MODELS = ['tts-chatterbox-hd', 'tts-minimax-speech-02-hd'] as const
@@ -336,6 +323,7 @@ const responsesVeniceParametersSchema = z
 export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
   const asrResults = new AsrResultStore()
+  const queueDownloadUrls = new QueueDownloadUrlStore()
 
   const tools: ToolDef[] = [
     // ========================================================================
@@ -690,12 +678,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_generate',
       title: 'Venice Video Queue',
-      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a string enum like '4s' / '6s' / '8s' (model-specific, see model card). Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
+      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details. Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See GET /v1/models/:id/card.'),
-        aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see GET /v1/models/:id/card.'),
+        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See venice_model_details.'),
+        aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see venice_model_details.'),
         seed: z.number().int().optional(),
         image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
         end_image_url: z.string().url().optional().describe('For models that support end frames or transitions. URL or data URL.'),
@@ -711,7 +699,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         })).max(4).optional().describe('For Kling O3 R2V and similar: up to 4 character/object elements. Reference in prompt as @Element1, @Element2, etc.'),
         scene_image_urls: z.array(z.string().url()).max(4).optional().describe('For models with advanced element support: up to 4 scene reference images. Reference in prompt as @Image1, @Image2, etc.'),
         negative_prompt: z.string().max(4096).optional().describe('Negative prompt (what to avoid). Supported by Seedance and other models.'),
-        resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see model card.'),
+        resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see venice_model_details.'),
         upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple.'),
         audio: z.boolean().optional().describe('Enable or disable audio generation for models that support it. Defaults to true.'),
         consents: z.object({
@@ -730,7 +718,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned by Venice.')
-          rememberQueueDownloadUrl(id, resp.download_url)
+          queueDownloadUrls.remember(id, resp.download_url)
           return ok(
             `Queued: queue_id=${id}, model=${resp.model}\n` +
               'Poll with venice_video_status using queue_id and model. This process remembers download_url; pass it from structuredContent only if another process will poll. Do not invent a download_url.',
@@ -851,7 +839,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const url =
             resp.download_url ??
             resp.url ??
-            rememberedQueueDownloadUrl(args.queue_id) ??
+            queueDownloadUrls.get(args.queue_id) ??
             trustedQueueDownloadUrl(queueDownloadUrl)
           if (resp.status === 'COMPLETED') {
             if (!url) {
@@ -1110,10 +1098,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: {
         prompt: z.string().min(1).max(4000),
         model: z.string().describe('Required. Music model id, e.g. "elevenlabs-music".'),
-        duration_seconds: z.union([
-          z.number().int().positive(),
-          z.string().regex(/^\d+$/, 'Must be a numeric string'),
-        ]).optional().describe('Optional duration in seconds as a positive integer or numeric string. Model-specific.'),
+        duration_seconds: musicDurationSecondsSchema,
         force_instrumental: z.boolean().optional().describe('Only for models reporting supports_force_instrumental.'),
         lyrics_prompt: z.string().optional().describe('Lyrics/text for lyric-capable models. Length limits come from model metadata.'),
         lyrics_optimizer: z.boolean().optional().describe('Auto-generate lyrics. lyrics_prompt must be empty when enabled.'),
@@ -1309,9 +1294,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_list_models',
       title: 'Venice List Models',
-      description: `List the live model catalog, one page at a time. Omitting type lists every model type (sent upstream as type=all). Each entry is a compact summary (id, type, name, context length, enabled capabilities, traits, privacy, pricing); set verbose=true for the full upstream model objects. Returns total and next_offset; call again with offset=next_offset until next_offset is null.${NO_AUTH}`,
+      description: `List the live model catalog, one page at a time. Omitting type lists every model type (sent upstream as type=all). Each entry is a compact summary (id, type, name, context length, enabled capabilities, traits, privacy, pricing); set verbose=true for the full upstream model objects. Returns total, next_offset, and every matching model id in ids; call again with offset=next_offset until next_offset is null.${NO_AUTH}`,
       inputSchema: {
-        type: z.enum(MODEL_TYPES).optional().describe('Model type filter. Defaults to all.'),
+        type: modelTypeSchema
+          .optional()
+          .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}, "code", or "all" (default). Without a type Venice returns only text models, so pass one to find video, image or audio ids.`),
         limit: z
           .number()
           .int()
@@ -1325,8 +1312,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       handler: async ({ type, limit, offset, verbose }) => {
         try {
           const requestedType = type ?? 'all'
-          const resp = await client.get<ModelCatalogResponse>(`/v1/models?type=${encodeURIComponent(requestedType)}`)
+          const query = new URLSearchParams({ type: requestedType }).toString()
+          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`)
           const models = resp.data ?? resp.models ?? []
+          const ids = models
+            .map((m) => (typeof m === 'object' && m !== null ? (m as { id?: unknown }).id : undefined))
+            .filter((id): id is string => typeof id === 'string')
           const start = offset ?? 0
           const end = Math.min(models.length, start + (limit ?? MODEL_LIST_DEFAULT_LIMIT))
           const page: unknown[] = []
@@ -1346,6 +1337,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             count: page.length,
             offset: start,
             next_offset: nextOffset,
+            ids,
             data: page,
           })
         } catch (err) {
@@ -1359,7 +1351,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Model Traits',
       description: `Return the live trait-name to model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
       inputSchema: {
-        type: z.enum(MODEL_METADATA_TYPES).optional(),
+        type: z.enum(KNOWN_MODEL_TYPES).optional(),
       },
       handler: async ({ type }) => {
         try {
@@ -1379,7 +1371,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Model Compatibility Mapping',
       description: `Return the live compatible model-name to Venice model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
       inputSchema: {
-        type: z.enum(MODEL_METADATA_TYPES).optional(),
+        type: z.enum(KNOWN_MODEL_TYPES).optional(),
       },
       handler: async ({ type }) => {
         try {
@@ -1388,6 +1380,38 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             : '/v1/models/compatibility_mapping'
           const resp = await client.get<Record<string, unknown>>(path)
           return ok(JSON.stringify(resp, null, 2), resp)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_model_details',
+      title: 'Venice Model Details',
+      description: `Get one exact model's full catalog row, including model_spec constraints, capabilities, and pricing when available. Requires a concrete type to keep the upstream catalog response bounded.${NO_AUTH}`,
+      inputSchema: {
+        model_id: z.string().trim().min(1).describe('Exact model id, e.g. from venice_list_models({ type: "video" }).'),
+        type: modelTypeSchema
+          .refine((t) => t !== 'all' && t !== 'code', 'Use a concrete type such as "video"; "all" and "code" are not allowed.')
+          .describe(`Catalog type the model belongs to: ${KNOWN_MODEL_TYPES.join(', ')}.`),
+      },
+      handler: async ({ model_id, type }) => {
+        try {
+          const query = new URLSearchParams({ type }).toString()
+          const resp = await client.get<{ data?: unknown[] }>(`/v1/models?${query}`)
+          const model = (resp.data ?? [])
+            .filter((candidate): candidate is Record<string, unknown> =>
+              typeof candidate === 'object' && candidate !== null
+            )
+            .find((candidate) => candidate.id === model_id)
+          if (!model) {
+            return fail(
+              `No model "${model_id}" in the "${type}" catalog. If the id is right, it may belong to another type ` +
+                `(${KNOWN_MODEL_TYPES.filter((t) => t !== type).join(', ')}); retry with that type, or find it with venice_list_models({ type }).`
+            )
+          }
+          return ok(JSON.stringify(model, null, 2), model)
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1415,7 +1439,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Get a price quote for a music generation BEFORE queuing. Useful for budgeting.${NO_AUTH}`,
       inputSchema: {
         model: z.string().min(1).describe('Music model id, e.g. "elevenlabs-music".'),
-        duration_seconds: z.number().min(1).max(300).optional(),
+        duration_seconds: musicDurationSecondsSchema,
         character_count: z.number().int().positive().optional().describe('Required for character-based pricing models.'),
       },
       handler: async (args) => {
