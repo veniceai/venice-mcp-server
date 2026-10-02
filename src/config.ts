@@ -46,9 +46,14 @@ export interface Config {
   serverName: string
   /** Server version advertised. */
   serverVersion: string
+  /** Whether the venice_web3_key_mint tool is registered. Off unless explicitly enabled. */
+  enableWeb3Mint: boolean
+  /** Highest USD consumption limit venice_web3_key_mint will request. */
+  maxMintUsd: number
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_MAX_MINT_USD = 50
 
 function parsePositiveNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value ?? fallback)
@@ -69,5 +74,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     serverName: '@veniceai/mcp-server',
     serverVersion: '0.2.0',
+    enableWeb3Mint: env.VENICE_MCP_ENABLE_WEB3_MINT === '1',
+    maxMintUsd: parsePositiveNumber(env.VENICE_MCP_MAX_MINT_USD, DEFAULT_MAX_MINT_USD),
   }
 }
