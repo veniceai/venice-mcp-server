@@ -155,8 +155,9 @@ function cryptoRpcRequiresIdempotencyKey(body: unknown): boolean {
   return cryptoRpcMethods(body).some(isBroadcastRpcMethod)
 }
 
-function cryptoRpcBatchesBroadcast(body: unknown): boolean {
-  return Array.isArray(body) && body.length > 1 && cryptoRpcMethods(body).some(isBroadcastRpcMethod)
+function cryptoRpcBatchedBroadcasts(body: unknown): string[] {
+  if (!Array.isArray(body) || body.length <= 1) return []
+  return [...new Set(cryptoRpcMethods(body).filter(isBroadcastRpcMethod))]
 }
 
 function cryptoRpcBilling(headers: Record<string, string>): Record<string, unknown> {
@@ -993,9 +994,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                   ? { jsonrpc: '2.0' as const, ...args.request[0] }
                   : args.request.map((item) => ({ jsonrpc: '2.0' as const, ...item }))
                 : { jsonrpc: '2.0' as const, ...args.request, id: args.request.id ?? 1 }
-          if (cryptoRpcBatchesBroadcast(body)) {
+          const batchedBroadcasts = cryptoRpcBatchedBroadcasts(body)
+          if (batchedBroadcasts.length > 0) {
             return fail(
-              'Transaction relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes) cannot be batched with other requests. Send each broadcast as a single request.',
+              `Transaction relays cannot be batched with other requests; this batch contains ${batchedBroadcasts.join(', ')}. Send each broadcast as a single request.`,
             )
           }
           if (cryptoRpcRequiresIdempotencyKey(body) && !args.idempotency_key) {

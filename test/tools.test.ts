@@ -697,18 +697,22 @@ describe('tool output shaping', () => {
     const tool = get('venice_crypto_rpc')
     const call = (method: string, id: number) => ({ jsonrpc: '2.0', method, params: ['0xabc'], id })
 
-    for (const request of [
-      [call('eth_blockNumber', 1), call('eth_sendRawTransaction', 2)],
-      [call('eth_sendRawTransaction', 1), call('eth_sendRawTransaction', 2)],
-      [call('sendTransaction', 1), call('getBalance', 2)],
-    ]) {
+    for (const [request, named] of [
+      [[call('eth_blockNumber', 1), call('eth_sendRawTransaction', 2)], 'contains eth_sendRawTransaction.'],
+      [[call('eth_sendRawTransaction', 1), call('eth_sendRawTransaction', 2)], 'contains eth_sendRawTransaction.'],
+      [[call('sendTransaction', 1), call('getBalance', 2)], 'contains sendTransaction.'],
+      [[call('eth_sendUserOperation', 1), call('starknet_addInvokeTransaction', 2)], 'contains eth_sendUserOperation, starknet_addInvokeTransaction.'],
+    ] as const) {
       const result = await tool.handler({
         network: 'ethereum-mainnet',
         request,
         idempotency_key: 'agent-tx-1',
       } as never)
+      const message = (result.content[0] as { text: string }).text
       assert.equal(result.isError, true)
-      assert.match((result.content[0] as { text: string }).text, /single request/)
+      assert.match(message, /single request/)
+      assert.ok(message.includes(named), message)
+      assert.doesNotMatch(message, /getBalance|eth_blockNumber/)
     }
     assert.equal(stub.calls.length, 0)
 
