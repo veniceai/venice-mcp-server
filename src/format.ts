@@ -23,6 +23,41 @@ interface BalanceFields {
   }
 }
 
+/** x402 v2 PaymentRequired body (https://github.com/x402-foundation/x402). */
+interface X402V2PaymentRequired {
+  x402Version?: number
+  error?: string
+  resource?: {
+    url?: string
+    description?: string | null
+    mimeType?: string | null
+  }
+  accepts?: X402V2PaymentRequirement[]
+}
+
+interface X402V2PaymentRequirement {
+  scheme?: string
+  network?: string
+  amount?: string
+  asset?: string
+  payTo?: string
+  maxTimeoutSeconds?: number
+  extra?: {
+    name?: string
+    version?: string
+    assetTransferMethod?: string
+    paymentFlow?: string
+    [k: string]: unknown
+  }
+}
+
+/** True when err.body is an x402 v2 PaymentRequired object. */
+function isX402V2Body(body: unknown): body is X402V2PaymentRequired {
+  if (!isObject(body)) return false
+  if (body.x402Version !== 2) return false
+  return Array.isArray((body as { accepts?: unknown }).accepts)
+}
+
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null
 }
@@ -80,6 +115,13 @@ function format402(err: VeniceUpstreamError): string {
     return lines.join('\n')
   }
 
+  // Case 3: x402 v2 PaymentRequired — newer protocol carrying `accepts[]`.
+  // The live Venice POST /v1/x402/top-up discovery returns this shape; we must
+  // surface each payment requirement so an agent can complete a wallet top-up.
+  if (isX402V2Body(body)) {
+    return formatX402V2(body)
+  }
+
   if ((err.body as { error?: unknown } | undefined)?.error === 'upstream_error_body_truncated') {
     lines.push('The payment details were too large to include. To continue, either:')
     lines.push(`  - set VENICE_API_KEY with a key that has balance, or`)
@@ -90,6 +132,80 @@ function format402(err: VeniceUpstreamError): string {
   // Avoid reflecting unexpected upstream bodies; they may contain implementation details.
   lines.push('Payment is required, but Venice returned an unrecognized payment response.')
   return lines.join('\n')
+}
+
+/** USDC has 6 decimals on every chain Venice uses (base, base-sepolia, etc.). */
+const USDC_DECIMALS = 6
+
+/** Render an x402 v2 PaymentRequired body as human-readable payment instructions. */
+function formatX402V2(body: X402V2PaymentRequired): string {
+  const lines: string[] = []
+  lines.push('⚠️ Venice returned 402 Payment Required.')
+  lines.push('')
+  lines.push(`x402 protocol v2 — payment is required to access this resource.`)
+  if (body.error) {
+    lines.push(`Reason: ${body.error}`)
+  }
+  if (body.resource?.url) {
+    lines.push(`Resource: ${body.resource.url}`)
+  }
+  if (body.resource?.description) {
+    lines.push(`  ${body.resource.description}`)
+  }
+  lines.push('')
+
+  const reqs = body.accepts ?? []
+  if (reqs.length === 0) {
+    lines.push('Venice advertised no acceptable payment methods.')
+    return lines.join('\n')
+  }
+
+  lines.push(`Accepted payment method${reqs.length > 1 ? 's' : ''} (${reqs.length}):`)
+  lines.push('')
+  reqs.forEach((req, i) => {
+    const tag = reqs.length > 1 ? ` [${i + 1}]` : ''
+    const scheme = req.scheme ?? 'exact'
+    const network = req.network ?? 'unknown'
+    lines.push(`Payment${tag} — scheme=${scheme}, network=${network}`)
+
+    if (typeof req.amount === 'string' && req.amount !== '') {
+      const usd = baseUnitsToUsd(req.amount)
+      if (usd !== null) {
+        lines.push(`  Amount:   $${usd.toFixed(6)} USD (${req.amount} base units)`)
+      } else {
+        lines.push(`  Amount:   ${req.amount} base units`)
+      }
+    }
+    if (req.asset) {
+      const label = req.extra?.name ? `${req.extra.name}${req.extra.version ? ` v${req.extra.version}` : ''}` : 'token'
+      lines.push(`  Asset:    ${req.asset} (${label})`)
+    }
+    if (req.payTo) {
+      lines.push(`  Pay to:   ${req.payTo}`)
+    }
+    if (typeof req.maxTimeoutSeconds === 'number') {
+      lines.push(`  Timeout:  ${req.maxTimeoutSeconds}s`)
+    }
+    if (req.extra?.assetTransferMethod) {
+      lines.push(`  Transfer: ${req.extra.assetTransferMethod}`)
+    }
+    lines.push('')
+  })
+
+  lines.push('To pay:')
+  lines.push('  1. Pick an accepted method above.')
+  lines.push('  2. Sign a USDC transfer authorization with the x402 SDK for that')
+  lines.push('     network, asset, payTo, and amount (use the base-units value).')
+  lines.push('  3. Retry the Venice request with the PAYMENT-SIGNATURE header set to')
+  lines.push('     the base64-encoded x402 PaymentPayload.')
+  return lines.join('\n')
+}
+
+/** Convert an x402 v2 `amount` (atomic USDC base units) to USD, or null if not a number. */
+function baseUnitsToUsd(amount: string): number | null {
+  const units = Number(amount)
+  if (!Number.isFinite(units)) return null
+  return units / 10 ** USDC_DECIMALS
 }
 
 /** Convert any thrown error into a structured MCP-tool error string. */

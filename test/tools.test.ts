@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
+import { z } from 'zod'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 
@@ -138,11 +139,16 @@ const MAPPINGS: Mapping[] = [
   },
   {
     tool: 'venice_embeddings',
-    args: { input: 'foo' },
+    args: {
+      input: 'foo',
+      model: 'text-embedding-bge-m3',
+    },
     expectMethod: 'POST',
     expectPath: '/v1/embeddings',
+    expectBodyContains: {
+      model: 'text-embedding-bge-m3',
+    },
   },
-
   // image
   {
     tool: 'venice_image_generate',
@@ -243,6 +249,7 @@ const MAPPINGS: Mapping[] = [
     args: {
       prompt: 'a sunset',
       model: 'seedance-2-0-reference-to-video',
+      duration: '8s',
       consents: {
         seedance: {
           confirmed_terms_and_privacy: true,
@@ -254,6 +261,8 @@ const MAPPINGS: Mapping[] = [
     expectMethod: 'POST',
     expectPath: '/v1/video/queue',
     expectBodyContains: {
+      model: 'seedance-2-0-reference-to-video',
+      duration: '8s',
       consents: {
         seedance: {
           confirmed_terms_and_privacy: true,
@@ -768,6 +777,53 @@ describe('tool output shaping', () => {
     assert.match((r.content[1] as { text: string }).text, /cleanup was not confirmed/)
   })
 
+  it('venice_video_complete reports removal only when Venice confirms success', async () => {
+    const stub = new StubClient({
+      '/v1/video/complete': () => ({ success: true }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_complete')!.handler({
+      queue_id: 'cleanup-ok',
+      model: 'm',
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, true)
+    assert.match((r.content[0] as { text: string }).text, /server-side media removed/)
+  })
+
+  it('venice_video_complete does not claim removal when complete returns 200 { success: false }', async () => {
+    const stub = new StubClient({
+      '/v1/video/complete': () => ({ success: false }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_complete')!.handler({
+      queue_id: 'cleanup-refused',
+      model: 'm',
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    const text = (r.content[0] as { text: string }).text
+    assert.match(text, /not confirmed/)
+    assert.doesNotMatch(text, /media removed/)
+  })
+
+  it('venice_video_complete does not claim removal when complete omits success', async () => {
+    const stub = new StubClient({
+      '/v1/video/complete': () => ({}),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_video_complete')!.handler({
+      queue_id: 'cleanup-silent',
+      model: 'm',
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
+    assert.match((r.content[0] as { text: string }).text, /not confirmed/)
+  })
+
   it('venice_video_status never completes a JSON download_url before the caller downloads it', async () => {
     const stub = new StubClient({
       '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
@@ -1249,6 +1305,51 @@ describe('tool output shaping', () => {
     assert.equal((multiEdited.structuredContent as { enhanced_prompt: string }).enhanced_prompt, 'unified winter scene')
   })
 
+  it('venice_image_multi_edit sends modelId and omits model', async () => {
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_image_multi_edit')!.handler({
+      image_urls: ['https://x/a.png', 'https://x/b.png'],
+      prompt: 'merge them',
+      model: 'qwen-image-2-edit',
+      aspect_ratio: '16:9',
+    } as never)
+
+    const sent = JSON.parse(JSON.stringify(stub.callsTo('/v1/image/multi-edit')[0].body)) as Record<string, unknown>
+    assert.equal(sent.modelId, 'qwen-image-2-edit')
+    assert.equal('model' in sent, false)
+    assert.deepEqual(sent.images, ['https://x/a.png', 'https://x/b.png'])
+  })
+
+  it('venice_image_multi_edit omits model fields when model is unset', async () => {
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_image_multi_edit')!.handler({
+      image_urls: ['https://x/a.png'],
+      prompt: 'merge them',
+    } as never)
+
+    const sent = JSON.parse(JSON.stringify(stub.callsTo('/v1/image/multi-edit')[0].body)) as Record<string, unknown>
+    assert.equal('model' in sent, false)
+    assert.equal('modelId' in sent, false)
+    assert.deepEqual(sent.images, ['https://x/a.png'])
+    assert.equal(sent.prompt, 'merge them')
+  })
+
+  it('venice_image_edit still sends model', async () => {
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_image_edit')!.handler({
+      image_url: 'https://x/img.png',
+      prompt: 'add hat',
+      model: 'firered-image-edit',
+    } as never)
+
+    const sent = JSON.parse(JSON.stringify(stub.callsTo('/v1/image/edit')[0].body)) as Record<string, unknown>
+    assert.equal(sent.model, 'firered-image-edit')
+    assert.equal('modelId' in sent, false)
+  })
+
   it('venice_video_generate returns Seedance consent policy and explicit next step', async () => {
     const stub = new StubClient({
       '/v1/video/queue': async () => {
@@ -1322,5 +1423,68 @@ describe('tool output shaping', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('requires model for venice_embeddings', () => {
+    const { get } = setup()
+    const tool = get('venice_embeddings')
+
+    const modelSchema = tool.inputSchema.model
+
+    assert.equal(
+      modelSchema.isOptional(),
+      false,
+      'venice_embeddings.model should be required'
+    )
+  })
+})
+
+describe('video tool schemas', () => {
+  it('venice_video_generate requires duration', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+
+    const result = schema.safeParse({
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+    })
+
+    assert.equal(result.success, false)
+  })
+
+  it('venice_video_quote requires duration', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+
+    const result = schema.safeParse({
+      model: 'veo3.1-fast-text-to-video',
+    })
+
+    assert.equal(result.success, false)
+  })
+
+  it('accepts duration for venice_video_generate', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+
+    const result = schema.safeParse({
+      prompt: 'a sunset',
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    })
+
+    assert.equal(result.success, true)
+  })
+
+  it('accepts duration for venice_video_quote', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+
+    const result = schema.safeParse({
+      model: 'veo3.1-fast-text-to-video',
+      duration: '8s',
+    })
+
+    assert.equal(result.success, true)
   })
 })
