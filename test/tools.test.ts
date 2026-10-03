@@ -120,6 +120,18 @@ describe('tools registry', () => {
     assert.doesNotMatch(get('venice_crypto_rpc').description, /Networks include/i)
   })
 
+  it('bounds catalog types to 64 normalized characters for both model tools', () => {
+    const { get } = setup()
+    for (const name of ['venice_list_models', 'venice_model_details']) {
+      const schema = z.object(get(name).inputSchema)
+      const args = { model_id: 'x' }
+      assert.equal(schema.safeParse({ ...args, type: 'a'.repeat(64) }).success, true, name)
+      assert.equal(schema.safeParse({ ...args, type: 'a'.repeat(65) }).success, false, name)
+      assert.equal(schema.parse({ ...args, type: `  ${'A'.repeat(64)}  ` }).type, 'a'.repeat(64), name)
+      assert.equal(schema.safeParse({ ...args, type: 'some-new-type' }).success, true, name)
+    }
+  })
+
   it('requires a non-empty model id and bounded type for venice_model_details', () => {
     const { get } = setup()
     const schema = z.object(get('venice_model_details').inputSchema)
@@ -1011,6 +1023,46 @@ describe('tool output shaping', () => {
 
     await get('venice_list_models').handler({} as never)
     assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=all')
+  })
+
+  for (const count of [80, 81]) {
+    it(`venice_list_models bounds ${count} large rows while preserving JSON and all ids`, async () => {
+      const models = Array.from({ length: count }, (_, i) => ({
+        id: `model-${i}`,
+        description: 'd'.repeat(1000),
+      }))
+      const stub = new StubClient({ '/v1/models?type=all': () => ({ data: models }) })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')
+      assert.ok(tool)
+      const result = await tool.handler({})
+      assert.equal(result.isError, undefined)
+      assert.equal(result.content.length, 1)
+      const text = (result.content[0] as { text: string }).text
+      assert.ok(text.length <= 8000)
+      const parsed = JSON.parse(text)
+      assert.equal(parsed.truncated, true)
+      assert.equal(parsed.total, count)
+      assert.ok(parsed.returned > 0 && parsed.returned < count)
+      assert.deepEqual(parsed.data, models.slice(0, parsed.returned))
+      assert.deepEqual(result.structuredContent, {
+        type: 'all',
+        count,
+        ids: models.map((m) => m.id),
+        truncated: true,
+        returned: parsed.returned,
+        total: count,
+      })
+    })
+  }
+
+  it('venice_list_models keeps small catalogs as a JSON array', async () => {
+    const models = [{ id: 'small-model', description: 'Small row' }]
+    const stub = new StubClient({ '/v1/models?type=all': () => ({ models }) })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')
+    assert.ok(tool)
+    const result = await tool.handler({})
+    assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), models)
+    assert.deepEqual(result.structuredContent, { type: 'all', count: 1, ids: ['small-model'] })
   })
 
   it('venice_model_details returns the full matching catalog row', async () => {

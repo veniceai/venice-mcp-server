@@ -100,6 +100,7 @@ const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'musi
 const modelTypeSchema = z
   .string()
   .trim()
+  .max(64)
   .toLowerCase()
   .regex(/^[a-z][a-z0-9_-]*$/, 'Must be a catalog type such as "video".')
 
@@ -1051,15 +1052,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const ids = models
             .map((m) => (typeof m === 'object' && m !== null ? (m as { id?: unknown }).id : undefined))
             .filter((id): id is string => typeof id === 'string')
-          const shown = models.slice(0, 80)
-          const note =
-            models.length > shown.length
-              ? `\n\nShowing full rows for ${shown.length} of ${models.length} models. All ids: ${ids.join(', ')}`
-              : ''
-          return ok(`${JSON.stringify(shown, null, 2)}${note}`, {
+          const fitted = fitJsonList(models)
+          return ok(fitted.text, {
             type: type ?? 'all',
             count: models.length,
             ids,
+            ...(fitted.truncated ? { truncated: true, returned: fitted.returned, total: models.length } : {}),
           })
         } catch (err) {
           return fail(formatToolError(err))
