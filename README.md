@@ -174,7 +174,7 @@ Venice supports authenticating with a **SIWE-signed wallet token** (a.k.a. SIWX)
 }
 ```
 
-The MCP server forwards `VENICE_SIWX_TOKEN` as the `X-Sign-In-With-X` header on every Venice API call.
+The MCP server forwards `VENICE_SIWX_TOKEN` as the canonical x402 v2 `SIGN-IN-WITH-X` header on every Venice API call (Venice still accepts the legacy `X-Sign-In-With-X` name).
 
 ### How it works
 
@@ -190,7 +190,7 @@ TOP UP (when balance is low)
   Coinbase CDP facilitator and credits your prepaid balance
 
 EVERY INFERENCE CALL
-  MCP server sends X-Sign-In-With-X: <SIWX token>
+  MCP server sends SIGN-IN-WITH-X: <SIWX token>
   Venice → wallet → credit account → debits and runs inference
 ```
 
@@ -240,7 +240,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
                                                               │ HTTPS
                                                               │   Authorization: Bearer ***
                                                               │   OR
-                                                              │   X-Sign-In-With-X: <SIWX>
+                                                              │   SIGN-IN-WITH-X: <SIWX>
                                                               ▼
                                                  ┌────────────────────────┐
                                                  │  Venice API            │
