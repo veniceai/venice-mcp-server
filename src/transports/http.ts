@@ -6,6 +6,15 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { buildServer, type BuildOptions } from '../server.js'
 import { loadConfig, type Config } from '../config.js'
 import { VeniceClient, VeniceResponseTooLargeError } from '../venice-client.js'
+import {
+  bearerChallenge,
+  createOAuthVerifier,
+  loadOAuthSettings,
+  protectedResourceMetadata,
+  resourceMetadataUrl,
+  type OAuthSettings,
+  type OAuthVerifier,
+} from '../auth/oauth.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
@@ -17,8 +26,10 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS = 8
  *   operator's `VENICE_API_KEY` / `VENICE_SIWX_TOKEN`. Sessionful.
  * - `user-key`: each request carries the caller's own Venice credentials (`Authorization: Bearer
  *   <Venice API key>` or a `SIGN-IN-WITH-X` proof), and the server never uses its own. Stateless.
+ * - `oauth`: each request carries an OAuth access token from the configured authorization server;
+ *   the token is introspected and mapped to that user's Venice API key. Stateless.
  */
-export type HttpAuthMode = 'token' | 'user-key'
+export type HttpAuthMode = 'token' | 'user-key' | 'oauth'
 
 export interface UpstreamCredentials {
   apiKey?: string
@@ -32,8 +43,8 @@ interface SessionEntry {
 
 export function parseHttpAuthMode(value: string | undefined): HttpAuthMode {
   const mode = (value ?? 'token').trim().toLowerCase()
-  if (mode === 'token' || mode === 'user-key') return mode
-  throw new Error(`Unknown VENICE_MCP_AUTH "${value}". Use "token" or "user-key".`)
+  if (mode === 'token' || mode === 'user-key' || mode === 'oauth') return mode
+  throw new Error(`Unknown VENICE_MCP_AUTH "${value}". Use "token", "user-key" or "oauth".`)
 }
 
 export function isAuthorizedBearerHeader(header: string | undefined, expectedToken: string | undefined): boolean {
@@ -106,7 +117,7 @@ export function validateHttpAuthConfig(
   allowUnauthenticated = process.env.VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP === '1',
   mode: HttpAuthMode = 'token',
 ): void {
-  if (mode === 'user-key') return
+  if (mode !== 'token') return
   if (isLoopbackHost(host)) return
   if (allowUnauthenticated) return
 
@@ -144,6 +155,10 @@ export interface HttpAppOptions {
   sessionTtlMs?: number
   /** Active user-key requests, including work continuing after a disconnect. */
   maxConcurrentRequests?: number
+  /** Required in `oauth` mode. */
+  oauth?: OAuthSettings
+  /** Overrides token verification in `oauth` mode (tests). */
+  oauthVerifier?: OAuthVerifier
 }
 
 /**
@@ -203,6 +218,61 @@ export function createHttpApp(opts: HttpAppOptions = {}): Express {
     })
   }
   app.use(express.json({ limit: '10mb' }))
+
+  if (authMode === 'oauth') {
+    const settings = opts.oauth
+    if (!settings) throw new Error('oauth mode requires OAuth settings')
+    const verifier = opts.oauthVerifier ?? createOAuthVerifier(settings)
+    const metadataPath = new URL(resourceMetadataUrl(settings)).pathname
+    const sendMetadata = (_req: Request, res: Response) => {
+      res.json(protectedResourceMetadata(settings))
+    }
+    app.get('/.well-known/oauth-protected-resource', sendMetadata)
+    if (metadataPath !== '/.well-known/oauth-protected-resource') app.get(metadataPath, sendMetadata)
+
+    app.all('/mcp', async (req, res) => {
+      if (req.method !== 'POST') {
+        res.setHeader('Allow', 'POST')
+        res.status(405).json({ error: 'stateless server: send JSON-RPC requests with POST' })
+        return
+      }
+      const authorization = req.header('authorization')
+      const token = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : ''
+      if (!token) {
+        res.setHeader('WWW-Authenticate', bearerChallenge(settings))
+        res.status(401).json({ error: 'unauthorized' })
+        return
+      }
+      let identity
+      try {
+        identity = await verifier.verify(token)
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[venice-mcp] token verification failed', (err as Error).message)
+        res.status(503).json({ error: 'authorization service unavailable' })
+        return
+      }
+      if (!identity) {
+        res.setHeader(
+          'WWW-Authenticate',
+          bearerChallenge(settings, { code: 'invalid_token', description: 'The access token is invalid, expired or not for this server' }),
+        )
+        res.status(401).json({ error: 'invalid_token' })
+        return
+      }
+      await handleStateless(req, res, { ...baseConfig, apiKey: identity.veniceApiKey, siwxToken: undefined }, {
+        auth: {
+          scopes: settings.requiredScopes,
+          token: identity.token,
+          reauthChallenge: bearerChallenge(settings, {
+            code: 'invalid_token',
+            description: 'Your Venice connection expired or was revoked. Reconnect to continue.',
+          }),
+        },
+      })
+    })
+    return app
+  }
 
   if (authMode === 'user-key') {
     app.all('/mcp', async (req, res) => {
@@ -366,6 +436,7 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
     authMode,
     authToken,
     host,
+    oauth: authMode === 'oauth' ? loadOAuthSettings() : undefined,
     allowedOrigins: parseAllowedOrigins(process.env.VENICE_MCP_ALLOWED_ORIGINS),
     maxSessions: parsePositiveInt(process.env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS),
     sessionTtlMs: parsePositiveInt(process.env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS),
