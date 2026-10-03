@@ -24,6 +24,7 @@ function settings(overrides: Partial<OAuthSettings> = {}): OAuthSettings {
     authorizationServers: ['https://auth.venice.test'],
     introspectionUrl: 'https://auth.venice.test/oauth/token_info',
     requiredScopes: [],
+    allowedClientIds: [],
     cacheTtlMs: 60_000,
     ...overrides,
   }
@@ -41,8 +42,10 @@ describe('oauth settings and metadata', () => {
       VENICE_MCP_OAUTH_ISSUER: 'https://auth.venice.test',
       VENICE_MCP_OAUTH_INTROSPECTION_URL: 'https://auth.venice.test/oauth/token_info',
       VENICE_MCP_OAUTH_SCOPES: 'venice.inference, offline_access',
+      VENICE_MCP_OAUTH_ALLOWED_CLIENTS: 'https://chatgpt.com/oauth/client.json',
     })
     assert.deepEqual(s.requiredScopes, ['venice.inference', 'offline_access'])
+    assert.deepEqual(s.allowedClientIds, ['https://chatgpt.com/oauth/client.json'])
     assert.equal(s.cacheTtlMs, 60_000)
   })
 
@@ -82,6 +85,20 @@ describe('token introspection', () => {
     ]) {
       assert.equal(await introspectToken('t', s, jsonFetch(body), now), undefined)
     }
+  })
+
+  it('requires an audience for this resource unless the client is explicitly trusted', async () => {
+    const noAud = { active: true, sub: 'user_123', client_id: 'chatgpt', exp: now + 60 }
+    assert.equal(await introspectToken('t', settings(), jsonFetch(noAud), now), undefined)
+    assert.ok(await introspectToken('t', settings({ allowedClientIds: ['chatgpt'] }), jsonFetch(noAud), now))
+    assert.equal(
+      await introspectToken('t', settings({ allowedClientIds: ['chatgpt'] }), jsonFetch({ ...noAud, client_id: 'other-app' }), now),
+      undefined,
+    )
+    assert.equal(
+      await introspectToken('t', settings({ allowedClientIds: ['chatgpt'] }), jsonFetch({ ...noAud, aud: 'https://other.example/mcp' }), now),
+      undefined,
+    )
   })
 
   it('sends client credentials with Basic auth and the token form-encoded', async () => {

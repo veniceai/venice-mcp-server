@@ -139,6 +139,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `VENICE_MCP_OAUTH_INTROSPECTION_URL` | _(none)_ | `oauth` mode: RFC 7662 token introspection endpoint. |
 | `VENICE_MCP_OAUTH_CLIENT_ID` / `VENICE_MCP_OAUTH_CLIENT_SECRET` | _(none)_ | `oauth` mode: credentials for the introspection endpoint, sent as HTTP Basic. |
 | `VENICE_MCP_OAUTH_SCOPES` | _(none)_ | `oauth` mode: scopes every token must carry (comma or space separated). |
+| `VENICE_MCP_OAUTH_ALLOWED_CLIENTS` | _(none)_ | `oauth` mode: OAuth client IDs trusted when introspection returns no `aud`. Otherwise tokens must name `VENICE_MCP_RESOURCE_URL` in `aud`. |
 | `VENICE_MCP_KEY_RESOLVER_URL` / `VENICE_MCP_KEY_RESOLVER_TOKEN` | _(none)_ | `oauth` mode: endpoint that returns the Venice API key for a verified user, when introspection does not include `venice_api_key`. |
 | `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `0` | Emergency escape hatch for unauthenticated exposed HTTP mode. Use only behind a trusted authenticated proxy. |
 | `VENICE_MCP_MAX_SESSIONS` | `100` | Maximum active Streamable HTTP sessions. |
@@ -176,7 +177,7 @@ Each request must send `Authorization: Bearer <the caller's Venice API key>` (or
 For hosted connectors (ChatGPT, Claude.ai, Cursor, Grok), users connect with a "Log in with Venice" flow instead of pasting a key. The MCP server is an OAuth 2.1 *resource server*: an external authorization server (for example Clerk's OAuth provider) signs users in, and the server:
 
 1. Answers unauthenticated requests with `401` and `WWW-Authenticate: Bearer resource_metadata="…"`, and serves RFC 9728 metadata at `/.well-known/oauth-protected-resource` (and the path-specific `/.well-known/oauth-protected-resource/mcp`).
-2. Checks each bearer token with RFC 7662 introspection: it must be active, unexpired, issued for `VENICE_MCP_RESOURCE_URL`, and carry `VENICE_MCP_OAUTH_SCOPES`.
+2. Checks each bearer token with RFC 7662 introspection: it must be active, unexpired, carry `VENICE_MCP_OAUTH_SCOPES`, and name `VENICE_MCP_RESOURCE_URL` in `aud`. If your authorization server doesn't return `aud`, list the trusted client IDs in `VENICE_MCP_OAUTH_ALLOWED_CLIENTS`; tokens from any other client are rejected.
 3. Maps the token to the Venice API key that user's requests spend, from a `venice_api_key` introspection field or from `VENICE_MCP_KEY_RESOLVER_URL`. The client's token is never sent to the Venice API. Verified identities are cached for up to 60 s.
 4. Marks every tool with `_meta.securitySchemes` (`oauth2`), adds a read-only `venice_get_profile` tool (`_meta["openai/profile"]: true`), and returns `_meta["mcp/www_authenticate"]` on tool errors when Venice rejects the key, so ChatGPT offers to reconnect.
 
