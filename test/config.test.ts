@@ -14,8 +14,8 @@ describe('loadConfig', () => {
     assert.equal(cfg.defaultAsrModel, 'openai/whisper-large-v3')
     assert.equal(cfg.timeoutMs, 60_000)
     assert.equal(cfg.maxVideoResponseBytes, 25 * 1024 * 1024)
-    assert.equal(cfg.maxAudioResponseBytes, 25 * 1024 * 1024)
     assert.equal(cfg.maxImageResponseBytes, 32 * 1024 * 1024)
+    assert.equal(cfg.maxAudioResponseBytes, 32 * 1024 * 1024)
     assert.equal(cfg.enableNsfw, true)
     assert.equal(cfg.serverName, '@veniceai/mcp-server')
   })
@@ -62,7 +62,7 @@ describe('loadConfig', () => {
   })
 
   it('falls back to the audio byte-limit default for invalid values', () => {
-    const fallback = 25 * 1024 * 1024
+    const fallback = 32 * 1024 * 1024
     assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: 'nope' }).maxAudioResponseBytes, fallback)
     assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '0' }).maxAudioResponseBytes, fallback)
     assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '1.5' }).maxAudioResponseBytes, fallback)
@@ -71,6 +71,11 @@ describe('loadConfig', () => {
   it('parses the image response byte limit with a fallback for invalid values', () => {
     assert.equal(loadConfig({ VENICE_MAX_IMAGE_RESPONSE_BYTES: '4096' }).maxImageResponseBytes, 4096)
     assert.equal(loadConfig({ VENICE_MAX_IMAGE_RESPONSE_BYTES: '-1' }).maxImageResponseBytes, 32 * 1024 * 1024)
+  })
+
+  it('parses the audio response byte limit with a fallback for invalid values', () => {
+    assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '4096' }).maxAudioResponseBytes, 4096)
+    assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '-1' }).maxAudioResponseBytes, 32 * 1024 * 1024)
   })
 
   it('overrides default models from env', () => {
