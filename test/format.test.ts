@@ -269,6 +269,19 @@ describe('fitJson', () => {
     assert.ok(parsed.urls.length > 0 && parsed.urls.length < 20)
     assert.deepEqual(parsed.urls, urls.slice(0, parsed.urls.length))
   })
+  it('drops from the largest serialized array before arrays with more small items', () => {
+    const value = {
+      small: Array.from({ length: 20 }, (_, i) => i),
+      large: ['a'.repeat(1000), 'b'.repeat(1000)],
+    }
+    const { text, truncated } = fitJson(value, 1500)
+    const parsed = JSON.parse(text) as typeof value
+    assert.equal(truncated, true)
+    assert.ok(text.length <= 1500)
+    assert.deepEqual(parsed.small, value.small)
+    assert.deepEqual(parsed.large, value.large.slice(0, 1))
+    assert.equal(value.large.length, 2)
+  })
   it('returns the error notice rather than cutting a lone oversized identifier', () => {
     const { text, truncated } = fitJson({ url: `https://example.com/${'u'.repeat(1000)}` }, 200)
     assert.equal(truncated, true)

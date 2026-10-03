@@ -311,7 +311,7 @@ export function fitJson(value: unknown, max = MAX_TEXT_CHARS): { text: string; t
     for (const child of Object.values(node)) collect(child)
   }
   collect(root)
-  arrays.sort((a, b) => b.length - a.length)
+  arrays.sort((a, b) => JSON.stringify(b).length - JSON.stringify(a).length)
   for (const array of arrays) {
     const items = array.slice()
     const fits = (n: number) => {
