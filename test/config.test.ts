@@ -57,6 +57,17 @@ describe('loadConfig', () => {
     assert.equal(loadConfig({ VENICE_MAX_VIDEO_RESPONSE_BYTES: '1.5' }).maxVideoResponseBytes, fallback)
   })
 
+  it('parses the completed-audio response byte limit', () => {
+    assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '12345' }).maxAudioResponseBytes, 12_345)
+  })
+
+  it('falls back to the audio byte-limit default for invalid values', () => {
+    const fallback = 32 * 1024 * 1024
+    assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: 'nope' }).maxAudioResponseBytes, fallback)
+    assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '0' }).maxAudioResponseBytes, fallback)
+    assert.equal(loadConfig({ VENICE_MAX_AUDIO_RESPONSE_BYTES: '1.5' }).maxAudioResponseBytes, fallback)
+  })
+
   it('parses the image response byte limit with a fallback for invalid values', () => {
     assert.equal(loadConfig({ VENICE_MAX_IMAGE_RESPONSE_BYTES: '4096' }).maxImageResponseBytes, 4096)
     assert.equal(loadConfig({ VENICE_MAX_IMAGE_RESPONSE_BYTES: '-1' }).maxImageResponseBytes, 32 * 1024 * 1024)

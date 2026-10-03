@@ -33,6 +33,21 @@ export type VeniceMixedResponse<T> =
   | ({ kind: 'json' } & VeniceResponse<T>)
   | ({ kind: 'binary' } & VeniceBinaryResponse)
 
+const MAX_MIXED_JSON_RESPONSE_BYTES = 1024 * 1024
+const MAX_UPSTREAM_ERROR_RESPONSE_BYTES = 64 * 1024
+// 402 bodies carry the top-up and auth instructions agents need, so they get the larger JSON budget.
+const MAX_PAYMENT_REQUIRED_RESPONSE_BYTES = MAX_MIXED_JSON_RESPONSE_BYTES
+
+export class VeniceJsonResponseTooLargeError extends Error {
+  constructor(
+    readonly path: string,
+    readonly maxBytes: number,
+  ) {
+    super(`Venice JSON response on ${path} exceeds the fixed ${maxBytes}-byte safety limit`)
+    this.name = 'VeniceJsonResponseTooLargeError'
+  }
+}
+
 export class VeniceResponseTooLargeError extends Error {
   constructor(
     readonly path: string,
@@ -200,7 +215,7 @@ export class VeniceClient {
   async postBinary(
     path: string,
     init: RequestInitJSON | { form: FormData },
-    opts: { timeoutMs?: number; maxBytes?: number } = {},
+    opts: { timeoutMs?: number; maxBytes?: number; jsonMaxBytes?: number } = {},
   ): Promise<VeniceBinaryResponse> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
@@ -223,13 +238,23 @@ export class VeniceClient {
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
       const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal })
-      if (!res.ok) throw await upstreamError(res, path, opts.maxBytes)
+      if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status))
 
-      const buffer = await readBoundedResponseBuffer(res, path, opts.maxBytes)
+      const contentType = res.headers.get('content-type') ?? 'application/octet-stream'
+      const jsonMaxBytes = isJsonContentType(contentType) ? opts.jsonMaxBytes : undefined
+      let buffer: Buffer
+      try {
+        buffer = await readBoundedResponseBuffer(res, path, jsonMaxBytes ?? opts.maxBytes)
+      } catch (err) {
+        if (jsonMaxBytes !== undefined && err instanceof VeniceResponseTooLargeError) {
+          throw new VeniceJsonResponseTooLargeError(path, jsonMaxBytes)
+        }
+        throw err
+      }
       return {
         buffer,
         status: res.status,
-        contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+        contentType,
         headers: responseHeaders(res),
       }
     } catch (err) {
@@ -248,7 +273,11 @@ export class VeniceClient {
     json: unknown,
     opts: { timeoutMs?: number; maxBytes?: number } = {},
   ): Promise<VeniceMixedResponse<T>> {
-    const response = await this.postBinary(path, { method: 'POST', json }, opts)
+    const response = await this.postBinary(
+      path,
+      { method: 'POST', json },
+      { ...opts, jsonMaxBytes: MAX_MIXED_JSON_RESPONSE_BYTES },
+    )
     if (isJsonContentType(response.contentType)) {
       return {
         kind: 'json',
@@ -326,6 +355,10 @@ function isJsonContentType(contentType: string): boolean {
  * an unreadable, oversized, or aborted error body degrades to an empty body
  * rather than turning the failure into a timeout or size-limit error.
  */
+function errorBodyLimit(status: number): number {
+  return status === 402 ? MAX_PAYMENT_REQUIRED_RESPONSE_BYTES : MAX_UPSTREAM_ERROR_RESPONSE_BYTES
+}
+
 async function upstreamError(res: Response, path: string, maxBytes?: number): Promise<VeniceUpstreamError> {
   const json = isJsonContentType(res.headers.get('content-type') ?? '')
   let body: unknown = json ? {} : ''
@@ -333,7 +366,11 @@ async function upstreamError(res: Response, path: string, maxBytes?: number): Pr
     const text = (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
     if (!json) body = text
     else if (text.trim()) body = JSON.parse(text)
-  } catch {}
+  } catch (err) {
+    if (err instanceof VeniceResponseTooLargeError) {
+      body = { error: 'upstream_error_body_truncated', truncated: true, max_bytes: err.maxBytes }
+    }
+  }
   return new VeniceUpstreamError({
     message: `Venice ${res.status} on ${path}`,
     status: res.status,

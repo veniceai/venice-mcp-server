@@ -45,7 +45,7 @@ export interface Config {
   maxVideoResponseBytes: number
   /** Maximum image generate/edit response bytes buffered for an MCP result. */
   maxImageResponseBytes: number
-  /** Maximum TTS audio response bytes buffered for an MCP result. */
+  /** Maximum TTS and completed music audio bytes buffered for an MCP result. */
   maxAudioResponseBytes: number
   /** Whether to advertise NSFW capability in tool descriptions. */
   enableNsfw: boolean
