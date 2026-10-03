@@ -128,6 +128,9 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |
 | `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
+| `VENICE_MCP_PROFILE` | `full` | `full` exposes every tool. `hosted` is the curated set for shared deployments: media generation plus the lookups it needs, with chat, wallet, crypto and local-file tools left out, `safe_mode` forced on for image tools, and NSFW notes removed from descriptions. |
+| `VENICE_MCP_STATUS_WAIT_MS` | `0` (`45000` when hosted) | How long `venice_video_status` / `venice_music_status` keep polling a queued job before returning. Capped at 55000 to stay under host tool-call timeouts. |
+| `VENICE_MCP_MAX_INLINE_MEDIA_CHARS` | `0` (`100000` when hosted) | Largest base64 image/audio/blob a tool result may carry inline; bigger results are replaced with an explanation. `0` = no limit. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |

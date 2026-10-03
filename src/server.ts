@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { VeniceClient } from './venice-client.js'
 import { loadConfig, type Config } from './config.js'
 import { buildTools } from './tools/index.js'
+import { applyProfile } from './profiles.js'
 import { buildResources } from './resources.js'
 import { buildPrompts } from './prompts.js'
 
@@ -44,7 +45,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     registerPrompt: (name: string, def: unknown, handler: unknown) => void
   }
 
-  for (const t of buildTools(client, cfg)) {
+  for (const t of applyProfile(buildTools(client, cfg), cfg)) {
     srv.registerTool(
       t.name,
       {
