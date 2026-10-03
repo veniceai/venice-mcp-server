@@ -1,19 +1,41 @@
 import express from 'express'
-import type { Request } from 'express'
+import type { Express, NextFunction, Request, Response } from 'express'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import type { Server } from 'node:http'
 import { isIP } from 'node:net'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest, isJSONRPCRequest } from '@modelcontextprotocol/sdk/types.js'
 import { buildServer } from '../server.js'
+import { loadConfig, type Config } from '../config.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
 const MIN_EXPOSED_AUTH_TOKEN_LENGTH = 16
 
+/**
+ * - `token`: one shared `VENICE_MCP_AUTH_TOKEN` gates the server, and every session uses the
+ *   operator's `VENICE_API_KEY` / `VENICE_SIWX_TOKEN`. Sessionful.
+ * - `user-key`: each request carries the caller's own Venice credentials (`Authorization: Bearer
+ *   <Venice API key>` or a `SIGN-IN-WITH-X` proof), and the server never uses its own. Stateless.
+ */
+export type HttpAuthMode = 'token' | 'user-key'
+
+export interface UpstreamCredentials {
+  apiKey?: string
+  siwxToken?: string
+}
+
 interface SessionEntry {
   transport: StreamableHTTPServerTransport
   lastSeen: number
+}
+
+type ServerFactory = typeof buildServer
+
+export function parseHttpAuthMode(value: string | undefined): HttpAuthMode {
+  const mode = (value ?? 'token').trim().toLowerCase()
+  if (mode === 'token' || mode === 'user-key') return mode
+  throw new Error(`Unknown VENICE_MCP_AUTH "${value}". Use "token" or "user-key".`)
 }
 
 export function isAuthorizedBearerHeader(header: string | undefined, expectedToken: string | undefined): boolean {
@@ -22,6 +44,18 @@ export function isAuthorizedBearerHeader(header: string | undefined, expectedTok
   const actual = Buffer.from(header.slice('Bearer '.length))
   const expected = Buffer.from(expectedToken)
   return actual.length === expected.length && timingSafeEqual(actual, expected)
+}
+
+/** Caller-supplied Venice credentials for `user-key` mode. An API key wins over a wallet proof. */
+export function credentialsFromHeaders(header: (name: string) => string | undefined): UpstreamCredentials | undefined {
+  const authorization = header('authorization')
+  if (authorization?.startsWith('Bearer ')) {
+    const apiKey = authorization.slice('Bearer '.length).trim()
+    if (apiKey) return { apiKey }
+  }
+  const siwxToken = (header('sign-in-with-x') ?? header('x-sign-in-with-x'))?.trim()
+  if (siwxToken) return { siwxToken }
+  return undefined
 }
 
 export function isLoopbackHost(host: string): boolean {
@@ -49,7 +83,9 @@ export function validateHttpAuthConfig(
   host: string,
   authToken: string | undefined,
   allowUnauthenticated = process.env.VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP === '1',
+  mode: HttpAuthMode = 'token',
 ): void {
+  if (mode === 'user-key') return
   if (isLoopbackHost(host)) return
   if (allowUnauthenticated) return
 
@@ -57,7 +93,8 @@ export function validateHttpAuthConfig(
   if (!token) {
     throw new Error(
       'VENICE_MCP_AUTH_TOKEN is required when HTTP mode binds to a non-loopback host. ' +
-        'Set VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1 only behind a trusted authenticated proxy.'
+        'Set VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1 only behind a trusted authenticated proxy, ' +
+        'or use VENICE_MCP_AUTH=user-key so each caller brings their own Venice key.'
     )
   }
   if (token.length < MIN_EXPOSED_AUTH_TOKEN_LENGTH) {
@@ -129,30 +166,88 @@ function headerCount(req: Request, name: string): number {
   return count
 }
 
-/**
- * Run the server over Streamable HTTP for hosted deployments
- * (Smithery, internal Cloud Run, etc.). Sessionful.
- */
-export async function runHttp(opts: {
-  port?: number
-  host?: string
-  env?: NodeJS.ProcessEnv
-  serverFactory?: typeof buildServer
-} = {}): Promise<Server> {
-  const env = opts.env ?? process.env
-  const port = opts.port ?? Number(env.PORT ?? 3333)
-  const host = opts.host ?? env.VENICE_MCP_HOST ?? '127.0.0.1'
-  const authToken = env.VENICE_MCP_AUTH_TOKEN
-  validateHttpAuthConfig(host, authToken, env.VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP === '1')
-  const configuredHosts = parseAllowlist(env, 'VENICE_MCP_ALLOWED_HOSTS', normalizeAuthority)
-  const configuredOrigins = parseAllowlist(env, 'VENICE_MCP_ALLOWED_ORIGINS', normalizeOrigin)
+export interface HttpAppOptions {
+  authMode?: HttpAuthMode
+  /** Shared bearer token for `token` mode. */
+  authToken?: string
+  /** Base configuration; `user-key` mode replaces its credentials per request. */
+  config?: Config
+  /** Exact Host authorities to accept. Defaults to localhost names on the listener port. */
+  allowedHosts?: Set<string>
+  /** Exact browser origins to accept. Defaults to localhost origins on the listener port. */
+  allowedOrigins?: Set<string>
+  maxSessions?: number
+  sessionTtlMs?: number
+  serverFactory?: ServerFactory
+}
+
+function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () => void } {
+  const authMode = opts.authMode ?? 'token'
+  const baseConfig = opts.config ?? loadConfig()
   const serverFactory = opts.serverFactory ?? buildServer
+  const maxSessions = opts.maxSessions ?? DEFAULT_MAX_HTTP_SESSIONS
+  const sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS
   const app = express()
   const parseJson = express.json({ limit: '10mb' })
 
+  app.get('/healthz', (_req, res) => res.json({ ok: true, name: '@veniceai/mcp-server' }))
+
+  app.use('/mcp', (req, res, next) => {
+    // Use the actual listener port (including port=0), never forwarded headers.
+    const localHosts = ['localhost', '127.0.0.1', '[::1]'].map((name) => `${name}:${req.socket.localPort}`)
+    const allowedHosts = opts.allowedHosts ?? new Set([
+      ...localHosts,
+      ...(req.socket.localPort === 80 ? ['localhost', '127.0.0.1', '[::1]'] : []),
+    ])
+    const allowedOrigins = opts.allowedOrigins ?? new Set(localHosts.map((name) => new URL(`http://${name}`).origin))
+    const authority = normalizeAuthority(req.header('host') ?? '')
+    const originHeader = req.header('origin')
+    const origin = originHeader === undefined ? undefined : normalizeOrigin(originHeader)
+    if (headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority) ||
+        headerCount(req, 'origin') > 1 ||
+        (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))) {
+      res.status(403).json({ error: 'forbidden' })
+      return
+    }
+    next()
+  })
+
+  const parseBody = (req: Request, res: Response, next: NextFunction) => {
+    if (!req.is('application/json')) {
+      res.status(415).json({ error: 'content-type must be application/json' })
+      return
+    }
+    parseJson(req, res, (err: { status?: number } | undefined) => {
+      if (err) {
+        const status = err.status === 413 ? 413 : err.status === 415 ? 415 : 400
+        res.status(status).json({ error: status === 413 ? 'request body too large' : 'invalid request body' })
+        return
+      }
+      next()
+    })
+  }
+
+  if (authMode === 'user-key') {
+    app.all('/mcp', (req, res, next) => {
+      if (req.method !== 'POST') {
+        res.setHeader('Allow', 'POST')
+        res.status(405).json({ error: 'stateless server: send JSON-RPC requests with POST' })
+        return
+      }
+      if (!credentialsFromHeaders((name) => req.header(name))) {
+        res.setHeader('WWW-Authenticate', 'Bearer realm="venice", error="invalid_request", error_description="Send your Venice API key as a Bearer token"')
+        res.status(401).json({ error: 'missing Venice credentials: send Authorization: Bearer <Venice API key>' })
+        return
+      }
+      next()
+    }, parseBody, async (req, res) => {
+      const credentials = credentialsFromHeaders((name) => req.header(name))
+      await handleStateless(req, res, { ...baseConfig, apiKey: credentials?.apiKey, siwxToken: credentials?.siwxToken }, serverFactory)
+    })
+    return { app, closeSessions: () => {} }
+  }
+
   const sessions = new Map<string, SessionEntry>()
-  const maxSessions = parsePositiveInt(env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS)
-  const sessionTtlMs = parsePositiveInt(env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS)
 
   const cleanupExpiredSessions = () => {
     const now = Date.now()
@@ -164,26 +259,8 @@ export async function runHttp(opts: {
     }
   }
 
-  app.get('/healthz', (_req, res) => res.json({ ok: true, name: '@veniceai/mcp-server' }))
-
   app.all('/mcp', (req, res, next) => {
-    // Use the actual listener port (including port=0), never forwarded headers.
-    const localHosts = ['localhost', '127.0.0.1', '[::1]'].map((name) => `${name}:${req.socket.localPort}`)
-    const allowedHosts = configuredHosts ?? new Set([
-      ...localHosts,
-      ...(req.socket.localPort === 80 ? ['localhost', '127.0.0.1', '[::1]'] : []),
-    ])
-    const allowedOrigins = configuredOrigins ?? new Set(localHosts.map((name) => new URL(`http://${name}`).origin))
-    const authority = normalizeAuthority(req.header('host') ?? '')
-    const originHeader = req.header('origin')
-    const origin = originHeader === undefined ? undefined : normalizeOrigin(originHeader)
-    if (headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority) ||
-        headerCount(req, 'origin') > 1 ||
-        (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))) {
-      res.status(403).json({ error: 'forbidden' })
-      return
-    }
-    if (!isAuthorizedBearerHeader(req.header('authorization'), authToken)) {
+    if (!isAuthorizedBearerHeader(req.header('authorization'), opts.authToken)) {
       res.setHeader('WWW-Authenticate', 'Bearer')
       res.status(401).json({ error: 'unauthorized' })
       return
@@ -197,18 +274,7 @@ export async function runHttp(opts: {
       next()
       return
     }
-    if (!req.is('application/json')) {
-      res.status(415).json({ error: 'content-type must be application/json' })
-      return
-    }
-    parseJson(req, res, (err: { status?: number } | undefined) => {
-      if (err) {
-        const status = err.status === 413 ? 413 : err.status === 415 ? 415 : 400
-        res.status(status).json({ error: status === 413 ? 'request body too large' : 'invalid request body' })
-        return
-      }
-      next()
-    })
+    parseBody(req, res, next)
   }, async (req, res) => {
     let newTransport: StreamableHTTPServerTransport | undefined
     let newSessionId: string | undefined
@@ -251,7 +317,7 @@ export async function runHttp(opts: {
         transport.onclose = () => {
           sessions.delete(sessionId)
         }
-        const server = serverFactory()
+        const server = serverFactory({ config: baseConfig })
         await server.connect(transport)
         entry = { transport, lastSeen: Date.now() }
       }
@@ -274,19 +340,78 @@ export async function runHttp(opts: {
     }
   })
 
-  const listener = app.listen(port, host)
-  listener.once('close', () => {
+  const closeSessions = () => {
     for (const entry of sessions.values()) void closeTransport(entry.transport)
     sessions.clear()
+  }
+  return { app, closeSessions }
+}
+
+/**
+ * Build the Streamable HTTP app for hosted deployments (Smithery, internal Cloud Run, etc.).
+ * Exported separately from `runHttp` so tests can bind it to an ephemeral port.
+ */
+export function createHttpApp(opts: HttpAppOptions = {}): Express {
+  return buildHttpApp(opts).app
+}
+
+/** One server and transport per request, discarded when the response closes. */
+async function handleStateless(req: Request, res: Response, config: Config, serverFactory: ServerFactory): Promise<void> {
+  try {
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
+    const server = serverFactory({ config })
+    res.on('close', () => {
+      void transport.close()
+      void server.close()
+    })
+    await server.connect(transport)
+    await transport.handleRequest(req, res, req.body)
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[venice-mcp] /mcp error', err)
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'internal' })
+    }
+  }
+}
+
+/**
+ * Run the server over Streamable HTTP for hosted deployments
+ * (Smithery, internal Cloud Run, etc.).
+ */
+export async function runHttp(opts: {
+  port?: number
+  host?: string
+  env?: NodeJS.ProcessEnv
+  serverFactory?: ServerFactory
+} = {}): Promise<Server> {
+  const env = opts.env ?? process.env
+  const authMode = parseHttpAuthMode(env.VENICE_MCP_AUTH)
+  const port = opts.port ?? Number(env.PORT ?? 3333)
+  const host = opts.host ?? env.VENICE_MCP_HOST ?? '127.0.0.1'
+  const authToken = env.VENICE_MCP_AUTH_TOKEN
+  validateHttpAuthConfig(host, authToken, env.VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP === '1', authMode)
+  const { app, closeSessions } = buildHttpApp({
+    authMode,
+    authToken,
+    config: loadConfig(env),
+    allowedHosts: parseAllowlist(env, 'VENICE_MCP_ALLOWED_HOSTS', normalizeAuthority),
+    allowedOrigins: parseAllowlist(env, 'VENICE_MCP_ALLOWED_ORIGINS', normalizeOrigin),
+    maxSessions: parsePositiveInt(env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS),
+    sessionTtlMs: parsePositiveInt(env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS),
+    serverFactory: opts.serverFactory,
   })
+
+  const listener = app.listen(port, host)
+  listener.once('close', closeSessions)
   await new Promise<void>((resolve, reject) => {
     listener.once('listening', () => resolve())
     listener.once('error', reject)
   })
   const address = listener.address()
   // eslint-disable-next-line no-console
-  console.error(`[venice-mcp] listening on http://${host}:${typeof address === 'object' && address ? address.port : port}/mcp`)
-  if (!isLoopbackHost(host)) {
+  console.error(`[venice-mcp] listening on http://${host}:${typeof address === 'object' && address ? address.port : port}/mcp (auth: ${authMode})`)
+  if (!isLoopbackHost(host) && authMode === 'token') {
     // eslint-disable-next-line no-console
     console.error(`[venice-mcp] WARNING: bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`)
   }

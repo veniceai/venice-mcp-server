@@ -186,6 +186,7 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
+| `VENICE_MCP_AUTH` | `token` | HTTP-mode auth. `token`: one shared `VENICE_MCP_AUTH_TOKEN` and the server's own Venice credentials. `user-key`: every caller sends their own Venice API key (or `SIGN-IN-WITH-X` proof); stateless, and the server's credentials are never used. |
 | `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Bearer token required by `/mcp` whenever HTTP mode binds outside loopback. Use a long random value. |
 | `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `0` | Emergency escape hatch for unauthenticated exposed HTTP mode. Use only behind a trusted authenticated proxy. |
 | `VENICE_MCP_ALLOWED_HOSTS` | Localhost authorities on the listener port | Comma-separated exact HTTP Host values, including non-default ports. Set this for a reverse proxy, LAN hostname, or mapped port. No wildcards. |
@@ -210,6 +211,20 @@ Clients should send `Authorization: Bearer <choose-a-long-random-token>` with HT
 HTTP requests to `/mcp` must also use an allowed Host and, when present, an allowed Origin. The defaults support `localhost`, `127.0.0.1`, and `[::1]` on the listener port. Configure the public authority in `VENICE_MCP_ALLOWED_HOSTS` when using a reverse proxy or another hostname, and the browser application's origin in `VENICE_MCP_ALLOWED_ORIGINS` when needed. Each configured list replaces its default list, so include any local entries you still use. Forwarded headers do not grant trust. These checks also apply when bearer authentication is configured; `/healthz` remains available for health probes. Set a bearer token even for local HTTP when possible.
 
 The Origin allowlist is a request validation rule; it does not enable CORS or handle browser preflight requests. Cross-origin browser clients need a separately configured trusted proxy or server-side MCP connection.
+
+### One server, many users (`VENICE_MCP_AUTH=user-key`)
+
+For a shared or hosted deployment where each caller should spend their own Venice account, run in `user-key` mode. The server needs no Venice credentials of its own:
+
+```bash
+docker build -t venice-mcp-server .
+docker run -p 3333:3333 \
+  -e VENICE_MCP_HOST=0.0.0.0 \
+  -e VENICE_MCP_AUTH=user-key \
+  venice-mcp-server
+```
+
+Each request must send `Authorization: Bearer <the caller's Venice API key>` (or a `SIGN-IN-WITH-X` wallet proof). The key is only forwarded to the Venice API for that request. The server is stateless: no `mcp-session-id`, a fresh server per request, so it scales horizontally. This works with clients that let you set a static bearer token, such as the xAI API remote MCP tool and Composio.
 
 Or run from source — see [Development](#development) below.
 
