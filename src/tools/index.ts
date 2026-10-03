@@ -17,6 +17,7 @@
  *      - api_keys/*, support-bot
  *   🔓 Auth-free:
  *      - models, models/traits
+ *      - crypto/rpc/networks
  *      - image/styles
  *      - audio/quote, video/quote
  *      - x402/balance, x402/top-up, x402/transactions
@@ -25,7 +26,8 @@
 import { z } from 'zod'
 import type { VeniceClient } from '../venice-client.js'
 import type { Config } from '../config.js'
-import { formatToolError, truncate } from '../format.js'
+import { fitJson, fitJsonList, formatToolError, truncate } from '../format.js'
+import { VeniceResponseTooLargeError } from '../types.js'
 import { fetchUploadSource } from './remote-fetch.js'
 
 /**
@@ -81,8 +83,8 @@ export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
   handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
 }
 
-const ok = (text: string, structured?: Record<string, unknown>): ToolResult => ({
-  content: [{ type: 'text', text }],
+const ok = (text: string, structured?: Record<string, unknown>, extraText: string[] = []): ToolResult => ({
+  content: [text, ...extraText].map((t) => ({ type: 'text', text: t })),
   ...(structured ? { structuredContent: structured } : {}),
 })
 const fail = (text: string): ToolResult => ({
@@ -98,8 +100,92 @@ const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'musi
 const modelTypeSchema = z
   .string()
   .trim()
+  .max(64)
   .toLowerCase()
   .regex(/^[a-z][a-z0-9_-]*$/, 'Must be a catalog type such as "video".')
+
+const CRYPTO_RPC_MAX_RESPONSE_BYTES = 64 * 1024
+const CRYPTO_RPC_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{1,255}$/
+// Path segments must not be able to form "." or "..", which URL normalisation would resolve.
+const CRYPTO_RPC_NETWORK = /^[a-z0-9][a-z0-9-]{0,99}$/
+const CHARACTER_SLUG = /^[A-Za-z0-9_-]{1,200}$/
+const CRYPTO_RPC_BROADCAST_METHODS = new Set([
+  'eth_sendrawtransaction',
+  'eth_senduseroperation',
+  'starknet_addinvoketransaction',
+  'starknet_adddeclaretransaction',
+  'starknet_adddeployaccounttransaction',
+])
+
+const cryptoRpcIdSchema = z.union([z.string(), z.number().int()])
+const cryptoRpcParamsSchema = z.union([z.array(z.unknown()), z.record(z.unknown())])
+const cryptoRpcRequestSchema = z.object({
+  jsonrpc: z.literal('2.0').optional().describe('JSON-RPC version. Defaults to "2.0".'),
+  method: z.string().min(1).describe('JSON-RPC method name.'),
+  params: cryptoRpcParamsSchema.optional().describe('Method parameters, by position (array) or by name (object).'),
+  id: cryptoRpcIdSchema.optional().describe('Caller-supplied request ID. Defaults to 1 for a single request.'),
+})
+const cryptoRpcBatchRequestSchema = cryptoRpcRequestSchema.extend({
+  id: cryptoRpcIdSchema.describe('Required request ID used to correlate this batch item with its response.'),
+})
+const cryptoRpcIdempotencyKeySchema = z
+  .string()
+  .regex(CRYPTO_RPC_IDEMPOTENCY_KEY)
+  .describe(
+    'Reuse the same key when retrying a request. Required for eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes so a lost response is not broadcast again.',
+  )
+
+function cryptoRpcMethodName(item: unknown): string {
+  if (typeof item !== 'object' || item === null || !('method' in item)) return ''
+  return String((item as { method: unknown }).method)
+}
+
+function cryptoRpcMethods(body: unknown): string[] {
+  return Array.isArray(body) ? body.map(cryptoRpcMethodName) : [cryptoRpcMethodName(body)]
+}
+
+function isBroadcastRpcMethod(method: string): boolean {
+  const normalized = method.toLowerCase()
+  if (CRYPTO_RPC_BROADCAST_METHODS.has(normalized)) return true
+  if (normalized.includes('sendrawtransaction') || normalized.includes('sendtransaction') || normalized.includes('senduseroperation')) return true
+  if (normalized.startsWith('starknet_add')) return true
+  return false
+}
+
+function cryptoRpcRequiresIdempotencyKey(body: unknown): boolean {
+  return cryptoRpcMethods(body).some(isBroadcastRpcMethod)
+}
+
+function cryptoRpcBatchedBroadcasts(body: unknown): string[] {
+  if (!Array.isArray(body) || body.length <= 1) return []
+  return [...new Set(cryptoRpcMethods(body).filter(isBroadcastRpcMethod))]
+}
+
+function cryptoRpcBilling(headers: Record<string, string>): Record<string, unknown> {
+  const billing: Record<string, unknown> = {}
+  if (headers['idempotent-replayed'] !== undefined) billing.idempotentReplayed = headers['idempotent-replayed'] === 'true'
+  const credits = Number(headers['x-venice-rpc-credits'])
+  if (headers['x-venice-rpc-credits'] !== undefined && Number.isFinite(credits)) billing.rpcCredits = credits
+  if (headers['x-venice-rpc-cost-usd'] !== undefined) billing.rpcCostUsd = headers['x-venice-rpc-cost-usd']
+  return billing
+}
+
+function formatCryptoRpcBilling(billing: Record<string, unknown>): string {
+  const parts: string[] = []
+  if (billing.idempotentReplayed === true) parts.push('replayed from idempotency cache')
+  if (billing.rpcCredits !== undefined) parts.push(`credits: ${billing.rpcCredits}`)
+  if (billing.rpcCostUsd !== undefined) parts.push(`cost: $${billing.rpcCostUsd}`)
+  return parts.join(', ')
+}
+
+function cryptoRpcTooLargeMessage(billing: Record<string, unknown>): string {
+  const billingLine = formatCryptoRpcBilling(billing)
+  return [
+    `Crypto RPC response exceeds ${CRYPTO_RPC_MAX_RESPONSE_BYTES} bytes (${CRYPTO_RPC_MAX_RESPONSE_BYTES / 1024} KiB) and was not returned.`,
+    `Venice already processed and billed this request upstream${billingLine ? ` (${billingLine})` : ''}; re-sending it will be billed again.`,
+    'Narrow the query instead: a smaller eth_getLogs block range or address/topic filter, fewer batch items, or avoid trace/replay/txpool_content methods.',
+  ].join(' ')
+}
 
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
@@ -155,6 +241,10 @@ const responsesVeniceParametersSchema = z
 
 export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
+  const requireCharacterApiKey = (): ToolResult | undefined =>
+    cfg.apiKey
+      ? undefined
+      : fail('VENICE_API_KEY is required for character discovery; x402 wallet authentication is not supported.')
 
   const tools: ToolDef[] = [
     // ========================================================================
@@ -848,22 +938,94 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     // ========================================================================
 
     {
+      name: 'venice_crypto_networks',
+      title: 'Venice Crypto RPC Networks',
+      description: `List the live, authoritative network slugs accepted by venice_crypto_rpc.${NO_AUTH}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<{ networks?: string[] }>(
+            '/v1/crypto/rpc/networks',
+            undefined,
+            { auth: 'none' },
+          )
+          const networks = resp.networks ?? []
+          return ok(JSON.stringify(networks, null, 2), { networks, count: networks.length })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
       name: 'venice_crypto_rpc',
       title: 'Venice Crypto RPC Proxy',
-      description: `Proxy a JSON-RPC call to a supported blockchain network (eth_call, eth_blockNumber, etc.). Networks include "base-mainnet", "ethereum-mainnet", "polygon-mainnet", "arbitrum-mainnet", "optimism-mainnet", and others. List all via GET /api/v1/crypto/rpc/networks.${X402_OK}`,
+      description: `Proxy one JSON-RPC request or a batch of up to 100 requests to a supported blockchain network. Use venice_crypto_networks for the live network list. For a simple call, pass rpc_method/rpc_params; for complete request IDs or batches, pass request. Relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes) must be sent as single requests (not batched) with idempotency_key; reuse the same key when retrying. Results are returned as compact JSON; responses larger than 64 KiB are rejected after Venice has billed them, so keep queries narrow.${X402_OK}`,
       inputSchema: {
-        network: z.string().min(1).describe('Full network id, e.g. "base-mainnet" (NOT just "base"), "ethereum-mainnet", "polygon-mainnet".'),
-        rpc_method: z.string().min(1),
-        rpc_params: z.array(z.unknown()).optional(),
+        network: z
+          .string()
+          .regex(CRYPTO_RPC_NETWORK)
+          .describe('Network slug returned by venice_crypto_networks, e.g. "ethereum-mainnet".'),
+        request: z
+          .union([cryptoRpcRequestSchema, z.array(cryptoRpcBatchRequestSchema).min(1).max(100)])
+          .optional()
+          .describe('A single JSON-RPC request object (ID optional) or a non-empty batch of at most 100 request objects (ID required per item).'),
+        rpc_method: z.string().min(1).optional().describe('Convenience form for a single request. Do not combine with request.'),
+        rpc_params: cryptoRpcParamsSchema.optional().describe('Parameters for rpc_method, by position (array) or by name (object).'),
+        idempotency_key: cryptoRpcIdempotencyKeySchema.optional(),
       },
       handler: async (args) => {
         try {
-          const resp = await client.post<unknown>(
+          if (args.request !== undefined && args.rpc_method !== undefined) {
+            return fail('Pass either request or rpc_method/rpc_params, not both.')
+          }
+          if (args.request === undefined && args.rpc_method === undefined) {
+            return fail('Either request or rpc_method is required.')
+          }
+          if (args.request !== undefined && args.rpc_params !== undefined) {
+            return fail('rpc_params can only be used with rpc_method.')
+          }
+          // A one-item batch is sent as a single request so broadcasts keep the single-request idempotency contract.
+          const batchOfOne = Array.isArray(args.request) && args.request.length === 1
+          const body =
+            args.request === undefined
+              ? { jsonrpc: '2.0' as const, method: args.rpc_method!, params: args.rpc_params ?? [], id: 1 }
+              : Array.isArray(args.request)
+                ? batchOfOne
+                  ? { jsonrpc: '2.0' as const, ...args.request[0] }
+                  : args.request.map((item) => ({ jsonrpc: '2.0' as const, ...item }))
+                : { jsonrpc: '2.0' as const, ...args.request, id: args.request.id ?? 1 }
+          const batchedBroadcasts = cryptoRpcBatchedBroadcasts(body)
+          if (batchedBroadcasts.length > 0) {
+            return fail(
+              `Transaction relays cannot be batched with other requests; this batch contains ${batchedBroadcasts.join(', ')}. Send each broadcast as a single request.`,
+            )
+          }
+          if (cryptoRpcRequiresIdempotencyKey(body) && !args.idempotency_key) {
+            return fail(
+              'idempotency_key is required for transaction relays (eth_sendRawTransaction, eth_sendUserOperation, Solana sendTransaction, and Starknet writes). Reuse the same key when retrying so Venice can return the cached result instead of broadcasting again.',
+            )
+          }
+          const headers = args.idempotency_key ? { 'Idempotency-Key': args.idempotency_key } : undefined
+          const resp = await client.postWithHeaders<unknown>(
             `/v1/crypto/rpc/${encodeURIComponent(args.network)}`,
-            { jsonrpc: '2.0', method: args.rpc_method, params: args.rpc_params ?? [], id: 1 }
+            body,
+            headers,
+            { maxResponseBytes: CRYPTO_RPC_MAX_RESPONSE_BYTES },
           )
-          return ok(JSON.stringify(resp, null, 2))
+          const result = batchOfOne && !Array.isArray(resp.body) ? [resp.body] : resp.body
+          const billing = cryptoRpcBilling(resp.headers)
+          const billingLine = formatCryptoRpcBilling(billing)
+          const text = JSON.stringify(result)
+          const extraText = billingLine ? [`Venice RPC: ${billingLine}`] : []
+          if (Buffer.byteLength(text + extraText.join(''), 'utf8') > CRYPTO_RPC_MAX_RESPONSE_BYTES) {
+            return fail(cryptoRpcTooLargeMessage(billing))
+          }
+          return ok(text, Object.keys(billing).length > 0 ? billing : undefined, extraText)
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) {
+            return fail(cryptoRpcTooLargeMessage(cryptoRpcBilling(err.headers)))
+          }
           return fail(formatToolError(err))
         }
       },
@@ -890,15 +1052,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const ids = models
             .map((m) => (typeof m === 'object' && m !== null ? (m as { id?: unknown }).id : undefined))
             .filter((id): id is string => typeof id === 'string')
-          const shown = models.slice(0, 80)
-          const note =
-            models.length > shown.length
-              ? `\n\nShowing full rows for ${shown.length} of ${models.length} models. All ids: ${ids.join(', ')}`
-              : ''
-          return ok(`${JSON.stringify(shown, null, 2)}${note}`, {
+          const fitted = fitJsonList(models)
+          return ok(fitted.text, {
             type: type ?? 'all',
             count: models.length,
             ids,
+            ...(fitted.truncated ? { truncated: true, returned: fitted.returned, total: models.length } : {}),
           })
         } catch (err) {
           return fail(formatToolError(err))
@@ -999,24 +1158,105 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice List Characters',
       description: `List public Venice characters.${API_KEY_ONLY}`,
       inputSchema: {
-        search: z.string().optional(),
-        tag: z.string().optional(),
-        limit: z.number().int().min(1).max(50).optional(),
+        search: z.string().max(200).optional(),
+        tags: z.array(z.string().max(100)).max(20).optional(),
+        tag: z.string().max(100).optional().describe('Deprecated: use tags. A single tag, merged into tags.'),
+        categories: z.array(z.string().max(100)).max(20).optional(),
+        isAdult: z.boolean().optional(),
+        isPro: z.boolean().optional(),
+        isWebEnabled: z.boolean().optional(),
+        modelId: z.array(z.string().max(200)).max(20).optional(),
+        sortBy: z
+          .enum(['featured', 'highestRating', 'highlyRated', 'highlyRatedAndRecent', 'imports', 'mostRecent', 'ratingCount'])
+          .optional(),
+        sortOrder: z.enum(['asc', 'desc']).optional(),
+        limit: z.number().int().min(1).max(100).optional(),
         offset: z.number().int().min(0).optional(),
       },
       handler: async (args) => {
+        const authError = requireCharacterApiKey()
+        if (authError) return authError
         try {
           const params = new URLSearchParams()
           if (args.search) params.set('search', args.search)
-          if (args.tag) params.set('tag', args.tag)
+          const tags = new Set<string>(args.tags ?? [])
+          if (args.tag) tags.add(args.tag)
+          for (const tag of tags) params.append('tags', tag)
+          for (const category of args.categories ?? []) params.append('categories', category)
+          if (args.isAdult !== undefined) params.set('isAdult', String(args.isAdult))
+          if (args.isPro !== undefined) params.set('isPro', String(args.isPro))
+          if (args.isWebEnabled !== undefined) params.set('isWebEnabled', String(args.isWebEnabled))
+          for (const modelId of args.modelId ?? []) params.append('modelId', modelId)
+          if (args.sortBy) params.set('sortBy', args.sortBy)
+          if (args.sortOrder) params.set('sortOrder', args.sortOrder)
           if (args.limit !== undefined) params.set('limit', String(args.limit))
           if (args.offset !== undefined) params.set('offset', String(args.offset))
           const qs = params.toString()
           const resp = await client.get<{ data?: unknown[]; characters?: unknown[] }>(
-            `/v1/characters${qs ? `?${qs}` : ''}`
+            `/v1/characters${qs ? `?${qs}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
           )
           const list = resp.data ?? resp.characters ?? []
-          return ok(JSON.stringify(list, null, 2), { count: list.length })
+          const fitted = fitJsonList(list)
+          return ok(fitted.text, {
+            count: list.length,
+            ...(fitted.truncated ? { truncated: true, returned: fitted.returned, total: list.length } : {}),
+          })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_get_character',
+      title: 'Venice Get Character',
+      description: `Get one public Venice character by slug.${API_KEY_ONLY}`,
+      inputSchema: {
+        slug: z.string().regex(CHARACTER_SLUG).describe('Public character slug, e.g. "alan-watts".'),
+      },
+      handler: async ({ slug }) => {
+        const authError = requireCharacterApiKey()
+        if (authError) return authError
+        try {
+          const resp = await client.get<unknown>(
+            `/v1/characters/${encodeURIComponent(slug)}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          const fitted = fitJson(resp)
+          return ok(fitted.text, fitted.truncated ? { truncated: true } : undefined)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_character_reviews',
+      title: 'Venice Character Reviews',
+      description: `List paginated public reviews for a Venice character.${API_KEY_ONLY}`,
+      inputSchema: {
+        slug: z.string().regex(CHARACTER_SLUG).describe('Public character slug, e.g. "alan-watts".'),
+        page: z.number().int().min(1).optional(),
+        pageSize: z.number().int().min(1).max(100).optional(),
+      },
+      handler: async ({ slug, page, pageSize }) => {
+        const authError = requireCharacterApiKey()
+        if (authError) return authError
+        try {
+          const params = new URLSearchParams()
+          if (page !== undefined) params.set('page', String(page))
+          if (pageSize !== undefined) params.set('pageSize', String(pageSize))
+          const qs = params.toString()
+          const resp = await client.get<unknown>(
+            `/v1/characters/${encodeURIComponent(slug)}/reviews${qs ? `?${qs}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          const fitted = fitJson(resp)
+          return ok(fitted.text, fitted.truncated ? { truncated: true } : undefined)
         } catch (err) {
           return fail(formatToolError(err))
         }
