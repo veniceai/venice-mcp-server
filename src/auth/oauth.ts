@@ -20,6 +20,11 @@ export interface OAuthSettings {
   introspectionClientSecret?: string
   /** Scopes every token must carry. Empty means any active token for this resource is accepted. */
   requiredScopes: string[]
+  /**
+   * OAuth clients trusted when introspection omits `aud`. Tokens must otherwise name this resource
+   * in `aud`, so a token a user granted to an unrelated client can't be replayed here.
+   */
+  allowedClientIds: string[]
   /** Optional endpoint that maps a verified user to their Venice API key (see `resolveVeniceApiKey`). */
   keyResolverUrl?: string
   keyResolverToken?: string
@@ -71,6 +76,7 @@ export function loadOAuthSettings(env: NodeJS.ProcessEnv = process.env): OAuthSe
     introspectionClientId: env.VENICE_MCP_OAUTH_CLIENT_ID?.trim() || undefined,
     introspectionClientSecret: env.VENICE_MCP_OAUTH_CLIENT_SECRET?.trim() || undefined,
     requiredScopes: splitList(env.VENICE_MCP_OAUTH_SCOPES),
+    allowedClientIds: splitList(env.VENICE_MCP_OAUTH_ALLOWED_CLIENTS),
     keyResolverUrl: env.VENICE_MCP_KEY_RESOLVER_URL?.trim() || undefined,
     keyResolverToken: env.VENICE_MCP_KEY_RESOLVER_TOKEN?.trim() || undefined,
     cacheTtlMs: Number.isSafeInteger(ttl) && ttl >= 0 ? ttl : DEFAULT_CACHE_TTL_MS,
@@ -104,8 +110,7 @@ export function bearerChallenge(settings: OAuthSettings, error?: { code: string;
 }
 
 function audienceMatches(aud: unknown, resourceUrl: string): boolean {
-  if (aud === undefined) return true
-  const values = Array.isArray(aud) ? aud : [aud]
+  const values = Array.isArray(aud) ? aud : aud === undefined ? [] : [aud]
   return values.some((value) => typeof value === 'string' && value.replace(/\/+$/, '') === resourceUrl.replace(/\/+$/, ''))
 }
 
@@ -134,7 +139,9 @@ export async function introspectToken(
 
   if (body.active !== true) return undefined
   if (typeof body.exp === 'number' && body.exp <= nowSeconds) return undefined
-  if (!audienceMatches(body.aud, settings.resourceUrl)) return undefined
+  const clientId = typeof body.client_id === 'string' ? body.client_id : undefined
+  const trustedClient = body.aud === undefined && clientId !== undefined && settings.allowedClientIds.includes(clientId)
+  if (!audienceMatches(body.aud, settings.resourceUrl) && !trustedClient) return undefined
   const subject = typeof body.sub === 'string' ? body.sub : undefined
   if (!subject) return undefined
   const scopes = typeof body.scope === 'string' ? splitList(body.scope) : []
@@ -142,7 +149,7 @@ export async function introspectToken(
 
   return {
     subject,
-    clientId: typeof body.client_id === 'string' ? body.client_id : undefined,
+    clientId,
     scopes,
     expiresAt: typeof body.exp === 'number' ? body.exp : undefined,
     email: typeof body.email === 'string' ? body.email : undefined,
