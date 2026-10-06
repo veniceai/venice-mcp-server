@@ -43,6 +43,12 @@ export interface Config {
   defaultAsrModel: string
   /** Request timeout (ms) for non-streaming calls. */
   timeoutMs: number
+  /** Maximum completed video response bytes buffered for an MCP result. */
+  maxVideoResponseBytes: number
+  /** Maximum image generate/edit response bytes buffered for an MCP result. */
+  maxImageResponseBytes: number
+  /** Maximum TTS audio response bytes buffered for an MCP result. */
+  maxAudioResponseBytes: number
   /** Whether to advertise NSFW capability in tool descriptions. */
   enableNsfw: boolean
   /** Server name advertised to MCP clients. */
@@ -54,10 +60,18 @@ export interface Config {
 const PACKAGE_VERSION: string = createRequire(import.meta.url)('../package.json').version
 
 const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 25 * 1024 * 1024
+const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
+const DEFAULT_MAX_AUDIO_RESPONSE_BYTES = 32 * 1024 * 1024
 
 function parseTimeoutMs(value: string | undefined): number {
   const parsed = Number(value ?? DEFAULT_TIMEOUT_MS)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TIMEOUT_MS
+}
+
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value ?? fallback)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -71,6 +85,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultTtsModel: env.VENICE_DEFAULT_TTS_MODEL ?? 'tts-kokoro',
     defaultAsrModel: env.VENICE_DEFAULT_ASR_MODEL ?? 'openai/whisper-large-v3',
     timeoutMs: parseTimeoutMs(env.VENICE_HTTP_TIMEOUT_MS),
+    maxVideoResponseBytes: parsePositiveInteger(
+      env.VENICE_MAX_VIDEO_RESPONSE_BYTES,
+      DEFAULT_MAX_VIDEO_RESPONSE_BYTES,
+    ),
+    maxImageResponseBytes: parsePositiveInteger(
+      env.VENICE_MAX_IMAGE_RESPONSE_BYTES,
+      DEFAULT_MAX_IMAGE_RESPONSE_BYTES,
+    ),
+    maxAudioResponseBytes: parsePositiveInteger(
+      env.VENICE_MAX_AUDIO_RESPONSE_BYTES,
+      DEFAULT_MAX_AUDIO_RESPONSE_BYTES,
+    ),
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     serverName: '@veniceai/mcp-server',
     serverVersion: PACKAGE_VERSION,
