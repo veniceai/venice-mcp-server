@@ -41,6 +41,12 @@ export interface Config {
   defaultAsrModel: string
   /** Request timeout (ms) for non-streaming calls. */
   timeoutMs: number
+  /** Maximum completed video response bytes buffered for an MCP result. */
+  maxVideoResponseBytes: number
+  /** Maximum image generate/edit response bytes buffered for an MCP result. */
+  maxImageResponseBytes: number
+  /** Maximum TTS audio response bytes buffered for an MCP result. */
+  maxAudioResponseBytes: number
   /** Whether to advertise NSFW capability in tool descriptions. */
   enableNsfw: boolean
   /** `full` exposes every tool; `hosted` is the curated, safe-by-default set for shared deployments. */
@@ -56,6 +62,9 @@ export interface Config {
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 25 * 1024 * 1024
+const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
+const DEFAULT_MAX_AUDIO_RESPONSE_BYTES = 32 * 1024 * 1024
 // Stays under ChatGPT's ~60 s tool-call limit.
 const HOSTED_STATUS_WAIT_MS = 45_000
 const MAX_STATUS_WAIT_MS = 55_000
@@ -81,6 +90,11 @@ function parseTimeoutMs(value: string | undefined): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TIMEOUT_MS
 }
 
+function parsePositiveInteger(value: string | undefined, fallback: number): number {
+  const parsed = Number(value ?? fallback)
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const profile = parseToolProfile(env.VENICE_MCP_PROFILE)
   const hosted = profile === 'hosted'
@@ -94,6 +108,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     defaultTtsModel: env.VENICE_DEFAULT_TTS_MODEL ?? 'tts-kokoro',
     defaultAsrModel: env.VENICE_DEFAULT_ASR_MODEL ?? 'openai/whisper-large-v3',
     timeoutMs: parseTimeoutMs(env.VENICE_HTTP_TIMEOUT_MS),
+    maxVideoResponseBytes: parsePositiveInteger(
+      env.VENICE_MAX_VIDEO_RESPONSE_BYTES,
+      DEFAULT_MAX_VIDEO_RESPONSE_BYTES,
+    ),
+    maxImageResponseBytes: parsePositiveInteger(
+      env.VENICE_MAX_IMAGE_RESPONSE_BYTES,
+      DEFAULT_MAX_IMAGE_RESPONSE_BYTES,
+    ),
+    maxAudioResponseBytes: parsePositiveInteger(
+      env.VENICE_MAX_AUDIO_RESPONSE_BYTES,
+      DEFAULT_MAX_AUDIO_RESPONSE_BYTES,
+    ),
     enableNsfw: !hosted && env.VENICE_DISABLE_NSFW !== '1',
     profile,
     statusWaitMs: parseNonNegativeInt(env.VENICE_MCP_STATUS_WAIT_MS, hosted ? HOSTED_STATUS_WAIT_MS : 0, MAX_STATUS_WAIT_MS),
