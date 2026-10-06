@@ -1071,7 +1071,7 @@ describe('tool output shaping', () => {
     assert.equal(result.structuredContent?.id, 'flux-2-pro')
   })
 
-  it('venice_model_details requires an exact id match', async () => {
+  it('venice_model_details rejects prefix matches and preserves the requested id in errors', async () => {
     const stub = new StubClient({
       '/v1/models?type=image': () => ({
         data: [{ id: 'flux-2-pro-preview', model_spec: {}, type: 'image' }],
@@ -1084,7 +1084,7 @@ describe('tool output shaping', () => {
     } as never)
     assert.equal(r.isError, true)
     const text = (r.content[0] as { text: string }).text
-    assert.match(text, /No model "flux-2-pro" in the "image" catalog/)
+    assert.match(text, /No model "FLUX-2-Pro" in the "image" catalog/)
     assert.match(text, /retry with that type/)
     assert.doesNotMatch(text, /\(.*\bimage\b.*\)/)
     assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=image')
