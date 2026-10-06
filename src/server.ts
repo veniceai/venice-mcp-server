@@ -7,6 +7,7 @@ import { VeniceClient } from './venice-client.js'
 import { loadConfig, type Config } from './config.js'
 import { buildTools } from './tools/index.js'
 import { applyProfile } from './profiles.js'
+import { TOOL_ANNOTATIONS } from './tools/annotations.js'
 import { buildResources } from './resources.js'
 import { buildPrompts } from './prompts.js'
 
@@ -52,6 +53,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         title: t.title,
         description: t.description,
         inputSchema: t.inputSchema,
+        annotations: TOOL_ANNOTATIONS[t.name],
       },
       async (args: unknown) => t.handler(args as never)
     )

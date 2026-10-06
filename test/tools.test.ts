@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
+import { TOOL_ANNOTATIONS } from '../src/tools/annotations.js'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 
@@ -19,7 +20,7 @@ function setup() {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented set (32 tools)', () => {
+  it('registers exactly the documented set (31 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
@@ -48,7 +49,6 @@ describe('tools registry', () => {
       'venice_video_generate',
       'venice_video_quote',
       'venice_video_status',
-      'venice_video_transcriptions',
       'venice_voice_clone',
       'venice_web_scrape',
       'venice_web_search',
@@ -57,7 +57,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 32)
+    assert.equal(tools.length, 31)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -82,7 +82,6 @@ describe('tools registry', () => {
       'venice_video_generate',
       'venice_video_status',
       'venice_video_complete',
-      'venice_video_transcriptions',
       'venice_tts',
       'venice_asr',
       'venice_voice_clone',
@@ -318,12 +317,6 @@ const MAPPINGS: Mapping[] = [
     args: { queue_id: 'vid-123', model: 'veo3.1-fast-text-to-video' },
     expectMethod: 'POST',
     expectPath: '/v1/video/complete',
-  },
-  {
-    tool: 'venice_video_transcriptions',
-    args: { url: 'https://www.youtube.com/watch?v=xxx' },
-    expectMethod: 'POST',
-    expectPath: '/v1/video/transcriptions',
   },
   {
     tool: 'venice_video_quote',
@@ -1497,5 +1490,58 @@ describe('video tool schemas', () => {
     })
 
     assert.equal(result.success, true)
+  })
+})
+describe('tool annotations', () => {
+  it('every tool has explicit readOnly, destructive, idempotent and openWorld hints', () => {
+    const { tools } = setup()
+    for (const t of tools) {
+      const hints = TOOL_ANNOTATIONS[t.name]
+      assert.ok(hints, `${t.name} has no entry in TOOL_ANNOTATIONS`)
+      for (const key of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'] as const) {
+        assert.equal(typeof hints[key], 'boolean', `${t.name}.${key}`)
+      }
+    }
+  })
+
+  it('only lookups are read-only, and only cleanup and crypto relays are destructive', () => {
+    assert.equal(TOOL_ANNOTATIONS.venice_list_models.readOnlyHint, true)
+    assert.equal(TOOL_ANNOTATIONS.venice_video_generate.readOnlyHint, false)
+    assert.equal(TOOL_ANNOTATIONS.venice_video_complete.destructiveHint, true)
+    assert.equal(TOOL_ANNOTATIONS.venice_crypto_rpc.destructiveHint, true)
+    assert.equal(TOOL_ANNOTATIONS.venice_image_generate.destructiveHint, false)
+  })
+})
+
+describe('media cleanup reporting', () => {
+  for (const [tool, path] of [
+    ['venice_video_complete', '/v1/video/complete'],
+    ['venice_music_complete', '/v1/audio/complete'],
+  ] as const) {
+    it(`${tool} only reports deletion when Venice returns success: true`, async () => {
+      const confirmed = await buildTools(new StubClient({ [path]: () => ({ success: true }) }).asClient(), cfg)
+        .find((t) => t.name === tool)!
+        .handler({ queue_id: 'q', model: 'm' } as never)
+      assert.equal(confirmed.isError, undefined)
+      assert.equal((confirmed.structuredContent as { server_media_deleted: boolean }).server_media_deleted, true)
+
+      for (const body of [{ success: false }, {}]) {
+        const r = await buildTools(new StubClient({ [path]: () => body }).asClient(), cfg)
+          .find((t) => t.name === tool)!
+          .handler({ queue_id: 'q', model: 'm' } as never)
+        assert.equal(r.isError, true)
+        assert.match((r.content[0] as { text: string }).text, /not confirmed|did not confirm cleanup/)
+      }
+    })
+  }
+})
+
+describe('venice_image_multi_edit request body', () => {
+  it('sends modelId, which the API accepts, and never model', async () => {
+    const { stub, get } = setup()
+    await get('venice_image_multi_edit').handler({ image_urls: ['https://x/a.png'], prompt: 'merge', model: 'qwen-edit' } as never)
+    const body = stub.calls.at(-1)!.body as Record<string, unknown>
+    assert.equal(body.modelId, 'qwen-edit')
+    assert.equal('model' in body, false)
   })
 })

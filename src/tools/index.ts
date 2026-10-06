@@ -874,27 +874,6 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
     },
 
-    {
-      name: 'venice_video_transcriptions',
-      title: 'Venice Video Transcriptions',
-      description: `Transcribe a YouTube video URL.${X402_OK}`,
-      inputSchema: {
-        url: z.string().url().describe('YouTube URL only (e.g. https://www.youtube.com/watch?v=...).'),
-        response_format: z.enum(['json', 'text']).optional(),
-      },
-      handler: async (args) => {
-        try {
-          const resp = await client.post<{ transcript?: string; lang?: string; text?: string }>(
-            '/v1/video/transcriptions',
-            args
-          )
-          return ok(truncate(resp.transcript ?? resp.text ?? JSON.stringify(resp)), { lang: resp.lang })
-        } catch (err) {
-          return fail(formatToolError(err))
-        }
-      },
-    },
-
     // ========================================================================
     // AUDIO (TTS / ASR / Voices) — x402 + API key
     // ========================================================================
@@ -1100,8 +1079,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: { queue_id: z.string().min(1), model: z.string().min(1) },
       handler: async (args) => {
         try {
-          await client.post('/v1/audio/complete', args)
-          return ok(`Marked music ${args.queue_id} complete.`)
+          const resp = await client.post<{ success?: boolean }>('/v1/audio/complete', args)
+          if (resp?.success !== true) {
+            return fail(`Venice did not confirm cleanup for music ${args.queue_id}; server-side media may still exist.`)
+          }
+          return ok(`Marked music ${args.queue_id} complete; server-side media removed.`, { server_media_deleted: true })
         } catch (err) {
           return fail(formatToolError(err))
         }
