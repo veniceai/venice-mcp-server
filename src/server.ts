@@ -6,6 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { VeniceClient } from './venice-client.js'
 import { loadConfig, type Config } from './config.js'
 import { buildTools } from './tools/index.js'
+import { TOOL_ANNOTATIONS } from './tools/annotations.js'
 import { buildResources } from './resources.js'
 import { buildPrompts } from './prompts.js'
 import { profileTool, securitySchemes, withReauthChallenge, type ToolAuthContext } from './auth/tool-auth.js'
@@ -56,6 +57,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         title: t.title,
         description: t.description,
         inputSchema: t.inputSchema,
+        annotations: TOOL_ANNOTATIONS[t.name],
         ...(auth ? { _meta: { securitySchemes: securitySchemes(auth) } } : {}),
       },
       async (args: unknown) => handler(args as never)
