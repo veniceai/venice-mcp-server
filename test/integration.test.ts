@@ -218,16 +218,26 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 32 tools over JSON-RPC', async () => {
+  it('lists 31 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 32)
+    assert.equal(list.length, 31)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
     assert.ok(names.includes('venice_model_details'))
     assert.ok(names.includes('venice_video_status'))
     assert.ok(names.includes('venice_x402_balance'))
+  })
+
+  it('advertises all four annotation hints on every tool', async () => {
+    const r = (await rpc.request('tools/list')) as RpcResult
+    const list = (r.result as { tools: Array<{ name: string; annotations?: Record<string, unknown> }> }).tools
+    for (const t of list) {
+      for (const hint of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
+        assert.equal(typeof t.annotations?.[hint], 'boolean', `${t.name} is missing ${hint}`)
+      }
+    }
   })
 
   it('lists 3 resources', async () => {
