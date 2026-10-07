@@ -14,6 +14,8 @@ export interface StubCall {
   eventStream?: boolean
   /** Per-call timeout override passed to post / postEventStream. */
   timeoutMs?: number
+  /** Response byte cap requested by the tool, if any. */
+  maxBytes?: number
 }
 
 export type StubHandler = (call: StubCall) => unknown | Promise<unknown>
@@ -49,6 +51,34 @@ export class StubClient {
   ) {
     return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth, timeoutMs: opts.timeoutMs })
   }
+  async postWithMetadata<T>(
+    path: string,
+    json: unknown,
+    _headers?: Record<string, string>,
+    opts: { maxBytes?: number } = {},
+  ) {
+    const output = await this.dispatch<T | {
+      __stubResponse: true
+      data: T
+      headers?: Record<string, string>
+      contentType?: string
+      status?: number
+    }>({ method: 'POST', path, body: json, maxBytes: opts.maxBytes })
+    if (output && typeof output === 'object' && '__stubResponse' in output) {
+      return {
+        data: output.data,
+        status: output.status ?? 200,
+        contentType: output.contentType ?? 'application/json',
+        headers: output.headers ?? {},
+      }
+    }
+    return {
+      data: output as T,
+      status: 200,
+      contentType: 'application/json',
+      headers: {},
+    }
+  }
   /**
    * Stub for postBinary. Tool calls expecting binary back get a synthetic
    * { buffer, contentType } shaped Buffer of zero bytes (image/png by default).
@@ -56,7 +86,8 @@ export class StubClient {
   async postBinary(
     path: string,
     init: { json?: unknown; method?: string; form?: unknown },
-  ): Promise<{ buffer: Buffer; contentType: string }> {
+    opts: { maxBytes?: number } = {},
+  ): Promise<{ buffer: Buffer; status: number; contentType: string; headers: Record<string, string> }> {
     const body = (init as { json?: unknown }).json
     const isMultipart = (init as { form?: unknown }).form !== undefined
     this.calls.push({
@@ -65,10 +96,75 @@ export class StubClient {
       body: isMultipart ? '<FormData>' : body,
       multipart: isMultipart,
       binary: true,
+      maxBytes: opts.maxBytes,
     })
+    const matchKey = Object.keys(this.overrides).find((k) => path.startsWith(k))
+    if (matchKey) {
+      const output = await this.overrides[matchKey](this.calls.at(-1)!)
+      if (output && typeof output === 'object' && 'buffer' in output) {
+        const response = output as {
+          buffer: Buffer
+          status?: number
+          contentType?: string
+          headers?: Record<string, string>
+        }
+        return {
+          buffer: response.buffer,
+          status: response.status ?? 200,
+          contentType: response.contentType ?? 'application/octet-stream',
+          headers: response.headers ?? {},
+        }
+      }
+    }
     return {
       buffer: Buffer.from('stub-binary-image-data'),
+      status: 200,
       contentType: 'image/png',
+      headers: {},
+    }
+  }
+  async postMixed<T>(path: string, json: unknown, opts: { maxBytes?: number } = {}): Promise<
+    | { kind: 'json'; data: T; status: number; contentType: string; headers: Record<string, string> }
+    | { kind: 'binary'; buffer: Buffer; status: number; contentType: string; headers: Record<string, string> }
+  > {
+    const call: StubCall = { method: 'POST', path, body: json, binary: true, maxBytes: opts.maxBytes }
+    const data = await this.dispatch<T | {
+      kind: 'json'
+      data: T
+      status?: number
+      contentType?: string
+      headers?: Record<string, string>
+    } | {
+      kind: 'binary'
+      buffer: Buffer
+      status?: number
+      contentType?: string
+      headers?: Record<string, string>
+    }>(call)
+    if (data && typeof data === 'object' && 'kind' in data) {
+      if (data.kind === 'binary') {
+        return {
+          kind: 'binary',
+          buffer: data.buffer,
+          status: data.status ?? 200,
+          contentType: data.contentType ?? 'application/octet-stream',
+          headers: data.headers ?? {},
+        }
+      }
+      return {
+        kind: 'json',
+        data: data.data,
+        status: data.status ?? 200,
+        contentType: data.contentType ?? 'application/json',
+        headers: data.headers ?? {},
+      }
+    }
+    return {
+      kind: 'json',
+      data: data as T,
+      status: 200,
+      contentType: 'application/json',
+      headers: {},
     }
   }
   /** Stub for postMultipart — returns canned JSON like normal POST. */
@@ -108,7 +204,7 @@ function defaultResponse(path: string, _binary?: boolean, _eventStream?: boolean
   if (path.startsWith('/v1/video/queue')) return { model: 'veo3.1-fast-text-to-video', queue_id: 'vid-123' }
   if (path.startsWith('/v1/video/retrieve'))
     return { status: 'COMPLETED', download_url: 'https://stub/v.mp4', average_execution_time: 60_000, execution_duration: 30_000 }
-  if (path.startsWith('/v1/video/complete')) return { ok: true }
+  if (path.startsWith('/v1/video/complete')) return { success: true }
   // Real Venice video/transcriptions returns { transcript, lang }
   if (path.startsWith('/v1/video/transcriptions')) return { transcript: 'video transcript', lang: 'en' }
   if (path.startsWith('/v1/video/quote')) return { quote: 0.5, model: 'veo3.1-fast-text-to-video' }
@@ -118,7 +214,7 @@ function defaultResponse(path: string, _binary?: boolean, _eventStream?: boolean
   if (path.startsWith('/v1/audio/queue')) return { model: 'elevenlabs-music', queue_id: 'mus-123' }
   if (path.startsWith('/v1/audio/retrieve'))
     return { status: 'COMPLETED', download_url: 'https://stub/m.mp3' }
-  if (path.startsWith('/v1/audio/complete')) return { ok: true }
+  if (path.startsWith('/v1/audio/complete')) return { success: true }
   if (path.startsWith('/v1/audio/quote')) return { quote: 0.1 }
   if (path.startsWith('/v1/augment/search')) return { results: [{ url: 'https://x', snippet: 's' }] }
   if (path.startsWith('/v1/augment/scrape')) return { markdown: '# stub' }

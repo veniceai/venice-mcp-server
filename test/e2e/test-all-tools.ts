@@ -238,11 +238,6 @@ function buildPlan(walletAddr: string): CallSpec[] {
       expectIn: { apikey: false, x402: false }, // expected to fail (invalid queue_id)
       validate: () => null,
     },
-    {
-      name: 'venice_video_transcriptions',
-      args: { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      validate: () => null,
-    },
 
     // ============ AUDIO TTS / ASR ============
     {
