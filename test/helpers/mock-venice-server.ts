@@ -89,28 +89,28 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
           __rawBody?: string
           __stallBody?: string
           __headers?: Record<string, string>
+          __stallBody?: boolean
         }
         res.statusCode = r.__status
         for (const [k, v] of Object.entries(r.__headers ?? {})) {
           res.setHeader(k, v)
         }
         if (!res.hasHeader('content-type')) res.setHeader('content-type', 'application/json')
-        if (typeof r.__stallBody === 'string') {
+        if (r.__stallBody) {
           res.flushHeaders()
-          res.write(r.__stallBody)
+          if (typeof r.__stallBody === 'string') res.write(r.__stallBody)
+          else if (Buffer.isBuffer(r.__body) || typeof r.__body === 'string') res.write(r.__body)
           return
         }
         if (typeof r.__rawBody === 'string') {
           res.end(r.__rawBody)
           return
         }
-        const responseBody = r.__body ?? {}
-        const contentType = String(res.getHeader('content-type') ?? '')
-        res.end(
-          typeof responseBody === 'string' && !contentType.includes('application/json')
-            ? responseBody
-            : JSON.stringify(responseBody),
-        )
+        if (Buffer.isBuffer(r.__body) || typeof r.__body === 'string') {
+          res.end(r.__body)
+        } else {
+          res.end(JSON.stringify(r.__body ?? {}))
+        }
         return
       }
 

@@ -124,7 +124,30 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
       },
       {
         match: 'POST /v1/image/generate',
-        reply: { id: 'mock-img-id', images: ['bW9jay1iYXNlNjQ='] },
+        reply: {
+          __status: 200,
+          __body: { id: 'mock-img-id', images: ['bW9jay1iYXNlNjQ='] },
+          __headers: { 'x-venice-enhanced-prompt': 'an%20enhanced%20sunset' },
+        },
+      },
+      {
+        match: 'POST /v1/video/retrieve',
+        reply: ({ body }) =>
+          (body as { queue_id?: string }).queue_id === 'processing'
+            ? {
+                __status: 200,
+                __body: { status: 'PROCESSING', average_execution_time: 60_000, execution_duration: 10_000 },
+              }
+            : (body as { queue_id?: string }).queue_id === 'json-completed'
+              ? {
+                  __status: 200,
+                  __body: { status: 'COMPLETED', download_url: 'https://stub/v.mp4' },
+                }
+              : {
+                  __status: 200,
+                  __body: Buffer.from('integration-mp4'),
+                  __headers: { 'content-type': 'video/mp4' },
+                },
       },
       {
         match: 'GET /v1/billing/usage-history?currency=USD&pageSize=10',
@@ -202,10 +225,11 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 39 tools over JSON-RPC', async () => {
+  it('lists 38 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 39)
+    assert.equal(list.length, 38)
+    // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
     assert.ok(names.includes('venice_model_details'))
@@ -214,6 +238,16 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(names.includes('venice_billing_usage_history'))
     assert.equal(names.includes('venice_web3_key_challenge'), false)
     assert.equal(names.includes('venice_web3_key_mint'), false)
+  })
+
+  it('advertises all four annotation hints on every tool', async () => {
+    const r = (await rpc.request('tools/list')) as RpcResult
+    const list = (r.result as { tools: Array<{ name: string; annotations?: Record<string, unknown> }> }).tools
+    for (const t of list) {
+      for (const hint of ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint']) {
+        assert.equal(typeof t.annotations?.[hint], 'boolean', `${t.name} is missing ${hint}`)
+      }
+    }
   })
 
   it('lists 3 resources', async () => {
@@ -246,7 +280,12 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
   it('venice_image_generate returns base64 image content', async () => {
     const r = (await rpc.request('tools/call', {
       name: 'venice_image_generate',
-      arguments: { prompt: 'a sunset' },
+      arguments: {
+        prompt: 'a sunset',
+        enhance_prompt: true,
+        aspect_ratio: 'cinematic-model-value',
+        resolution: '2K-model-value',
+      },
     })) as RpcResult
     assert.equal(r.error, undefined)
     const result = r.result as {
@@ -257,6 +296,51 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(img, 'expected image content')
     assert.equal(img!.data, 'bW9jay1iYXNlNjQ=')
     assert.equal(result.structuredContent?.id, 'mock-img-id')
+    assert.equal(
+      (result.structuredContent as { enhanced_prompt?: string }).enhanced_prompt,
+      'an enhanced sunset',
+    )
+    const request = venice.calls.find((call) => call.path === '/v1/image/generate')
+    assert.equal((request?.body as { aspect_ratio?: string }).aspect_ratio, 'cinematic-model-value')
+    assert.equal((request?.body as { resolution?: string }).resolution, '2K-model-value')
+  })
+
+  it('venice_video_status supports JSON processing and binary completed responses', async () => {
+    const processing = (await rpc.request('tools/call', {
+      name: 'venice_video_status',
+      arguments: { queue_id: 'processing', model: 'mock-video-model' },
+    })) as RpcResult
+    const processingResult = processing.result as {
+      structuredContent: { status: string }
+      content: Array<{ text?: string }>
+    }
+    assert.equal(processingResult.structuredContent.status, 'PROCESSING')
+    assert.match(processingResult.content[0].text ?? '', /PROCESSING/)
+
+    const completed = (await rpc.request('tools/call', {
+      name: 'venice_video_status',
+      arguments: { queue_id: 'completed', model: 'mock-video-model' },
+    })) as RpcResult
+    const completedResult = completed.result as {
+      structuredContent: { status: string }
+      content: Array<{ type: string; resource?: { mimeType?: string; blob?: string } }>
+    }
+    assert.equal(completedResult.structuredContent.status, 'COMPLETED')
+    const resource = completedResult.content.find((item) => item.type === 'resource')
+    assert.equal(resource?.resource?.mimeType, 'video/mp4')
+    assert.equal(resource?.resource?.blob, Buffer.from('integration-mp4').toString('base64'))
+
+    const jsonCompleted = (await rpc.request('tools/call', {
+      name: 'venice_video_status',
+      arguments: { queue_id: 'json-completed', model: 'mock-video-model' },
+    })) as RpcResult
+    const jsonResult = jsonCompleted.result as {
+      structuredContent: { status: string; url?: string }
+      content: Array<{ type: string; uri?: string }>
+    }
+    assert.equal(jsonResult.structuredContent.status, 'COMPLETED')
+    assert.equal(jsonResult.structuredContent.url, 'https://stub/v.mp4')
+    assert.equal(jsonResult.content.find((item) => item.type === 'resource_link')?.uri, 'https://stub/v.mp4')
   })
 
   it('walks billing usage history through MCP with nextCursor metadata', async () => {

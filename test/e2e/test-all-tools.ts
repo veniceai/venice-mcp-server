@@ -224,11 +224,6 @@ function buildPlan(walletAddr: string): CallSpec[] {
       expectIn: { apikey: false, x402: false }, // expected to fail (invalid queue_id)
       validate: () => null,
     },
-    {
-      name: 'venice_video_transcriptions',
-      args: { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' },
-      validate: () => null,
-    },
 
     // ============ AUDIO TTS / ASR ============
     {
@@ -465,7 +460,7 @@ function summary(mode: string, results: ToolResult[]) {
 async function main() {
   const arg = process.argv[2] || 'both'
   const wallet = loadOrCreateWallet()
-  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 39 tools × auth modes ═══${COLORS.reset}`)
+  console.log(`\n${COLORS.cyan}═══ Comprehensive MCP tool e2e — all 38 tools × auth modes ═══${COLORS.reset}`)
   console.log(`Venice base:   ${BASE_URL}`)
   console.log(`Test wallet:   ${wallet.address}\n`)
 
