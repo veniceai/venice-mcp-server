@@ -111,13 +111,15 @@ export class VeniceClient {
     let res: Response
     let contentType: string
     let body: unknown
+    let headersReceived = false
     try {
-      const res = await fetch(url, {
+      res = await fetch(url, {
         method: init.method ?? (init.json !== undefined ? 'POST' : 'GET'),
         headers,
         body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
         signal: ac.signal,
       })
+      headersReceived = true
       contentType = res.headers.get('content-type') ?? ''
       const maxBytes = init.maxBytes ?? init.maxResponseBytes
       if (!res.ok) throw await upstreamError(res, path, maxBytes)
@@ -133,7 +135,16 @@ export class VeniceClient {
         body = isJsonContentType(contentType) ? parseSuccessJson(text, path) : text
       }
     } catch (err) {
-      throw classifyRequestError(err, ac.signal, timeoutMs)
+      const classified = classifyRequestError(err, ac.signal, timeoutMs)
+      // A body that breaks after the headers must fail cleanly rather than surface a raw socket error.
+      if (classified === err && headersReceived && !isClassifiedClientError(err)) {
+        throw new VeniceUpstreamError({
+          message: `Failed to read Venice response body on ${path}`,
+          status: 502,
+          body: { error: 'response_body_read_failed' },
+        })
+      }
+      throw classified
     } finally {
       clearTimeout(timeout)
     }
@@ -447,6 +458,14 @@ async function upstreamError(res: Response, path: string, maxBytes?: number): Pr
 }
 
 /** Errors this client already classified pass through unchanged; only an unclassified abort becomes a timeout. */
+function isClassifiedClientError(err: unknown): boolean {
+  return (
+    err instanceof VeniceUpstreamError ||
+    err instanceof VeniceMalformedResponseError ||
+    err instanceof VeniceResponseTooLargeError
+  )
+}
+
 function classifyRequestError(err: unknown, signal: AbortSignal, timeoutMs: number): unknown {
   if (
     err instanceof VeniceUpstreamError ||

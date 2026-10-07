@@ -602,7 +602,7 @@ describe('VeniceClient', () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
       () => eventStream(c, '/v1/e2ee-stream', { stream: true }, undefined, { maxResponseBytes: 1_000 }),
-      /Venice response on \/v1\/e2ee-stream: response is larger than 1000 bytes/,
+      /Venice response on \/v1\/e2ee-stream exceeds the configured 1000-byte limit/,
     )
   })
 
@@ -622,7 +622,7 @@ describe('VeniceClient', () => {
       const c = new VeniceClient({ ...loadConfig({}), baseUrl: 'https://unbounded.test' })
       await assert.rejects(
         () => eventStream(c, '/stream', { stream: true }, undefined, { maxResponseBytes: 4_096 }),
-        /response is larger than 4096 bytes/,
+        /exceeds the configured 4096-byte limit/,
       )
       assert.ok(enqueued < 20, `read ${enqueued} chunks past the cap`)
     } finally {
