@@ -300,6 +300,28 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(call.headers.accept, 'application/json')
   })
 
+  it('forwards tool-call thought signatures through MCP input validation', async () => {
+    const messages = [
+      { role: 'user', content: 'Check the weather' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_weather',
+          type: 'function',
+          thought_signature: 'original-signature+/=',
+          function: { name: 'weather', arguments: '{}' },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call_weather', content: 'Sunny' },
+    ]
+    const r = (await rpc.request('tools/call', { name: 'venice_chat', arguments: { messages } })) as RpcResult
+    assert.equal(r.error, undefined)
+    assert.equal((r.result as { isError?: boolean }).isError, undefined)
+    const call = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').at(-1)!
+    assert.deepEqual((call.body as { messages: unknown[] }).messages, messages)
+  })
+
   it('rejects enable_e2ee over MCP without contacting chat completions', async () => {
     const beforeCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
     const r = (await rpc.request('tools/call', {

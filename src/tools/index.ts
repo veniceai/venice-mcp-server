@@ -261,6 +261,7 @@ const chatUserContentPartSchema = z.union([
 const assistantToolCallSchema = z.object({
   id: z.string(),
   type: z.literal('function'),
+  thought_signature: z.string().optional(),
   function: z.object({
     name: z.string(),
     arguments: z.string(),

@@ -660,6 +660,29 @@ describe('chat and responses request contracts', () => {
     assert.match((result.content[0] as { text: string }).text, /tool_calls/)
   })
 
+  it('preserves per-tool-call thought signatures through schema validation and replay', async () => {
+    const message = {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { id: 'call_1', type: 'function', thought_signature: 'signature-1+/=', function: { name: 'lookup', arguments: '{}' } },
+        { id: 'call_2', type: 'function', thought_signature: 'signature-2+/=', function: { name: 'lookup', arguments: '{}' } },
+      ],
+    }
+    const stub = new StubClient({ '/v1/chat/completions': () => ({ choices: [{ message }] }) })
+    const tool = buildTools(stub.asClient(), cfg).find((candidate) => candidate.name === 'venice_chat')!
+    const schema = z.object(tool.inputSchema)
+    const first = await tool.handler(schema.parse({ messages: [{ role: 'user', content: 'Look these up' }] }))
+    const messages = [
+      first.structuredContent?.message,
+      { role: 'tool', tool_call_id: 'call_1', content: 'first result' },
+      { role: 'tool', tool_call_id: 'call_2', content: 'second result' },
+    ]
+    const replay = schema.parse({ messages })
+    await tool.handler(replay)
+    assert.deepEqual((stub.calls.at(-1)?.body as { messages: unknown[] }).messages, messages)
+  })
+
   it('keeps Responses to its accepted text/image/reasoning subset and does not advertise tools or E2EE', async () => {
     const { stub, get } = setup()
     const tool = get('venice_responses')
