@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
 import { VeniceUpstreamError } from '../src/types.js'
+import { VeniceResponseTooLargeError } from '../src/venice-client.js'
 import { StubClient } from './helpers/stub-client.js'
 import { TOOL_ANNOTATIONS } from '../src/tools/annotations.js'
 
@@ -640,30 +641,82 @@ describe('billing input validation and output size', () => {
     assert.equal(schema.safeParse({ cursor: '' }).success, false)
   })
 
-  it('truncates oversized usage-history pages and flags them', async () => {
-    const rows = Array.from({ length: 1000 }, (_, i) => ({ timestamp: `2026-08-01T00:00:${i}Z`, amount: -0.1, sku: 'x'.repeat(40) }))
+  it('returns complete usage-history JSON and CSV pages beyond the old 8K cutoff', async () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      timestamp: '2026-08-01T00:00:00Z', amount: -0.1, sku: `model-${i}`, notes: 'n'.repeat(600),
+    }))
     const jsonStub = new StubClient({ '/v1/billing/usage-history': () => ({ data: rows, nextCursor: 'next' }) })
     const jsonTool = buildTools(jsonStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
-    const json = await jsonTool.handler({ page_size: 1000 } as never)
+    const json = await jsonTool.handler({ page_size: 20 })
+    assert.equal(json.isError, undefined)
     const jsonText = (json.content[0] as { text: string }).text
-    assert.ok(jsonText.length < 8500, `json text length ${jsonText.length}`)
-    assert.match(jsonText, /truncated/)
-    assert.match(jsonText, /smaller page_size/)
-    assert.deepEqual(json.structuredContent, { format: 'json', count: 1000, nextCursor: 'next', truncated: true })
+    assert.ok(jsonText.length > 8000)
+    assert.deepEqual(JSON.parse(jsonText), { data: rows, nextCursor: 'next' })
+    assert.deepEqual(json.structuredContent, { format: 'json', count: 20, nextCursor: 'next', truncated: false })
 
-    const csvBody = `timestamp,amount\n${rows.map((r) => `${r.timestamp},${r.amount}`).join('\n')}`.repeat(2)
+    const csvBody = `timestamp,amount,notes\r\n${rows.map((r) => `${r.timestamp},${r.amount},"line one\n${r.notes}"`).join('\r\n')}`
     const csvStub = new StubClient({ '/v1/billing/usage-history': () => csvBody })
     const csvTool = buildTools(csvStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
-    const csv = await csvTool.handler({ format: 'csv', page_size: 1000 } as never)
-    const csvText = (csv.content[0] as { text: string }).text
-    assert.ok(csvText.length < 8500, `csv text length ${csvText.length}`)
-    assert.equal(csv.structuredContent?.truncated, true)
+    const csv = await csvTool.handler({ format: 'csv', page_size: 20 })
+    assert.equal(csv.isError, undefined)
+    assert.equal((csv.content[0] as { text: string }).text, csvBody)
+    assert.equal(csv.structuredContent?.nextCursor, 'csv:stub-next-cursor')
+    assert.equal(csv.structuredContent?.truncated, false)
+  })
 
-    const smallStub = new StubClient({ '/v1/billing/usage-history': () => 'timestamp,amount\n1,2' })
-    const smallTool = buildTools(smallStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
-    const untruncated = await smallTool.handler({ format: 'csv' } as never)
-    assert.equal(untruncated.structuredContent?.truncated, false)
-    assert.equal((untruncated.content[0] as { text: string }).text, 'timestamp,amount\n1,2')
+  it('defaults billing first pages to ten rows without modifying cursor continuations', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+    await history.handler({})
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?pageSize=10')
+    await history.handler({ cursor: 'next' })
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=next')
+    assert.equal(stub.calls.at(-1)?.maxBytes, 64 * 1024)
+  })
+
+  it('rejects oversized billing pages without returning partial records or a continuation cursor', async () => {
+    for (const format of ['json', 'csv']) {
+      const marker = 'private-ledger-record'
+      const body = format === 'json'
+        ? { data: [{ notes: marker + '🙂'.repeat(20_000) }], nextCursor: 'after-omitted-rows' }
+        : `notes\n"${marker}${'🙂'.repeat(20_000)}"`
+      const stub = new StubClient({ '/v1/billing/usage-history': () => body })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+      const result = await tool.handler({ format })
+      assert.equal(result.isError, true, format)
+      assert.equal(result.structuredContent, undefined)
+      const text = (result.content[0] as { text: string }).text
+      assert.match(text, /64 KiB/)
+      assert.match(text, /smaller page_size/)
+      assert.doesNotMatch(text, new RegExp(`${marker}|after-omitted-rows|stub-next-cursor`))
+    }
+  })
+
+  it('applies the billing output limit in bytes with an inclusive boundary', async () => {
+    for (const extraBytes of [0, 1]) {
+      const csv = 'notes\n' + 'x'.repeat(64 * 1024 - 6 + extraBytes)
+      const stub = new StubClient({ '/v1/billing/usage-history': () => csv })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+      const result = await tool.handler({ format: 'csv' })
+      if (extraBytes === 0) {
+        assert.equal(result.isError, undefined)
+        assert.equal((result.content[0] as { text: string }).text, csv)
+      } else {
+        assert.equal(result.isError, true)
+        assert.equal(result.structuredContent, undefined)
+      }
+    }
+  })
+
+  it('handles the HTTP response-size rejection without exposing a cursor', async () => {
+    const stub = new StubClient({ '/v1/billing/usage-history': () => {
+      throw new VeniceResponseTooLargeError('/v1/billing/usage-history', 64 * 1024)
+    } })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const result = await tool.handler({ cursor: 'next' })
+    assert.equal(result.isError, true)
+    assert.equal(result.structuredContent, undefined)
+    assert.match((result.content[0] as { text: string }).text, /same cursor/)
   })
 })
 
@@ -1631,7 +1684,7 @@ describe('tool output shaping', () => {
     assert.equal(result.isError, undefined)
     assert.equal(
       stub.calls.at(-1)?.path,
-      '/v1/billing/usage-history?startTimestamp=2026-08-01T00%3A00%3A00.123456Z&endTimestamp=2026-08-02T00%3A00%3A00.1Z',
+      '/v1/billing/usage-history?startTimestamp=2026-08-01T00%3A00%3A00.123456Z&endTimestamp=2026-08-02T00%3A00%3A00.1Z&pageSize=10',
     )
   })
 

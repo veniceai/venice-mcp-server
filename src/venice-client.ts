@@ -164,7 +164,7 @@ export class VeniceClient {
   get<T = unknown>(
     path: string,
     headers?: Record<string, string>,
-    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse'> = {},
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse' | 'maxBytes'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'GET', headers, ...opts })
   }

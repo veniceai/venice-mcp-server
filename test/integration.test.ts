@@ -74,6 +74,16 @@ interface RpcResult {
   error?: { code: number; message: string }
 }
 
+const billingRows = Array.from({ length: 23 }, (_, i) => ({
+  timestamp: '2026-08-01T00:00:00.000Z',
+  amount: -0.01,
+  sku: `model-${i}`,
+  notes: 'Detailed usage note. '.repeat(60),
+}))
+
+const billingCsv = (rows: typeof billingRows) =>
+  `timestamp,amount,sku,notes\r\n${rows.map((r) => `${r.timestamp},${r.amount},${r.sku},"line one\n${r.notes}"`).join('\r\n')}`
+
 describe('integration — JSON-RPC over stdio with mock Venice', () => {
   let venice: MockVeniceServer
   let mcp: ChildProcessWithoutNullStreams
@@ -154,6 +164,33 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
         reply: {
           data: [{ timestamp: '2026-08-01T00:00:00.000Z', amount: -0.01, currency: 'USD' }],
           nextCursor: 'integration-cursor',
+        },
+      },
+      {
+        match: 'GET /v1/billing/usage-history*',
+        reply: ({ path, headers }) => {
+          const params = new URL(path, 'http://fixture').searchParams
+          const csv = headers.accept === 'text/csv'
+          if (params.get('cursor') === 'oversized') {
+            return {
+              __status: 200,
+              __body: csv
+                ? `notes\n"${'🙂'.repeat(20_000)}"`
+                : { data: [{ notes: '🙂'.repeat(20_000) }], nextCursor: 'must-not-escape' },
+              __headers: { 'content-type': csv ? 'text/csv' : 'application/json', 'x-next-cursor': 'must-not-escape' },
+            }
+          }
+          const offset = Number(params.get('cursor')?.replace('page_', '') ?? 0)
+          const data = billingRows.slice(offset, offset + 10)
+          const nextCursor = offset + data.length < billingRows.length ? `page_${offset + data.length}` : null
+          return {
+            __status: 200,
+            __body: csv ? billingCsv(data) : { data, nextCursor },
+            __headers: {
+              'content-type': csv ? 'text/csv' : 'application/json',
+              ...(nextCursor ? { 'x-next-cursor': nextCursor } : {}),
+            },
+          }
         },
       },
       {
@@ -362,6 +399,55 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(upstreamCall?.headers.authorization, 'Bearer vk_integration')
     assert.equal(upstreamCall?.headers['sign-in-with-x'], undefined)
   })
+
+  for (const format of ['json', 'csv']) {
+    it(`walks complete ${format} billing pages over MCP without losing rows`, async () => {
+      const beforeCalls = venice.calls.length
+      let cursor: string | null = null
+      let offset = 0
+      do {
+        const r = (await rpc.request('tools/call', {
+          name: 'venice_billing_usage_history',
+          arguments: cursor ? { cursor } : { format },
+        })) as RpcResult
+        assert.equal(r.error, undefined)
+        const result = r.result as {
+          isError?: boolean
+          content: Array<{ text: string }>
+          structuredContent: { nextCursor: string | null; truncated: boolean }
+        }
+        assert.equal(result.isError, undefined)
+        assert.equal(result.structuredContent.truncated, false)
+        const expected = billingRows.slice(offset, offset + 10)
+        if (format === 'json') assert.deepEqual(JSON.parse(result.content[0].text).data, expected)
+        else assert.equal(result.content[0].text, billingCsv(expected))
+        offset += expected.length
+        cursor = result.structuredContent.nextCursor
+        assert.ok(offset <= billingRows.length)
+      } while (cursor)
+      assert.equal(offset, billingRows.length)
+      const calls = venice.calls.slice(beforeCalls)
+      assert.deepEqual(calls.map((call) => call.path), [
+        '/v1/billing/usage-history?pageSize=10',
+        '/v1/billing/usage-history?cursor=page_10',
+        '/v1/billing/usage-history?cursor=page_20',
+      ])
+      for (const call of calls) assert.equal(call.headers.authorization, 'Bearer vk_integration')
+    })
+
+    it(`rejects an oversized ${format} billing body over HTTP and MCP without its cursor`, async () => {
+      const r = (await rpc.request('tools/call', {
+        name: 'venice_billing_usage_history',
+        arguments: { cursor: format === 'csv' ? 'csv:oversized' : 'oversized' },
+      })) as RpcResult
+      assert.equal(r.error, undefined)
+      const result = r.result as { isError?: boolean; content: Array<{ text: string }>; structuredContent?: unknown }
+      assert.equal(result.isError, true)
+      assert.equal(result.structuredContent, undefined)
+      assert.match(result.content[0].text, /64 KiB/)
+      assert.doesNotMatch(JSON.stringify(result), /must-not-escape/)
+    })
+  }
 
   it('venice_model_details returns the exact full catalog row from the mock API', async () => {
     const r = (await rpc.request('tools/call', {

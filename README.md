@@ -122,6 +122,8 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 | `venice_billing_usage_analytics` | Get beta aggregate usage by date, model, and API key using a lookback or custom date range. |
 | `venice_billing_usage_history` | Walk detailed usage with cursor pagination, first-page filters, and JSON or CSV output. |
 
+Usage-history first pages default to 10 rows. JSON and CSV pages are returned whole, never truncated. A page exceeding 64 KiB returns an error without partial rows or a continuation cursor; restart with the original filters and a smaller `page_size` (minimum 10), or a narrower timestamp range. Retrying the same cursor cannot reduce the page size encoded in it.
+
 Usage-history continuation calls must send `cursor` without the original filters. CSV pages return a `csv:`-prefixed `nextCursor` so a cursor-only follow-up stays on `text/csv`. The deprecated `/billing/usage` route is not wrapped. Billing tools require an ADMIN `VENICE_API_KEY` and fail locally instead of falling back to SIWX. Inference keys cannot call these endpoints.
 
 ### 🔑 API keys

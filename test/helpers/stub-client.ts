@@ -41,10 +41,11 @@ export class StubClient {
     headers?: Record<string, string>,
     opts: {
       auth?: StubCall['auth']
+      maxBytes?: number
       onResponse?: (metadata: { status: number; headers: Record<string, string> }) => void
     } = {},
   ) {
-    const result = await this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
+    const result = await this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth, maxBytes: opts.maxBytes })
     opts.onResponse?.({
       status: 200,
       headers: path.startsWith('/v1/billing/usage-history')

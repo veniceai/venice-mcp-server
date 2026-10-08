@@ -278,14 +278,16 @@ function safeJson(value: unknown): string {
   return JSON.stringify(redactSecretFields(value), null, 2)
 }
 
-/** nextCursor resumes after the whole page, so rows cut here are skipped by a continuation. */
-function truncateUsagePage(raw: string): { text: string; truncated: boolean } {
-  const text = truncate(raw)
-  if (text === raw) return { text, truncated: false }
-  return {
-    text: `${text}\nThis page was too large to return in full, so rows are missing. Repeat the first-page request with a smaller page_size instead of following nextCursor.`,
-    truncated: true,
-  }
+const BILLING_USAGE_DEFAULT_PAGE_SIZE = 10
+const BILLING_USAGE_MAX_RESPONSE_BYTES = 64 * 1024
+const BILLING_USAGE_TOO_LARGE =
+  'Billing usage page exceeds 64 KiB. No partial records or continuation cursor were returned. ' +
+  'Restart with the original filters and a smaller page_size (minimum 10), or a narrower timestamp range. ' +
+  'Retrying the same cursor cannot shrink its page because the cursor fixes page_size.'
+
+function usageHistoryResult(text: string, metadata: Record<string, unknown>): ToolResult {
+  if (Buffer.byteLength(text, 'utf8') > BILLING_USAGE_MAX_RESPONSE_BYTES) return fail(BILLING_USAGE_TOO_LARGE)
+  return ok(text, { ...metadata, truncated: false })
 }
 /** Types in the live catalog (GET /v1/models?type=all). Accepted as strings so a new Venice type still works. */
 const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'music', 'tts', 'asr', 'embedding', 'decision'] as const
@@ -1537,7 +1539,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_billing_usage_history',
       title: 'Venice Billing Usage History',
-      description: `Walk detailed billing usage in ascending timestamp order using cursor pagination. Supports JSON or upstream CSV. On continuation, send cursor without the original filters; CSV nextCursor values already encode format=csv so a cursor-only follow-up stays on text/csv. This uses /billing/usage-history, never deprecated /billing/usage.${ADMIN_API_KEY_ONLY}`,
+      description: `Walk detailed billing usage in ascending timestamp order using cursor pagination. Supports complete JSON or upstream CSV pages, defaulting to 10 rows. Pages exceeding 64 KiB fail without returning partial rows or a next cursor. On continuation, send cursor without the original filters; CSV nextCursor values already encode format=csv so a cursor-only follow-up stays on text/csv. This uses /billing/usage-history, never deprecated /billing/usage.${ADMIN_API_KEY_ONLY}`,
       inputSchema: {
         currency: z.enum(['USD', 'DIEM', 'BUNDLED_CREDITS']).optional(),
         cursor: z
@@ -1554,7 +1556,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         end_timestamp: utcTimestampSchema
           .optional()
           .describe('Exclusive first-page upper bound, ISO 8601 UTC with Z suffix.'),
-        page_size: z.number().int().min(10).max(1000).optional(),
+        page_size: z.number().int().min(10).max(1000).optional()
+          .describe('First-page row count. Defaults to 10. Complete pages larger than 64 KiB are rejected; use smaller pages or narrower timestamp filters.'),
         format: z.enum(['json', 'csv']).optional().describe('Defaults to json. Optional on continuation; CSV nextCursor values already stay on CSV.'),
       },
       handler: async (args) => {
@@ -1585,7 +1588,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if (args.currency) params.set('currency', args.currency)
           if (args.start_timestamp) params.set('startTimestamp', args.start_timestamp)
           if (args.end_timestamp) params.set('endTimestamp', args.end_timestamp)
-          if (args.page_size !== undefined) params.set('pageSize', String(args.page_size))
+          if (!rawCursor) params.set('pageSize', String(args.page_size ?? BILLING_USAGE_DEFAULT_PAGE_SIZE))
           const query = params.toString()
           const path = `/v1/billing/usage-history${query ? `?${query}` : ''}`
           if (wantCsv) {
@@ -1595,31 +1598,29 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               { Accept: 'text/csv' },
               {
                 auth: 'apiKey',
+                maxBytes: BILLING_USAGE_MAX_RESPONSE_BYTES,
                 onResponse: ({ headers }) => {
                   nextCursor = headers['x-next-cursor']
                 },
               },
             )
-            const page = truncateUsagePage(csv)
-            return ok(page.text, {
+            return usageHistoryResult(csv, {
               format: 'csv',
               nextCursor: nextCursor ? `${CSV_CURSOR_PREFIX}${nextCursor}` : null,
-              truncated: page.truncated,
             })
           }
           const resp = await client.get<{ data?: unknown[]; nextCursor?: string | null }>(
             path,
             undefined,
-            { auth: 'apiKey' },
+            { auth: 'apiKey', maxBytes: BILLING_USAGE_MAX_RESPONSE_BYTES },
           )
-          const page = truncateUsagePage(JSON.stringify(resp, null, 2))
-          return ok(page.text, {
+          return usageHistoryResult(JSON.stringify(resp, null, 2), {
             format: 'json',
             count: resp.data?.length ?? 0,
             nextCursor: resp.nextCursor ?? null,
-            truncated: page.truncated,
           })
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return fail(BILLING_USAGE_TOO_LARGE)
           return fail(formatToolError(err))
         }
       },
