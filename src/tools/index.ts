@@ -1058,7 +1058,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             count: models.length,
             ids,
             ...(fitted.truncated ? { truncated: true, returned: fitted.returned, total: models.length } : {}),
-          })
+          }, fitted.truncated ? [JSON.stringify({ ids })] : [])
         } catch (err) {
           return fail(formatToolError(err))
         }

@@ -1025,18 +1025,19 @@ describe('tool output shaping', () => {
     assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=all')
   })
 
-  for (const count of [80, 81]) {
+  for (const count of [5, 80, 81]) {
     it(`venice_list_models bounds ${count} large rows while preserving JSON and all ids`, async () => {
       const models = Array.from({ length: count }, (_, i) => ({
         id: `model-${i}`,
-        description: 'd'.repeat(1000),
+        description: 'd'.repeat(count === 5 ? 3000 : 1000),
       }))
       const stub = new StubClient({ '/v1/models?type=all': () => ({ data: models }) })
       const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')
       assert.ok(tool)
       const result = await tool.handler({})
       assert.equal(result.isError, undefined)
-      assert.equal(result.content.length, 1)
+      assert.equal(result.content.length, 2)
+      assert.deepEqual(JSON.parse((result.content[1] as { text: string }).text), { ids: models.map((m) => m.id) })
       const text = (result.content[0] as { text: string }).text
       assert.ok(text.length <= 8000)
       const parsed = JSON.parse(text)
@@ -1061,6 +1062,7 @@ describe('tool output shaping', () => {
     const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')
     assert.ok(tool)
     const result = await tool.handler({})
+    assert.equal(result.content.length, 1)
     assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), models)
     assert.deepEqual(result.structuredContent, { type: 'all', count: 1, ids: ['small-model'] })
   })
