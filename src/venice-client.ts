@@ -1,5 +1,5 @@
 import type { Config } from './config.js'
-import { VeniceResponseTooLargeError, VeniceUpstreamError } from './types.js'
+import { VeniceUpstreamError } from './types.js'
 
 export interface RequestInitJSON {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
@@ -11,8 +11,49 @@ export interface RequestInitJSON {
   timeoutMs?: number
   /** Override default API-key-first auth behavior for endpoint-specific requirements. */
   auth?: 'default' | 'apiKey' | 'siwx' | 'none'
-  /** Reject the response if the body exceeds this many bytes. */
+  /** Deprecated alias for `maxBytes`. */
   maxResponseBytes?: number
+  /** Reject a successful response body larger than this many bytes. */
+  maxBytes?: number
+}
+
+export interface VeniceResponse<T> {
+  data: T
+  status: number
+  contentType: string
+  headers: Record<string, string>
+}
+
+export interface VeniceBinaryResponse {
+  buffer: Buffer
+  status: number
+  contentType: string
+  headers: Record<string, string>
+}
+
+export type VeniceMixedResponse<T> =
+  | ({ kind: 'json' } & VeniceResponse<T>)
+  | ({ kind: 'binary' } & VeniceBinaryResponse)
+
+export class VeniceResponseTooLargeError extends Error {
+  constructor(
+    readonly path: string,
+    readonly maxBytes: number,
+    /** Response headers, when known; crypto RPC reads billing headers from an oversized reply. */
+    readonly headers: Record<string, string> = {},
+  ) {
+    super(`Venice response on ${path} exceeds the configured ${maxBytes}-byte limit`)
+    this.name = 'VeniceResponseTooLargeError'
+  }
+}
+
+export class VeniceMalformedResponseError extends Error {
+  constructor(readonly path: string) {
+    super(
+      `Venice returned an unreadable JSON response on ${path}. The request may have completed upstream and been charged; check its result before retrying.`,
+    )
+    this.name = 'VeniceMalformedResponseError'
+  }
 }
 
 /**
@@ -28,7 +69,18 @@ export interface RequestInitJSON {
 export class VeniceClient {
   constructor(private readonly cfg: Config) {}
 
-  private async send<T>(path: string, init: RequestInitJSON): Promise<{ body: T; headers: Record<string, string> }> {
+  async request<T = unknown>(path: string, init: RequestInitJSON = {}): Promise<T> {
+    return (await this.requestWithMetadata<T>(path, init)).data
+  }
+
+  /**
+   * Request JSON/text while retaining response headers and status. Existing
+   * request/get/post methods intentionally continue to return only the body.
+   */
+  async requestWithMetadata<T = unknown>(
+    path: string,
+    init: RequestInitJSON = {},
+  ): Promise<VeniceResponse<T>> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       Accept: 'application/json',
@@ -69,8 +121,12 @@ export class VeniceClient {
     }
 
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), init.timeoutMs ?? this.cfg.timeoutMs)
+    const timeoutMs = init.timeoutMs ?? this.cfg.timeoutMs
+    // The timer stays armed until the body is consumed so a stalled body cannot hang the call.
+    const timeout = setTimeout(() => ac.abort(), timeoutMs)
     let res: Response
+    let contentType: string
+    let body: unknown
     try {
       res = await fetch(url, {
         method: init.method ?? (init.json !== undefined ? 'POST' : 'GET'),
@@ -78,41 +134,35 @@ export class VeniceClient {
         body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
         signal: ac.signal,
       })
-    } catch (err) {
-      clearTimeout(timeout)
-      if ((err as Error).name === 'AbortError') {
-        throw new VeniceUpstreamError({
-          message: `Upstream request timed out after ${init.timeoutMs ?? this.cfg.timeoutMs}ms`,
-          status: 504,
-          body: { error: 'timeout' },
-        })
+      contentType = res.headers.get('content-type') ?? ''
+      const maxBytes = init.maxBytes ?? init.maxResponseBytes
+      if (!res.ok) throw await upstreamError(res, path, maxBytes)
+      let text: string
+      try {
+        text =
+          maxBytes !== undefined
+            ? (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
+            : await res.text()
+      } catch (err) {
+        if (err instanceof VeniceResponseTooLargeError) {
+          throw new VeniceResponseTooLargeError(path, err.maxBytes, responseHeaders(res))
+        }
+        throw err
       }
-      throw err
+      if (ac.signal.aborted) throw timeoutError(timeoutMs)
+      body = isJsonContentType(contentType) ? parseSuccessJson(text, path) : text
+    } catch (err) {
+      throw classifyRequestError(err, ac.signal, timeoutMs)
+    } finally {
+      clearTimeout(timeout)
     }
-    clearTimeout(timeout)
 
-    const body = await readResponseBody(res, init.maxResponseBytes)
-    const headerObj: Record<string, string> = {}
-    res.headers.forEach((v, k) => {
-      headerObj[k] = v
-    })
-
-    if (!res.ok) {
-      throw new VeniceUpstreamError({
-        message: `Venice ${res.status} on ${path}`,
-        status: res.status,
-        body: body === TOO_LARGE ? { error: `Upstream error response is larger than ${init.maxResponseBytes} bytes` } : body,
-        headers: headerObj,
-      })
+    return {
+      data: body as T,
+      status: res.status,
+      contentType,
+      headers: responseHeaders(res),
     }
-    if (body === TOO_LARGE) {
-      throw new VeniceResponseTooLargeError({ limitBytes: init.maxResponseBytes!, headers: headerObj })
-    }
-    return { body: body as T, headers: headerObj }
-  }
-
-  async request<T = unknown>(path: string, init: RequestInitJSON = {}): Promise<T> {
-    return (await this.send<T>(path, init)).body
   }
 
   /** GET request returning JSON. */
@@ -129,19 +179,30 @@ export class VeniceClient {
     path: string,
     json: unknown,
     headers?: Record<string, string>,
-    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxResponseBytes'> = {},
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxBytes' | 'maxResponseBytes'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'POST', json, headers, ...opts })
   }
 
   /** POST request with JSON body, also returning the (lower-cased) response headers. */
-  postWithHeaders<T = unknown>(
+  async postWithHeaders<T = unknown>(
     path: string,
     json: unknown,
     headers?: Record<string, string>,
-    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxResponseBytes'> = {},
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxBytes' | 'maxResponseBytes'> = {},
   ): Promise<{ body: T; headers: Record<string, string> }> {
-    return this.send<T>(path, { method: 'POST', json, headers, ...opts })
+    const response = await this.requestWithMetadata<T>(path, { method: 'POST', json, headers, ...opts })
+    return { body: response.data, headers: response.headers }
+  }
+
+  /** POST JSON while retaining response metadata such as Venice extension headers. */
+  postWithMetadata<T = unknown>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'maxBytes'> = {},
+  ): Promise<VeniceResponse<T>> {
+    return this.requestWithMetadata<T>(path, { method: 'POST', json, headers, ...opts })
   }
 
   /**
@@ -163,24 +224,19 @@ export class VeniceClient {
     // NOTE: don't set Content-Type — fetch sets the boundary automatically.
 
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), opts.timeoutMs ?? this.cfg.timeoutMs)
-    let res: Response
+    const timeoutMs = opts.timeoutMs ?? this.cfg.timeoutMs
+    // The timer stays armed until the body is consumed so a stalled body cannot hang the call.
+    const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
-      res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal })
+      const res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal })
+      const body = await parseResponse<T>(res, path)
+      if (ac.signal.aborted) throw timeoutError(timeoutMs)
+      return body
     } catch (err) {
+      throw classifyRequestError(err, ac.signal, timeoutMs)
+    } finally {
       clearTimeout(timeout)
-      if ((err as Error).name === 'AbortError') {
-        throw new VeniceUpstreamError({
-          message: `Upstream request timed out after ${opts.timeoutMs ?? this.cfg.timeoutMs}ms`,
-          status: 504,
-          body: { error: 'timeout' },
-        })
-      }
-      throw err
     }
-    clearTimeout(timeout)
-
-    return parseResponse<T>(res, path)
   }
 
   /**
@@ -192,8 +248,8 @@ export class VeniceClient {
   async postBinary(
     path: string,
     init: RequestInitJSON | { form: FormData },
-    opts: { timeoutMs?: number } = {},
-  ): Promise<{ buffer: Buffer; contentType: string }> {
+    opts: { timeoutMs?: number; maxBytes?: number } = {},
+  ): Promise<VeniceBinaryResponse> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
@@ -211,110 +267,156 @@ export class VeniceClient {
     }
 
     const ac = new AbortController()
-    const timeout = setTimeout(() => ac.abort(), opts.timeoutMs ?? this.cfg.timeoutMs)
-    let res: Response
+    const timeoutMs = opts.timeoutMs ?? this.cfg.timeoutMs
+    const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
-      res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal })
-    } catch (err) {
-      clearTimeout(timeout)
-      if ((err as Error).name === 'AbortError') {
-        throw new VeniceUpstreamError({
-          message: `Upstream request timed out after ${opts.timeoutMs ?? this.cfg.timeoutMs}ms`,
-          status: 504,
-          body: { error: 'timeout' },
-        })
-      }
-      throw err
-    }
-    clearTimeout(timeout)
+      const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal })
+      if (!res.ok) throw await upstreamError(res, path, opts.maxBytes)
 
-    if (!res.ok) {
-      // For errors, still parse as JSON so we get a useful error body
-      const ct = res.headers.get('content-type') ?? ''
-      let errBody: unknown
-      if (ct.includes('application/json')) errBody = await res.json().catch(() => ({}))
-      else errBody = await res.text().catch(() => '')
-      const headerObj: Record<string, string> = {}
-      res.headers.forEach((v, k) => (headerObj[k] = v))
-      throw new VeniceUpstreamError({
-        message: `Venice ${res.status} on ${path}`,
+      const buffer = await readBoundedResponseBuffer(res, path, opts.maxBytes)
+      return {
+        buffer,
         status: res.status,
-        body: errBody,
-        headers: headerObj,
-      })
+        contentType: res.headers.get('content-type') ?? 'application/octet-stream',
+        headers: responseHeaders(res),
+      }
+    } catch (err) {
+      throw classifyRequestError(err, ac.signal, timeoutMs)
+    } finally {
+      clearTimeout(timeout)
     }
-
-    const ab = await res.arrayBuffer()
-    return { buffer: Buffer.from(ab), contentType: res.headers.get('content-type') ?? 'application/octet-stream' }
   }
-}
 
-const TOO_LARGE = Symbol('tooLarge')
-
-/** Parse JSON or text, returning `TOO_LARGE` once the body exceeds `maxResponseBytes`. */
-async function readResponseBody(res: Response, maxResponseBytes?: number): Promise<unknown> {
-  const contentType = res.headers.get('content-type') ?? ''
-  if (maxResponseBytes !== undefined) {
-    const text = await readBoundedResponseText(res, maxResponseBytes)
-    if (text === TOO_LARGE) return TOO_LARGE
-    if (contentType.includes('application/json')) {
-      if (!text) return {}
-      try {
-        return JSON.parse(text)
-      } catch {
-        return {}
+  /**
+   * POST to an endpoint whose success response may be JSON or binary. Venice's
+   * video retrieval endpoint uses JSON while processing and video/mp4 when done.
+   */
+  async postMixed<T = unknown>(
+    path: string,
+    json: unknown,
+    opts: { timeoutMs?: number; maxBytes?: number } = {},
+  ): Promise<VeniceMixedResponse<T>> {
+    const response = await this.postBinary(path, { method: 'POST', json }, opts)
+    if (isJsonContentType(response.contentType)) {
+      return {
+        kind: 'json',
+        data: parseSuccessJson(response.buffer.toString('utf8'), path) as T,
+        status: response.status,
+        contentType: response.contentType,
+        headers: response.headers,
       }
     }
-    return text
+    return { kind: 'binary', ...response }
   }
-  if (contentType.includes('application/json')) {
-    return await res.json().catch(() => ({}))
-  }
-  return await res.text().catch(() => '')
 }
 
-async function readBoundedResponseText(res: Response, maxBytes: number): Promise<string | typeof TOO_LARGE> {
+async function readBoundedResponseBuffer(
+  res: Response,
+  path: string,
+  maxBytes?: number,
+): Promise<Buffer> {
+  if (maxBytes === undefined) return Buffer.from(await res.arrayBuffer())
+
   const contentLength = res.headers.get('content-length')
   if (contentLength !== null) {
-    const size = Number(contentLength)
-    if (Number.isFinite(size) && size > maxBytes) {
-      if (res.body) await res.body.cancel().catch(() => undefined)
-      return TOO_LARGE
+    const declaredBytes = Number(contentLength)
+    if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
+      await res.body?.cancel()
+      throw new VeniceResponseTooLargeError(path, maxBytes)
     }
   }
 
-  if (!res.body) return ''
-
-  const chunks: Buffer[] = []
+  if (!res.body) return Buffer.alloc(0)
+  const reader = res.body.getReader()
+  const chunks: Uint8Array[] = []
   let total = 0
   try {
-    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-      const buf = Buffer.from(chunk)
-      total += buf.length
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
       if (total > maxBytes) {
-        await res.body.cancel().catch(() => undefined)
-        return TOO_LARGE
+        await reader.cancel()
+        throw new VeniceResponseTooLargeError(path, maxBytes)
       }
-      chunks.push(buf)
+      chunks.push(value)
     }
-  } catch (err) {
-    await res.body.cancel().catch(() => undefined)
-    throw err
+  } finally {
+    reader.releaseLock()
   }
-  return Buffer.concat(chunks, total).toString('utf8')
+  return Buffer.concat(chunks, total)
 }
 
-async function parseResponse<T>(res: Response, path: string): Promise<T> {
-  const body = await readResponseBody(res)
-  if (!res.ok) {
-    const headerObj: Record<string, string> = {}
-    res.headers.forEach((v, k) => (headerObj[k] = v))
-    throw new VeniceUpstreamError({
-      message: `Venice ${res.status} on ${path}`,
-      status: res.status,
-      body,
-      headers: headerObj,
-    })
+/** Parse a 2xx JSON body. Empty bodies stay `{}`; anything else unparseable is an error, never a silent `{}`. */
+function parseSuccessJson(text: string, path: string): unknown {
+  if (!text.trim()) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new VeniceMalformedResponseError(path)
   }
-  return body as T
+}
+
+function timeoutError(timeoutMs: number): VeniceUpstreamError {
+  return new VeniceUpstreamError({
+    message: `Upstream request timed out after ${timeoutMs}ms`,
+    status: 504,
+    body: { error: 'timeout' },
+  })
+}
+
+function isJsonContentType(contentType: string): boolean {
+  return contentType.toLowerCase().includes('application/json')
+}
+
+/**
+ * Build the error for a non-2xx response. The HTTP status is authoritative:
+ * an unreadable, oversized, or aborted error body degrades to an empty body
+ * rather than turning the failure into a timeout or size-limit error.
+ */
+async function upstreamError(res: Response, path: string, maxBytes?: number): Promise<VeniceUpstreamError> {
+  const json = isJsonContentType(res.headers.get('content-type') ?? '')
+  let body: unknown = json ? {} : ''
+  try {
+    const text = (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
+    if (!json) body = text
+    else if (text.trim()) body = JSON.parse(text)
+  } catch {}
+  return new VeniceUpstreamError({
+    message: `Venice ${res.status} on ${path}`,
+    status: res.status,
+    body,
+    headers: responseHeaders(res),
+  })
+}
+
+/** Errors this client already classified pass through unchanged; only an unclassified abort becomes a timeout. */
+function classifyRequestError(err: unknown, signal: AbortSignal, timeoutMs: number): unknown {
+  if (
+    err instanceof VeniceUpstreamError ||
+    err instanceof VeniceMalformedResponseError ||
+    err instanceof VeniceResponseTooLargeError
+  ) {
+    return err
+  }
+  if (signal.aborted || (err as Error).name === 'AbortError') return timeoutError(timeoutMs)
+  return err
+}
+
+function responseHeaders(res: Response): Record<string, string> {
+  const headers: Record<string, string> = {}
+  res.headers.forEach((value, key) => {
+    headers[key] = value
+  })
+  return headers
+}
+
+/**
+ * Response parser used by `postMultipart`.
+ * Handles JSON vs text content, surfaces 402 / 4xx / 5xx as VeniceUpstreamError.
+ */
+async function parseResponse<T>(res: Response, path: string): Promise<T> {
+  if (!res.ok) throw await upstreamError(res, path)
+  const text = await res.text()
+  return (isJsonContentType(res.headers.get('content-type') ?? '') ? parseSuccessJson(text, path) : text) as T
 }

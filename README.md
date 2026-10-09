@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **35 tools across all modalities, one config block.**
+Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **34 tools across all modalities, one config block.**
 
 ## Quick start
 
@@ -36,7 +36,9 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**35 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**34 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+
+Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` annotations, so hosts can run lookups without prompting and ask before anything destructive, like media cleanup or a crypto relay.
 
 ### 💬 Chat & embeddings
 
@@ -51,9 +53,9 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_image_generate` | Generate an image. Supports Flux 2 Pro/Max, Lustify SDXL, Anime (WAI), Qwen Image, GPT Image, Nano Banana Pro and others. |
-| `venice_image_edit` | Edit an image with a prompt. Returns base64 PNG. |
-| `venice_image_multi_edit` | Edit multiple images together with a single prompt (multi-image composition / outpainting). |
+| `venice_image_generate` | Generate an image. Supports model-specific width/height or free-string `aspect_ratio`/`resolution`, quality tiers, prompt enhancement, style references, web search, variants, and output format. |
+| `venice_image_edit` | Edit an image with a prompt. Supports free-string sizing, output format, and prompt enhancement; returns a base64 image. |
+| `venice_image_multi_edit` | Edit multiple images together with a single prompt (multi-image composition / outpainting), including free-string sizing, quality, output format, and prompt enhancement. |
 | `venice_image_upscale` | Upscale an image (2–4× scale, with a `creativity` control). Returns base64 PNG. |
 | `venice_image_remove_bg` | Remove image background; returns a transparent PNG. |
 | `venice_image_styles` | List image style presets available for `venice_image_generate`. |
@@ -62,10 +64,9 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, and reference image inputs depending on model. |
-| `venice_video_status` | Check status of a queued video job. Returns `PROCESSING` or `COMPLETED`. |
-| `venice_video_complete` | Mark a completed video as downloaded; deletes server-side media. |
-| `venice_video_transcriptions` | Transcribe a YouTube video URL. |
+| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs, and the Seedance consent attestation flow where applicable. |
+| `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link. Pass the queue-time `download_url` for VPS / Grok Imagine Private models. |
+| `venice_video_complete` | Mark a completed video as downloaded. Reports server-side deletion only when Venice confirms success. |
 | `venice_video_quote` | Get a price quote for a video generation BEFORE queuing. |
 
 ### 🔊 Audio (TTS / ASR)
@@ -81,7 +82,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 | Tool | Description |
 |---|---|
-| `venice_music_generate` | Queue music generation. Models: ace-step-15, elevenlabs-music, minimax-music-v2/v25/v26, stable-audio-25, mmaudio-v2, elevenlabs-sound-effects-v2. |
+| `venice_music_generate` | Queue music generation. Uses the live QueueAudioRequest fields: `force_instrumental`, `lyrics_prompt`, `lyrics_optimizer`, `loop`, `voice`, `language_code`, `speed`, and model-specific `duration_seconds`. Deprecated `instrumental` / `lyrics` are still accepted as aliases. |
 | `venice_music_status` | Check status of a queued music job. |
 | `venice_music_complete` | Mark a completed music job as downloaded. |
 
@@ -102,6 +103,12 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `venice_list_characters` | List public Venice characters with search, tag/category/model, content, capability, sort, and pagination filters. API key only. |
 | `venice_get_character` | Get a public character by slug. API key only. |
 | `venice_character_reviews` | List paginated public reviews for a character. API key only. |
+
+### Media API behavior
+
+- Image `aspect_ratio` and `resolution` values remain free strings because supported values vary by model. Venice validates them. When `enhance_prompt` is applied, image generate/edit/multi-edit results include the URL-decoded `enhanced_prompt` returned in `x-venice-enhanced-prompt`. Image responses are capped at `VENICE_MAX_IMAGE_RESPONSE_BYTES` (default 32 MiB). Unlike an oversized video, an oversized image result cannot be retried for free, so request fewer variants, a lower resolution, or jpeg/webp output for large batches.
+- Current public Seedance models may reject media containing detectable persons outright. Defensive support remains for compatible or legacy `needs_consent` responses: the tool returns Venice's policy text, affected media roles, and next step. The three `consents.seedance` flags are legal attestations and must only be set to `true` after the user explicitly confirms all three statements. Consent is never a content-policy bypass.
+- Completed videos may arrive as `video/mp4` or as JSON with a `download_url`. Binary completions are returned as an embedded MCP resource (`blob`, `mimeType: "video/mp4"`, synthetic `venice://video/...` URI), streamed into a bounded buffer that defaults to 25 MiB (`VENICE_MAX_VIDEO_RESPONSE_BYTES`). Oversized binary results remain queued and can be retried with the same queue ID after changing the limit. JSON completions return the `download_url` as an MCP resource link instead of fetching that URL. Because that link stops working once the stored media is removed, `delete_media_on_completion` is not applied to `download_url` results: download the file first, then call `venice_video_complete` (and optionally send an HTTP `DELETE` to the link to revoke it). For VPS / Grok Imagine Private models, `download_url` is returned only on queue; pass that URL into `venice_video_status` so a `COMPLETED` retrieve without an inline URL still yields a resource link.
 
 ### ⛓️ Crypto
 
@@ -131,6 +138,9 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |
 | `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
+| `VENICE_MAX_VIDEO_RESPONSE_BYTES` | `26214400` (25 MiB) | Maximum completed MP4 bytes buffered and base64-embedded by `venice_video_status`. |
+| `VENICE_MAX_IMAGE_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum response bytes buffered by `venice_image_generate`, `venice_image_edit`, `venice_image_multi_edit`, `venice_image_upscale`, and `venice_image_remove_bg`. Larger results are discarded with an error. |
+| `VENICE_MAX_AUDIO_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum audio bytes buffered and base64-embedded by `venice_tts`. Larger results are discarded with an error. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
@@ -237,7 +247,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 35 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 34 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -273,7 +283,6 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_video_generate` | `POST /v1/video/queue` |
 | `venice_video_status` | `POST /v1/video/retrieve` |
 | `venice_video_complete` | `POST /v1/video/complete` |
-| `venice_video_transcriptions` | `POST /v1/video/transcriptions` |
 | `venice_tts` | `POST /v1/audio/speech` |
 | `venice_asr` | `POST /v1/audio/transcriptions` |
 | `venice_voice_clone` | `POST /v1/audio/voices` |
@@ -336,7 +345,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # 35 tool registry + endpoint+method+body mappings
+├── tools.test.ts              # 31 tool registry + endpoint+method+body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub
@@ -359,7 +368,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 35 tools × both auth modes, side-by-side report
+# Comprehensive — all 34 tools × both auth modes, side-by-side report
 VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 
