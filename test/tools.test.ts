@@ -21,7 +21,7 @@ function setup(config = cfg) {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented default set (42 tools)', () => {
+  it('registers exactly the documented default set (45 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
@@ -34,6 +34,8 @@ describe('tools registry', () => {
       'venice_billing_usage_history',
       'venice_chat',
       'venice_chat_with_character',
+      'venice_character_reviews',
+      'venice_crypto_networks',
       'venice_crypto_rpc',
       'venice_embeddings',
       'venice_image_edit',
@@ -42,6 +44,7 @@ describe('tools registry', () => {
       'venice_image_remove_bg',
       'venice_image_styles',
       'venice_image_upscale',
+      'venice_get_character',
       'venice_get_api_key',
       'venice_list_api_keys',
       'venice_list_characters',
@@ -69,7 +72,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 42)
+    assert.equal(tools.length, 45)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -113,9 +116,30 @@ describe('tools registry', () => {
 
   it('characters tools call out API-key-only requirement', () => {
     const { get } = setup()
-    assert.match(get('venice_list_characters').description, /API key required/i)
+    for (const name of ['venice_list_characters', 'venice_get_character', 'venice_character_reviews']) {
+      assert.match(get(name).description, /API key required/i, `${name} should require an API key`)
+      assert.match(get(name).description, /does not accept x402/i, `${name} should reject x402 discovery`)
+    }
     // chat_with_character notes the discovery limitation
     assert.match(get('venice_chat_with_character').description, /API[- ]key/i)
+  })
+
+  it('crypto network discovery is explicitly auth-free', () => {
+    const { get } = setup()
+    assert.match(get('venice_crypto_networks').description, /No authentication required/i)
+    assert.doesNotMatch(get('venice_crypto_rpc').description, /Networks include/i)
+  })
+
+  it('bounds catalog types to 64 normalized characters for both model tools', () => {
+    const { get } = setup()
+    for (const name of ['venice_list_models', 'venice_model_details']) {
+      const schema = z.object(get(name).inputSchema)
+      const args = { model_id: 'x' }
+      assert.equal(schema.safeParse({ ...args, type: 'a'.repeat(64) }).success, true, name)
+      assert.equal(schema.safeParse({ ...args, type: 'a'.repeat(65) }).success, false, name)
+      assert.equal(schema.parse({ ...args, type: `  ${'A'.repeat(64)}  ` }).type, 'a'.repeat(64), name)
+      assert.equal(schema.safeParse({ ...args, type: 'some-new-type' }).success, true, name)
+    }
   })
 
   it('billing and operator API-key tools call out API-key-only requirements', () => {
@@ -482,11 +506,17 @@ const MAPPINGS: Mapping[] = [
 
   // crypto rpc
   {
+    tool: 'venice_crypto_networks',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/crypto/rpc/networks',
+  },
+  {
     tool: 'venice_crypto_rpc',
-    args: { network: 'base', rpc_method: 'eth_blockNumber' },
+    args: { network: 'base-mainnet', rpc_method: 'eth_blockNumber' },
     expectMethod: 'POST',
-    expectPath: '/v1/crypto/rpc/base',
-    expectBodyContains: { jsonrpc: '2.0', method: 'eth_blockNumber' },
+    expectPath: '/v1/crypto/rpc/base-mainnet',
+    expectBodyContains: { jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 },
   },
 
   // catalog
@@ -532,7 +562,36 @@ const MAPPINGS: Mapping[] = [
   },
 
   // characters
-  { tool: 'venice_list_characters', args: {}, expectMethod: 'GET', expectPath: '/v1/characters' },
+  {
+    tool: 'venice_list_characters',
+    args: {
+      search: 'guide',
+      tags: ['helpful', 'productivity'],
+      categories: ['roleplay', 'philosophy'],
+      isAdult: false,
+      isPro: true,
+      isWebEnabled: false,
+      modelId: ['model/a', 'model-b'],
+      sortBy: 'highestRating',
+      sortOrder: 'asc',
+      limit: 100,
+      offset: 20,
+    },
+    expectMethod: 'GET',
+    expectPath: '/v1/characters?search=guide&tags=helpful&tags=productivity&categories=roleplay&categories=philosophy&isAdult=false&isPro=true&isWebEnabled=false&modelId=model%2Fa&modelId=model-b&sortBy=highestRating&sortOrder=asc&limit=100&offset=20',
+  },
+  {
+    tool: 'venice_get_character',
+    args: { slug: 'alan-watts' },
+    expectMethod: 'GET',
+    expectPath: '/v1/characters/alan-watts',
+  },
+  {
+    tool: 'venice_character_reviews',
+    args: { slug: 'alan-watts', page: 2, pageSize: 50 },
+    expectMethod: 'GET',
+    expectPath: '/v1/characters/alan-watts/reviews?page=2&pageSize=50',
+  },
   {
     tool: 'venice_chat_with_character',
     args: { character_slug: 'alice', messages: [{ role: 'user', content: 'hi' }] },
@@ -762,6 +821,7 @@ describe('billing input validation and output size', () => {
   })
 })
 
+const UNSAFE_PATH_SEGMENTS = ['..', '.', '%2e%2e', '%2E%2E', '../reviews', 'a/b', 'a\\b', '/', '', 'a.b', 'a b', 'a?b', 'a#b']
 
 describe('chat and responses request contracts', () => {
   it('accepts every documented chat content block and forwards advanced fields exactly', async () => {
@@ -953,6 +1013,492 @@ function zObject(tool: ToolDef) {
 }
 
 describe('tool output shaping', () => {
+  it('venice_crypto_networks disables auth and returns structured network data', async () => {
+    const stub = new StubClient({
+      '/v1/crypto/rpc/networks': () => ({ networks: ['base-mainnet', 'ethereum-mainnet'] }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_crypto_networks')!.handler({} as never)
+
+    assert.equal(stub.calls.at(-1)?.auth, 'none')
+    assert.deepEqual(r.structuredContent, {
+      networks: ['base-mainnet', 'ethereum-mainnet'],
+      count: 2,
+    })
+  })
+
+  it('venice_crypto_rpc forwards a single request object unchanged', async () => {
+    const { stub, get } = setup()
+    const request = { jsonrpc: '2.0', method: 'eth_getBalance', params: ['0xabc', 'latest'], id: 'balance-1' }
+    await get('venice_crypto_rpc').handler({ network: 'ethereum-mainnet', request } as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, request)
+  })
+
+  it('venice_crypto_rpc forwards a batch request unchanged', async () => {
+    const { stub, get } = setup()
+    const request = [
+      { jsonrpc: '2.0', method: 'eth_chainId', params: [], id: 1 },
+      { jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 2 },
+    ]
+    await get('venice_crypto_rpc').handler({ network: 'ethereum-mainnet', request } as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, request)
+  })
+
+  it('venice_crypto_rpc validates batch size and request objects', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_crypto_rpc').inputSchema)
+    const valid = { jsonrpc: '2.0' as const, method: 'eth_chainId', params: [], id: 1 }
+
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        request: { jsonrpc: '2.0', method: 'eth_chainId', params: [] },
+      }).success,
+      true,
+      'single requests may omit id',
+    )
+    assert.equal(schema.safeParse({ network: 'ethereum-mainnet', request: [valid] }).success, true)
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        request: [{ ...valid, id: 'chain-id' }],
+      }).success,
+      true,
+      'batch IDs may be strings',
+    )
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        request: [{ jsonrpc: '2.0', method: 'eth_chainId', params: [] }],
+      }).success,
+      false,
+      'every batch item requires an id',
+    )
+    assert.equal(schema.safeParse({ network: 'ethereum-mainnet', request: [] }).success, false)
+    assert.equal(
+      schema.safeParse({ network: 'ethereum-mainnet', request: Array.from({ length: 100 }, () => valid) }).success,
+      true,
+    )
+    assert.equal(
+      schema.safeParse({ network: 'ethereum-mainnet', request: Array.from({ length: 101 }, () => valid) }).success,
+      false,
+    )
+    assert.equal(
+      schema.safeParse({ network: 'ethereum-mainnet', request: [{ jsonrpc: '1.0', method: 'eth_chainId' }] }).success,
+      false,
+    )
+    assert.equal(
+      schema.safeParse({ network: 'ethereum-mainnet', request: [{ jsonrpc: '2.0', method: '' }] }).success,
+      false,
+    )
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        rpc_method: 'eth_chainId',
+        idempotency_key: 'agent-tx-1',
+      }).success,
+      true,
+    )
+    assert.equal(
+      schema.safeParse({
+        network: 'ethereum-mainnet',
+        rpc_method: 'eth_chainId',
+        idempotency_key: 'has spaces',
+      }).success,
+      false,
+    )
+  })
+
+  it('venice_crypto_rpc requires idempotency_key for transaction broadcasts', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_crypto_rpc')
+
+    const missing = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendRawTransaction',
+      rpc_params: ['0xabc'],
+    } as never)
+    assert.equal(missing.isError, true)
+    assert.match((missing.content[0] as { text: string }).text, /idempotency_key/)
+    assert.equal(stub.calls.length, 0)
+
+    const batchMissing = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: [
+        { jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 1 },
+        { jsonrpc: '2.0', method: 'eth_sendRawTransaction', params: ['0xabc'], id: 2 },
+      ],
+    } as never)
+    assert.equal(batchMissing.isError, true)
+    assert.equal(stub.calls.length, 0)
+
+    const sendTransaction = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendTransaction',
+      rpc_params: [{}],
+    } as never)
+    assert.equal(sendTransaction.isError, true)
+    assert.equal(stub.calls.length, 0)
+
+    const userOp = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendUserOperation',
+      rpc_params: [{}, '0xentrypoint'],
+    } as never)
+    assert.equal(userOp.isError, true)
+    assert.equal(stub.calls.length, 0)
+
+    const sent = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendRawTransaction',
+      rpc_params: ['0xabc'],
+      idempotency_key: 'agent-tx-1',
+    } as never)
+    assert.equal(sent.isError, undefined)
+    assert.equal(stub.calls.at(-1)?.headers?.['Idempotency-Key'], 'agent-tx-1')
+  })
+
+  it('venice_crypto_rpc passes the response size limit to the client', async () => {
+    const { stub, get } = setup()
+    await get('venice_crypto_rpc').handler({ network: 'ethereum-mainnet', rpc_method: 'eth_blockNumber' } as never)
+    assert.equal(stub.calls.at(-1)?.maxResponseBytes, 64 * 1024)
+  })
+
+  it('venice_crypto_rpc returns compact JSON', async () => {
+    const response = { jsonrpc: '2.0', id: 1, result: { number: '0x1', hash: '0xabc' } }
+    const stub = new StubClient({ '/v1/crypto/rpc/': () => response })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
+    const result = await tool.handler({ network: 'ethereum-mainnet', rpc_method: 'eth_getBlockByNumber' } as never)
+    assert.equal((result.content[0] as { text: string }).text, JSON.stringify(response))
+    assert.equal(result.content.length, 1)
+    assert.equal(result.structuredContent, undefined)
+  })
+
+  it('venice_crypto_rpc rejects results over the tool-level cap with a billed-upstream error', async () => {
+    const stub = new StubClient({
+      '/v1/crypto/rpc/': () => ({ jsonrpc: '2.0', id: 1, result: '0x' + 'aa'.repeat(40_000) }),
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
+    const result = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_getLogs',
+      rpc_params: [],
+    } as never)
+    const text = (result.content[0] as { text: string }).text
+    assert.equal(result.isError, true)
+    assert.match(text, /exceeds 65536 bytes/)
+    assert.match(text, /already processed and billed/)
+    assert.match(text, /Narrow the query/)
+    assert.doesNotMatch(text, /aaaaaa/)
+  })
+
+  it('venice_crypto_rpc reports client-level size rejections with billing headers', async () => {
+    const stub = new StubClient({
+      '/v1/crypto/rpc/': () => {
+        throw new VeniceResponseTooLargeError('/v1/crypto/rpc/ethereum-mainnet', 64 * 1024, {
+          'x-venice-rpc-credits': '80',
+          'x-venice-rpc-cost-usd': '0.00005600',
+        })
+      },
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
+    const result = await tool.handler({ network: 'ethereum-mainnet', rpc_method: 'trace_replayTransaction' } as never)
+    const text = (result.content[0] as { text: string }).text
+    assert.equal(result.isError, true)
+    assert.match(text, /exceeds 65536 bytes/)
+    assert.match(text, /credits: 80, cost: \$0\.00005600/)
+  })
+
+  it('venice_crypto_rpc surfaces replay and billing headers', async () => {
+    const stub = new StubClient(
+      {},
+      {
+        '/v1/crypto/rpc/': {
+          'idempotent-replayed': 'true',
+          'x-venice-rpc-credits': '20',
+          'x-venice-rpc-cost-usd': '0.00001400',
+        },
+      },
+    )
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
+    const result = await tool.handler({
+      network: 'ethereum-mainnet',
+      rpc_method: 'eth_sendRawTransaction',
+      rpc_params: ['0xabc'],
+      idempotency_key: 'agent-tx-1',
+    } as never)
+    assert.deepEqual(result.structuredContent, {
+      idempotentReplayed: true,
+      rpcCredits: 20,
+      rpcCostUsd: '0.00001400',
+    })
+    assert.equal(result.content.length, 2)
+    assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), { jsonrpc: '2.0', result: '0x1', id: 1 })
+    assert.equal(
+      (result.content[1] as { text: string }).text,
+      'Venice RPC: replayed from idempotency cache, credits: 20, cost: $0.00001400',
+    )
+  })
+
+  it('venice_crypto_rpc rejects broadcasts batched with other requests', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_crypto_rpc')
+    const call = (method: string, id: number) => ({ jsonrpc: '2.0', method, params: ['0xabc'], id })
+
+    for (const [request, named] of [
+      [[call('eth_blockNumber', 1), call('eth_sendRawTransaction', 2)], 'contains eth_sendRawTransaction.'],
+      [[call('eth_sendRawTransaction', 1), call('eth_sendRawTransaction', 2)], 'contains eth_sendRawTransaction.'],
+      [[call('sendTransaction', 1), call('getBalance', 2)], 'contains sendTransaction.'],
+      [[call('eth_sendUserOperation', 1), call('starknet_addInvokeTransaction', 2)], 'contains eth_sendUserOperation, starknet_addInvokeTransaction.'],
+    ] as const) {
+      const result = await tool.handler({
+        network: 'ethereum-mainnet',
+        request,
+        idempotency_key: 'agent-tx-1',
+      } as never)
+      const message = (result.content[0] as { text: string }).text
+      assert.equal(result.isError, true)
+      assert.match(message, /single request/)
+      assert.ok(message.includes(named), message)
+      assert.doesNotMatch(message, /getBalance|eth_blockNumber/)
+    }
+    assert.equal(stub.calls.length, 0)
+
+    const single = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: [call('eth_sendRawTransaction', 1)],
+      idempotency_key: 'agent-tx-1',
+    } as never)
+    assert.equal(single.isError, undefined)
+    assert.equal(stub.calls.length, 1)
+  })
+
+  it('venice_crypto_rpc sends a one-item batch as a single request and returns a batch', async () => {
+    const response = { jsonrpc: '2.0', id: 9, result: '0xhash' }
+    const stub = new StubClient({ '/v1/crypto/rpc/': () => response })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
+    const item = { method: 'eth_sendRawTransaction', params: ['0xabc'], id: 9 }
+
+    const missingKey = await tool.handler({ network: 'ethereum-mainnet', request: [item] } as never)
+    assert.equal(missingKey.isError, true)
+    assert.match((missingKey.content[0] as { text: string }).text, /idempotency_key/)
+    assert.equal(stub.calls.length, 0)
+
+    const sent = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: [item],
+      idempotency_key: 'agent-tx-1',
+    } as never)
+    assert.equal(sent.isError, undefined)
+    assert.equal(stub.calls.length, 1)
+    assert.deepEqual(stub.calls[0].body, { jsonrpc: '2.0', ...item })
+    assert.equal(stub.calls[0].headers?.['Idempotency-Key'], 'agent-tx-1')
+    assert.deepEqual(JSON.parse((sent.content[0] as { text: string }).text), [response])
+  })
+
+  it('venice_crypto_rpc does not double-wrap an array response to a one-item batch', async () => {
+    const response = [{ jsonrpc: '2.0', id: 1, result: '0x1' }]
+    const stub = new StubClient({ '/v1/crypto/rpc/': () => response })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_crypto_rpc')!
+    const result = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: [{ method: 'eth_chainId', id: 1 }],
+    } as never)
+    assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), response)
+  })
+
+  it('venice_crypto_rpc defaults a single request id so it is not a notification', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_crypto_rpc')
+    await tool.handler({ network: 'ethereum-mainnet', request: { jsonrpc: '2.0', method: 'eth_chainId' } } as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, { jsonrpc: '2.0', method: 'eth_chainId', id: 1 })
+    await tool.handler({ network: 'ethereum-mainnet', request: { method: 'eth_chainId', id: 0 } } as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, { jsonrpc: '2.0', method: 'eth_chainId', id: 0 })
+  })
+
+  it('venice_crypto_rpc defaults jsonrpc on every batch item', async () => {
+    const { stub, get } = setup()
+    await get('venice_crypto_rpc').handler({
+      network: 'ethereum-mainnet',
+      request: [
+        { method: 'eth_chainId', id: 1 },
+        { jsonrpc: '2.0', method: 'eth_blockNumber', id: 2 },
+      ],
+    } as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, [
+      { jsonrpc: '2.0', method: 'eth_chainId', id: 1 },
+      { jsonrpc: '2.0', method: 'eth_blockNumber', id: 2 },
+    ])
+  })
+
+  it('venice_crypto_rpc passes by-name params through unchanged', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_crypto_rpc')
+    const schema = z.object(tool.inputSchema)
+    const params = { address: '0xabc', block: 'latest', options: { full: true } }
+
+    const convenience = schema.parse({ network: 'ethereum-mainnet', rpc_method: 'getBalance', rpc_params: params })
+    await tool.handler(convenience as never)
+    assert.deepEqual(stub.calls.at(-1)?.body, { jsonrpc: '2.0', method: 'getBalance', params, id: 1 })
+
+    const explicit = schema.parse({ network: 'ethereum-mainnet', request: { method: 'getBalance', params, id: 7 } })
+    await tool.handler(explicit as never)
+    assert.deepEqual((stub.calls.at(-1)?.body as { params?: unknown }).params, params)
+
+    const batch = schema.parse({
+      network: 'ethereum-mainnet',
+      request: [
+        { method: 'getBalance', params, id: 1 },
+        { method: 'getSlot', params: [], id: 2 },
+      ],
+    })
+    await tool.handler(batch as never)
+    assert.deepEqual((stub.calls.at(-1)?.body as Array<{ params?: unknown }>)[0].params, params)
+
+    assert.equal(schema.safeParse({ network: 'ethereum-mainnet', rpc_method: 'x', rpc_params: 'nope' }).success, false)
+  })
+
+  it('venice_crypto_rpc rejects network slugs that URL normalisation could resolve', () => {
+    const { get } = setup()
+    const rpcSchema = z.object(get('venice_crypto_rpc').inputSchema)
+    for (const network of [...UNSAFE_PATH_SEGMENTS, '-mainnet', 'Ethereum-Mainnet']) {
+      assert.equal(
+        rpcSchema.safeParse({ network, rpc_method: 'eth_chainId' }).success,
+        false,
+        `should reject network ${JSON.stringify(network)}`,
+      )
+    }
+    for (const network of ['ethereum-mainnet', 'base-sepolia', 'zksync-mainnet']) {
+      assert.equal(rpcSchema.safeParse({ network, rpc_method: 'eth_chainId' }).success, true)
+    }
+  })
+
+  it('character tools reject slugs that URL normalisation could resolve', () => {
+    const { get } = setup()
+    for (const name of ['venice_get_character', 'venice_character_reviews']) {
+      const schema = z.object(get(name).inputSchema)
+      for (const slug of UNSAFE_PATH_SEGMENTS) {
+        assert.equal(schema.safeParse({ slug }).success, false, `${name} should reject slug ${JSON.stringify(slug)}`)
+      }
+      for (const slug of ['alan-watts', 'venice', 'Some_Public-ID9']) {
+        assert.equal(schema.safeParse({ slug }).success, true, `${name} should accept slug ${slug}`)
+      }
+      assert.equal(schema.safeParse({ slug: 'a'.repeat(201) }).success, false)
+    }
+  })
+
+  it('venice_list_characters validates search length and merges the deprecated tag alias into tags', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_list_characters')
+    const schema = z.object(tool.inputSchema)
+    assert.equal(schema.safeParse({ search: 'a'.repeat(200) }).success, true)
+    assert.equal(schema.safeParse({ search: 'a'.repeat(201) }).success, false)
+    assert.equal(schema.safeParse({ tag: 'a'.repeat(100) }).success, true)
+    assert.equal(schema.safeParse({ tag: 'a'.repeat(101) }).success, false)
+    assert.match(tool.inputSchema.tag.description ?? '', /Deprecated: use tags/)
+
+    await tool.handler(schema.parse({ tag: 'legacy' }))
+    assert.equal(stub.calls.at(-1)?.path, '/v1/characters?tags=legacy')
+
+    await tool.handler(schema.parse({ tag: 'helpful', tags: ['helpful', 'productivity'] }))
+    assert.equal(stub.calls.at(-1)?.path, '/v1/characters?tags=helpful&tags=productivity')
+
+    await tool.handler(schema.parse({ tag: 'legacy', tags: ['helpful'] }))
+    assert.equal(stub.calls.at(-1)?.path, '/v1/characters?tags=helpful&tags=legacy')
+  })
+
+  it('truncates large character outputs to valid JSON', async () => {
+    const description = 'd'.repeat(500)
+    const stub = new StubClient({
+      '/v1/characters/alan-watts/reviews': () => ({
+        object: 'list',
+        data: Array.from({ length: 100 }, (_, i) => ({ id: i, message: `"quoted"\n${description}` })),
+        pagination: { page: 1, pageSize: 100, total: 100 },
+      }),
+      '/v1/characters/alan-watts': () => ({ data: { slug: 'alan-watts', description: description.repeat(40) } }),
+      '/v1/characters': () => ({ data: Array.from({ length: 100 }, (_, i) => ({ slug: `c${i}`, description })) }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const run = (name: string, args: unknown) => tools.find((t) => t.name === name)!.handler(args as never)
+    const text = (result: { content: unknown[] }) => (result.content[0] as { text: string }).text
+
+    const list = await run('venice_list_characters', { limit: 100 })
+    assert.ok(text(list).length <= 8000)
+    const listJson = JSON.parse(text(list)) as { truncated: boolean; returned: number; total: number; data: Array<{ slug: string }> }
+    assert.equal(listJson.truncated, true)
+    assert.equal(listJson.total, 100)
+    assert.ok(listJson.returned > 0 && listJson.returned < 100)
+    assert.equal(listJson.data.length, listJson.returned)
+    assert.deepEqual(listJson.data.at(-1), { slug: `c${listJson.returned - 1}`, description })
+    assert.deepEqual(list.structuredContent, { count: 100, truncated: true, returned: listJson.returned, total: 100 })
+
+    const character = await run('venice_get_character', { slug: 'alan-watts' })
+    assert.ok(text(character).length <= 8000)
+    const characterJson = JSON.parse(text(character)) as { truncated: boolean; data: { slug: string; description: string } }
+    assert.equal(characterJson.truncated, true)
+    assert.equal(characterJson.data.slug, 'alan-watts')
+    assert.match(characterJson.data.description, /^d+…\[truncated\]$/)
+    assert.deepEqual(character.structuredContent, { truncated: true })
+
+    const reviews = await run('venice_character_reviews', { slug: 'alan-watts', pageSize: 100 })
+    assert.ok(text(reviews).length <= 8000)
+    const reviewsJson = JSON.parse(text(reviews)) as {
+      truncated: boolean
+      data: Array<{ id: number; message: string }>
+      pagination: { total: number }
+    }
+    assert.equal(reviewsJson.truncated, true)
+    assert.ok(reviewsJson.data.length > 0 && reviewsJson.data.length < 100)
+    assert.deepEqual(reviewsJson.data.map((review) => review.id), [...reviewsJson.data.keys()])
+    assert.match(reviewsJson.data[0].message, /^"quoted"\nd+…\[truncated\]$/)
+    assert.equal(reviewsJson.pagination.total, 100)
+    assert.deepEqual(reviews.structuredContent, { truncated: true })
+  })
+
+  it('leaves small character outputs untouched', async () => {
+    const { get } = setup()
+    const list = await get('venice_list_characters').handler({} as never)
+    assert.deepEqual(JSON.parse((list.content[0] as { text: string }).text), [{ slug: 'sample', name: 'Sample' }])
+    assert.deepEqual(list.structuredContent, { count: 1 })
+    const character = await get('venice_get_character').handler({ slug: 'sample' } as never)
+    assert.deepEqual(JSON.parse((character.content[0] as { text: string }).text), { data: [{ slug: 'sample', name: 'Sample' }] })
+    assert.equal(character.structuredContent, undefined)
+  })
+
+  it('venice_crypto_rpc rejects ambiguous or missing request forms without calling upstream', async () => {
+    const { stub, get } = setup()
+    const tool = get('venice_crypto_rpc')
+
+    const both = await tool.handler({
+      network: 'ethereum-mainnet',
+      request: { method: 'eth_chainId' },
+      rpc_method: 'eth_blockNumber',
+    } as never)
+    assert.equal(both.isError, true)
+
+    const neither = await tool.handler({ network: 'ethereum-mainnet' } as never)
+    assert.equal(neither.isError, true)
+    assert.equal(stub.calls.length, 0)
+  })
+
+  it('character discovery rejects SIWX-only configuration locally without upstream calls', async () => {
+    const stub = new StubClient()
+    const siwxOnlyCfg = loadConfig({ VENICE_SIWX_TOKEN: 'siwx-test-token' })
+    const tools = buildTools(stub.asClient(), siwxOnlyCfg)
+    const calls = [
+      { name: 'venice_list_characters', args: {} },
+      { name: 'venice_get_character', args: { slug: 'alan-watts' } },
+      { name: 'venice_character_reviews', args: { slug: 'alan-watts', page: 1, pageSize: 20 } },
+    ]
+
+    for (const call of calls) {
+      const result = await tools.find((tool) => tool.name === call.name)!.handler(call.args as never)
+      assert.equal(result.isError, true, `${call.name} should return a local error`)
+      assert.match((result.content[0] as { text: string }).text, /VENICE_API_KEY is required/)
+    }
+    assert.equal(stub.calls.length, 0)
+  })
+
   it('venice_image_generate returns base64 image content + structuredContent.id', async () => {
     const { get } = setup()
     const r = await get('venice_image_generate').handler({ prompt: 'a cat' } as never)
@@ -2444,6 +2990,20 @@ describe('tool output shaping', () => {
       modelSchema.isOptional(),
       false,
       'venice_embeddings.model should be required'
+    )
+  })
+})
+
+describe('character discovery auth', () => {
+  it('forces API-key auth on character reads', async () => {
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((item) => item.name === 'venice_list_characters')!.handler({} as never)
+    await tools.find((item) => item.name === 'venice_get_character')!.handler({ slug: 'alice' } as never)
+    await tools.find((item) => item.name === 'venice_character_reviews')!.handler({ slug: 'alice' } as never)
+    assert.deepEqual(
+      stub.calls.map((call) => call.auth),
+      ['apiKey', 'apiKey', 'apiKey'],
     )
   })
 })

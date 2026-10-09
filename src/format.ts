@@ -211,10 +211,127 @@ export function formatToolError(err: unknown): string {
   return `Error: ${String(err)}`
 }
 
+const MAX_TEXT_CHARS = 8000
+const TRUNCATION_MARKER = '…[truncated]'
+const MIN_SHORTENED_STRING_CHARS = 32
+// Only these keys hold free text; anything else (ids, slugs, URLs, addresses, hashes) must stay byte-exact.
+const PROSE_KEYS = new Set([
+  'bio',
+  'body',
+  'content',
+  'description',
+  'firstmessage',
+  'first_message',
+  'greeting',
+  'instructions',
+  'message',
+  'prompt',
+  'summary',
+  'systemprompt',
+  'system_prompt',
+  'text',
+])
+
 /** Truncate large strings for safe inclusion in tool responses. */
-export function truncate(s: string, max = 8000): string {
+export function truncate(s: string, max = MAX_TEXT_CHARS): string {
   if (s.length <= max) return s
   return `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`
+}
+
+/**
+ * Pretty-print a list as JSON within `max` chars by dropping whole trailing items.
+ * When items are dropped the output becomes `{ truncated, returned, total, data }`.
+ * If even the first item is too large, its prose fields are shortened so it can still be returned.
+ */
+export function fitJsonList(items: unknown[], max = MAX_TEXT_CHARS): { text: string; returned: number; truncated: boolean } {
+  const full = JSON.stringify(items, null, 2)
+  if (full.length <= max) return { text: full, returned: items.length, truncated: false }
+  const envelope = (data: unknown[]) => ({ truncated: true, returned: data.length, total: items.length, data })
+  const render = (n: number) => JSON.stringify(envelope(items.slice(0, n)), null, 2)
+  let lo = 0
+  let hi = items.length - 1
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (render(mid).length <= max) lo = mid
+    else hi = mid - 1
+  }
+  if (lo === 0 && items.length > 0) {
+    const root = envelope([JSON.parse(JSON.stringify(items[0])) as unknown])
+    if (shortenProse(root, max) <= max) return { text: JSON.stringify(root, null, 2), returned: 1, truncated: true }
+  }
+  return { text: render(lo), returned: lo, truncated: true }
+}
+
+/**
+ * Shorten the longest prose strings in `root` in place until its pretty-printed JSON fits `max`
+ * or nothing more can be shortened. Returns the resulting length.
+ */
+function shortenProse(root: unknown, max: number): number {
+  const leaves: Array<{ holder: Record<string, unknown>; key: string; value: string }> = []
+  const walk = (node: unknown): void => {
+    if (!isObject(node)) return
+    for (const [key, child] of Object.entries(node)) {
+      if (typeof child === 'string') {
+        if (!Array.isArray(node) && PROSE_KEYS.has(key.toLowerCase())) leaves.push({ holder: node, key, value: child })
+      } else walk(child)
+    }
+  }
+  walk(root)
+  leaves.sort((a, b) => b.value.length - a.value.length)
+
+  let size = JSON.stringify(root, null, 2).length
+  for (const leaf of leaves) {
+    if (size <= max || leaf.value.length <= MIN_SHORTENED_STRING_CHARS) break
+    const keep = Math.max(MIN_SHORTENED_STRING_CHARS, leaf.value.length - (size - max) - TRUNCATION_MARKER.length)
+    const shortened = `${leaf.value.slice(0, keep)}${TRUNCATION_MARKER}`
+    if (shortened.length >= leaf.value.length) continue
+    size -= JSON.stringify(leaf.value).length - JSON.stringify(shortened).length
+    leaf.holder[leaf.key] = shortened
+  }
+  return size
+}
+
+/**
+ * Pretty-print a value as JSON within `max` chars by shortening its longest prose strings
+ * (see PROSE_KEYS), then dropping trailing items from its largest arrays if that is not enough.
+ * Other strings are never modified. Object roots gain `truncated: true` when anything was shortened or dropped.
+ */
+export function fitJson(value: unknown, max = MAX_TEXT_CHARS): { text: string; truncated: boolean } {
+  const full = JSON.stringify(value, null, 2)
+  if (full.length <= max) return { text: full, truncated: false }
+
+  const parsed: unknown = JSON.parse(full)
+  const root = isObject(parsed) && !Array.isArray(parsed) ? { ...parsed, truncated: true } : parsed
+  if (shortenProse(root, max) <= max) return { text: JSON.stringify(root, null, 2), truncated: true }
+
+  const arrays: unknown[][] = []
+  const collect = (node: unknown): void => {
+    if (!isObject(node)) return
+    if (Array.isArray(node)) arrays.push(node)
+    for (const child of Object.values(node)) collect(child)
+  }
+  collect(root)
+  arrays.sort((a, b) => JSON.stringify(b).length - JSON.stringify(a).length)
+  for (const array of arrays) {
+    const items = array.slice()
+    const fits = (n: number) => {
+      array.length = 0
+      for (let i = 0; i < n; i++) array.push(items[i])
+      return JSON.stringify(root, null, 2).length <= max
+    }
+    let lo = 0
+    let hi = items.length - 1
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2)
+      if (fits(mid)) lo = mid
+      else hi = mid - 1
+    }
+    if (fits(lo)) return { text: JSON.stringify(root, null, 2), truncated: true }
+  }
+  return {
+    text: JSON.stringify({ truncated: true, error: `Response exceeds ${max} characters even after truncation.` }, null, 2),
+    truncated: true,
+  }
 }
 
 export const ASR_TIMESTAMP_DEFAULT_LIMIT = 200

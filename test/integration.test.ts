@@ -105,6 +105,25 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
         },
       },
       {
+        match: 'GET /v1/crypto/rpc/networks',
+        reply: ({ headers }) => ({
+          networks: ['base-mainnet', 'ethereum-mainnet'],
+          receivedAuth: headers.authorization ?? headers['sign-in-with-x'] ?? null,
+        }),
+      },
+      {
+        match: 'POST /v1/crypto/rpc/ethereum-mainnet',
+        reply: ({ body }) => body,
+      },
+      {
+        match: 'GET /v1/characters/alan-watts',
+        reply: { object: 'character', data: { slug: 'alan-watts', name: 'Alan Watts' } },
+      },
+      {
+        match: 'GET /v1/characters/alan-watts/reviews?page=2&pageSize=10',
+        reply: { object: 'list', data: [], pagination: { page: 2, pageSize: 10, total: 0, totalPages: 0 } },
+      },
+      {
         match: 'GET /v1/models?type=tts',
         reply: {
           data: [{
@@ -315,10 +334,10 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 42 tools over JSON-RPC', async () => {
+  it('lists 45 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 42)
+    assert.equal(list.length, 45)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
@@ -327,6 +346,9 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(names.includes('venice_model_traits'))
     assert.ok(names.includes('venice_model_compatibility_mapping'))
     assert.ok(names.includes('venice_x402_balance'))
+    assert.ok(names.includes('venice_crypto_networks'))
+    assert.ok(names.includes('venice_get_character'))
+    assert.ok(names.includes('venice_character_reviews'))
     assert.ok(names.includes('venice_billing_usage_history'))
     assert.equal(names.includes('venice_web3_key_challenge'), false)
     assert.equal(names.includes('venice_web3_key_mint'), false)
@@ -423,7 +445,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.match(attestationCall.path, /model=e2ee-model/)
     assert.match(attestationCall.path, new RegExp(`nonce=${'a'.repeat(64)}`))
     assert.equal(attestationCall.headers.authorization, undefined)
-    assert.equal(attestationCall.headers['x-sign-in-with-x'], undefined)
+    assert.equal(attestationCall.headers['sign-in-with-x'], undefined)
 
     const signature = (await rpc.request('tools/call', {
       name: 'venice_tee_signature',
@@ -500,6 +522,66 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(jsonResult.structuredContent.status, 'COMPLETED')
     assert.equal(jsonResult.structuredContent.url, 'https://stub/v.mp4')
     assert.equal(jsonResult.content.find((item) => item.type === 'resource_link')?.uri, 'https://stub/v.mp4')
+  })
+
+  it('discovers crypto networks without forwarding configured auth', async () => {
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_crypto_networks',
+      arguments: {},
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as {
+      structuredContent?: { networks?: string[]; count?: number }
+    }
+    assert.deepEqual(result.structuredContent?.networks, ['base-mainnet', 'ethereum-mainnet'])
+    assert.equal(result.structuredContent?.count, 2)
+    const call = venice.calls.find((entry) => entry.path === '/v1/crypto/rpc/networks')
+    assert.equal(call?.headers.authorization, undefined)
+    assert.equal(call?.headers['sign-in-with-x'], undefined)
+  })
+
+  it('forwards crypto JSON-RPC batches through MCP unchanged', async () => {
+    const request = [
+      { jsonrpc: '2.0', method: 'eth_chainId', params: [], id: 1 },
+      { jsonrpc: '2.0', method: 'eth_blockNumber', params: [], id: 2 },
+    ]
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_crypto_rpc',
+      arguments: { network: 'ethereum-mainnet', request },
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const call = venice.calls.find((entry) => entry.path === '/v1/crypto/rpc/ethereum-mainnet')
+    assert.deepEqual(call?.body, request)
+  })
+
+  it('calls character get and reviews routes with API-key auth', async () => {
+    for (const call of [
+      { name: 'venice_get_character', arguments: { slug: 'alan-watts' } },
+      { name: 'venice_character_reviews', arguments: { slug: 'alan-watts', page: 2, pageSize: 10 } },
+    ]) {
+      const r = (await rpc.request('tools/call', call)) as RpcResult
+      assert.equal(r.error, undefined)
+    }
+    const characterCalls = venice.calls.filter((entry) => entry.path.startsWith('/v1/characters/'))
+    assert.equal(characterCalls.length, 2)
+    for (const call of characterCalls) {
+      assert.equal(call.headers.authorization, 'Bearer vk_integration')
+      assert.equal(call.headers['sign-in-with-x'], undefined)
+    }
+  })
+
+  it('rejects dot-segment slugs and networks before contacting Venice', async () => {
+    const callsBefore = venice.calls.length
+    for (const call of [
+      { name: 'venice_get_character', arguments: { slug: '..' } },
+      { name: 'venice_character_reviews', arguments: { slug: '.' } },
+      { name: 'venice_crypto_rpc', arguments: { network: '..', rpc_method: 'eth_chainId' } },
+    ]) {
+      const r = (await rpc.request('tools/call', call)) as RpcResult
+      const result = r.result as { isError?: boolean } | undefined
+      assert.ok(r.error !== undefined || result?.isError === true, `${call.name} should reject ${JSON.stringify(call.arguments)}`)
+    }
+    assert.equal(venice.calls.length, callsBefore)
   })
 
   it('walks billing usage history through MCP with nextCursor metadata', async () => {
@@ -722,6 +804,22 @@ describe('integration — x402-only mode (no API key)', () => {
       const result = r.result as { isError?: boolean; content: Array<{ text: string }> }
       assert.equal(result.isError, true, `${name} should fail`)
       assert.match(result.content[0].text, /VENICE_API_KEY is required/, `${name} safe error`)
+    }
+    assert.equal(venice.calls.length, callsBefore)
+  })
+
+  it('rejects all character discovery locally without an API key', async () => {
+    const callsBefore = venice.calls.length
+    for (const call of [
+      { name: 'venice_list_characters', arguments: {} },
+      { name: 'venice_get_character', arguments: { slug: 'alan-watts' } },
+      { name: 'venice_character_reviews', arguments: { slug: 'alan-watts' } },
+    ]) {
+      const r = (await rpc.request('tools/call', call)) as RpcResult
+      assert.equal(r.error, undefined)
+      const result = r.result as { isError?: boolean; content: Array<{ text: string }> }
+      assert.equal(result.isError, true)
+      assert.match(result.content[0].text, /VENICE_API_KEY is required/)
     }
     assert.equal(venice.calls.length, callsBefore)
   })

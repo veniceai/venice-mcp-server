@@ -21,6 +21,7 @@ export class VeniceUpstreamError extends Error {
   }
 }
 
+
 export interface VeniceMessage {
   role: 'system' | 'user' | 'assistant'
   content: string

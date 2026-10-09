@@ -13,7 +13,7 @@ export interface RequestInitJSON {
   auth?: 'default' | 'apiKey' | 'siwx' | 'none'
   /** Require and return an upstream SSE response as one unmodified UTF-8 string. */
   responseType?: 'auto' | 'event-stream'
-  /** Reject the response once its body exceeds this many bytes. */
+  /** Deprecated alias for `maxBytes`. */
   maxResponseBytes?: number
   /** Reject a successful response body larger than this many bytes. */
   maxBytes?: number
@@ -48,6 +48,8 @@ export class VeniceResponseTooLargeError extends Error {
   constructor(
     readonly path: string,
     readonly maxBytes: number,
+    /** Response headers, when known; crypto RPC reads billing headers from an oversized reply. */
+    readonly headers: Record<string, string> = {},
   ) {
     super(`Venice response on ${path} exceeds the configured ${maxBytes}-byte limit`)
     this.name = 'VeniceResponseTooLargeError'
@@ -149,10 +151,18 @@ export class VeniceClient {
       contentType = res.headers.get('content-type') ?? ''
       const maxBytes = init.maxBytes ?? init.maxResponseBytes
       if (!res.ok) throw await upstreamError(res, path, maxBytes)
-      const text =
-        maxBytes !== undefined
-          ? (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
-          : await res.text()
+      let text: string
+      try {
+        text =
+          maxBytes !== undefined
+            ? (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
+            : await res.text()
+      } catch (err) {
+        if (err instanceof VeniceResponseTooLargeError) {
+          throw new VeniceResponseTooLargeError(path, err.maxBytes, responseHeaders(res))
+        }
+        throw err
+      }
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
       init.onResponse?.({ status: res.status, headers: responseHeaders(res) })
       if (init.responseType === 'event-stream') {
@@ -201,6 +211,17 @@ export class VeniceClient {
     opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse' | 'maxBytes' | 'maxResponseBytes' | 'responseType'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'POST', json, headers, ...opts })
+  }
+
+  /** POST request with JSON body, also returning the (lower-cased) response headers. */
+  async postWithHeaders<T = unknown>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxBytes' | 'maxResponseBytes' | 'responseType'> = {},
+  ): Promise<{ body: T; headers: Record<string, string> }> {
+    const response = await this.requestWithMetadata<T>(path, { method: 'POST', json, headers, ...opts })
+    return { body: response.data, headers: response.headers }
   }
 
   /** POST JSON while retaining response metadata such as Venice extension headers. */
