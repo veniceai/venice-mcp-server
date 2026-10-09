@@ -3,14 +3,15 @@ import assert from 'node:assert/strict'
 import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
+import { VeniceUpstreamError } from '../src/types.js'
+import { VeniceResponseTooLargeError } from '../src/venice-client.js'
 import { StubClient } from './helpers/stub-client.js'
 import { TOOL_ANNOTATIONS } from '../src/tools/annotations.js'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
-
-function setup() {
+function setup(config = cfg) {
   const stub = new StubClient()
-  const tools = buildTools(stub.asClient(), cfg)
+  const tools = buildTools(stub.asClient(), config)
   const get = (name: string): ToolDef => {
     const t = tools.find((x) => x.name === name)
     if (!t) throw new Error(`tool not found: ${name}`)
@@ -20,12 +21,17 @@ function setup() {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented set (33 tools)', () => {
+  it('registers exactly the documented default set (40 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
       'venice_asr',
       'venice_audio_quote',
+      'venice_api_key_rate_limit_logs',
+      'venice_api_key_rate_limits',
+      'venice_billing_balance',
+      'venice_billing_usage_analytics',
+      'venice_billing_usage_history',
       'venice_chat',
       'venice_chat_with_character',
       'venice_crypto_rpc',
@@ -36,6 +42,8 @@ describe('tools registry', () => {
       'venice_image_remove_bg',
       'venice_image_styles',
       'venice_image_upscale',
+      'venice_get_api_key',
+      'venice_list_api_keys',
       'venice_list_characters',
       'venice_list_models',
       'venice_model_details',
@@ -59,7 +67,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 33)
+    assert.equal(tools.length, 40)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -106,6 +114,44 @@ describe('tools registry', () => {
     assert.match(get('venice_list_characters').description, /API key required/i)
     // chat_with_character notes the discovery limitation
     assert.match(get('venice_chat_with_character').description, /API[- ]key/i)
+  })
+
+  it('billing and operator API-key tools call out API-key-only requirements', () => {
+    const { get } = setup()
+    for (const name of [
+      'venice_billing_balance',
+      'venice_billing_usage_analytics',
+      'venice_billing_usage_history',
+      'venice_list_api_keys',
+      'venice_get_api_key',
+      'venice_api_key_rate_limit_logs',
+    ]) {
+      assert.match(get(name).description, /ADMIN API key required/i, `${name} admin description`)
+    }
+    for (const name of ['venice_api_key_rate_limits']) {
+      assert.match(get(name).description, /API key required/i, `${name} auth description`)
+      assert.doesNotMatch(get(name).description, /ADMIN API key required/i, `${name} allows inference keys`)
+    }
+  })
+
+  it('all API_KEY_ONLY discovery and read tools force explicit API-key auth', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['venice_list_characters', { limit: 3 }],
+      ['venice_billing_balance', {}],
+      ['venice_billing_usage_analytics', { lookback: '7d' }],
+      ['venice_billing_usage_history', { page_size: 10 }],
+      ['venice_list_api_keys', {}],
+      ['venice_get_api_key', { id: 'key-1' }],
+      ['venice_api_key_rate_limits', {}],
+      ['venice_api_key_rate_limit_logs', {}],
+    ]
+    for (const [name, args] of cases) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === name)!
+      await tool.handler(args as never)
+      assert.equal(stub.calls.length, 1, `${name} request count`)
+      assert.equal(stub.calls[0].auth, 'apiKey', `${name} auth mode`)
+    }
   })
 
   it('TEE tools advertise auth-free access and caller-side verification', () => {
@@ -475,12 +521,58 @@ const MAPPINGS: Mapping[] = [
     expectBodyContains: { venice_parameters: { character_slug: 'alice' } },
   },
 
+  // billing
+  { tool: 'venice_billing_balance', args: {}, expectMethod: 'GET', expectPath: '/v1/billing/balance' },
+  {
+    tool: 'venice_billing_usage_analytics',
+    args: { start_date: '2026-08-01', end_date: '2026-08-10' },
+    expectMethod: 'GET',
+    expectPath: '/v1/billing/usage-analytics?startDate=2026-08-01&endDate=2026-08-10',
+  },
+  {
+    tool: 'venice_billing_usage_history',
+    args: {
+      currency: 'DIEM',
+      start_timestamp: '2026-08-01T00:00:00.000Z',
+      page_size: 100,
+    },
+    expectMethod: 'GET',
+    expectPath: '/v1/billing/usage-history?currency=DIEM&startTimestamp=2026-08-01T00%3A00%3A00.000Z&pageSize=100',
+  },
+
+  // API keys
+  { tool: 'venice_list_api_keys', args: {}, expectMethod: 'GET', expectPath: '/v1/api_keys' },
+  {
+    tool: 'venice_get_api_key',
+    args: { id: 'key/id' },
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/key%2Fid',
+  },
+  {
+    tool: 'venice_api_key_rate_limits',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/rate_limits',
+  },
+  {
+    tool: 'venice_api_key_rate_limit_logs',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/rate_limits/log',
+  },
   // x402 helpers
   {
     tool: 'venice_x402_balance',
     args: { wallet_address: '0x' + 'a'.repeat(40) },
     expectMethod: 'GET',
     expectPath: `/v1/x402/balance/0x${'a'.repeat(40)}`,
+  },
+  {
+    tool: 'venice_x402_top_up_info',
+    args: {},
+    expectMethod: 'POST',
+    expectPath: '/v1/x402/top-up',
+    expectBodyContains: {},
   },
   {
     tool: 'venice_x402_transactions',
@@ -535,6 +627,123 @@ describe('tools endpoint + method mapping', () => {
       }
     })
   }
+})
+
+describe('billing input validation and output size', () => {
+  it('rejects impossible calendar dates and timestamps', () => {
+    const { get } = setup()
+    const analytics = z.object(get('venice_billing_usage_analytics').inputSchema)
+    for (const date of ['2026-13-45', '2026-02-30', '2026-00-10', '2025-02-29']) {
+      assert.equal(analytics.safeParse({ start_date: date, end_date: '2026-12-31' }).success, false, date)
+    }
+    assert.equal(analytics.safeParse({ start_date: '2028-02-29', end_date: '2028-03-01' }).success, true)
+
+    const history = z.object(get('venice_billing_usage_history').inputSchema)
+    for (const ts of ['2026-02-30T00:00:00Z', '2026-01-01T25:00:00Z', '2026-13-01T00:00:00Z']) {
+      assert.equal(history.safeParse({ start_timestamp: ts }).success, false, ts)
+    }
+  })
+
+  it('rejects an analytics start_date later than end_date', async () => {
+    const { get, stub } = setup()
+    const analytics = get('venice_billing_usage_analytics')
+    const reversed = await analytics.handler({ start_date: '2026-08-02', end_date: '2026-08-01' } as never)
+    assert.equal(reversed.isError, true)
+    assert.match((reversed.content[0] as { text: string }).text, /start_date cannot be later than end_date/)
+    assert.equal(stub.calls.length, 0)
+    const sameDay = await analytics.handler({ start_date: '2026-08-01', end_date: '2026-08-01' } as never)
+    assert.equal(sameDay.isError, undefined)
+  })
+
+  it('caps plain cursors at 512 characters and allows the csv: prefix on top', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_billing_usage_history').inputSchema)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(512) }).success, true)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(513) }).success, false)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(516) }).success, false)
+    assert.equal(schema.safeParse({ cursor: `csv:${'a'.repeat(512)}` }).success, true)
+    assert.equal(schema.safeParse({ cursor: `csv:${'a'.repeat(513)}` }).success, false)
+    assert.equal(schema.safeParse({ cursor: 'csv:' }).success, false)
+    assert.equal(schema.safeParse({ cursor: '' }).success, false)
+  })
+
+  it('returns complete usage-history JSON and CSV pages beyond the old 8K cutoff', async () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      timestamp: '2026-08-01T00:00:00Z', amount: -0.1, sku: `model-${i}`, notes: 'n'.repeat(600),
+    }))
+    const jsonStub = new StubClient({ '/v1/billing/usage-history': () => ({ data: rows, nextCursor: 'next' }) })
+    const jsonTool = buildTools(jsonStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const json = await jsonTool.handler({ page_size: 20 })
+    assert.equal(json.isError, undefined)
+    const jsonText = (json.content[0] as { text: string }).text
+    assert.ok(jsonText.length > 8000)
+    assert.deepEqual(JSON.parse(jsonText), { data: rows, nextCursor: 'next' })
+    assert.deepEqual(json.structuredContent, { format: 'json', count: 20, nextCursor: 'next', truncated: false })
+
+    const csvBody = `timestamp,amount,notes\r\n${rows.map((r) => `${r.timestamp},${r.amount},"line one\n${r.notes}"`).join('\r\n')}`
+    const csvStub = new StubClient({ '/v1/billing/usage-history': () => csvBody })
+    const csvTool = buildTools(csvStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const csv = await csvTool.handler({ format: 'csv', page_size: 20 })
+    assert.equal(csv.isError, undefined)
+    assert.equal((csv.content[0] as { text: string }).text, csvBody)
+    assert.equal(csv.structuredContent?.nextCursor, 'csv:stub-next-cursor')
+    assert.equal(csv.structuredContent?.truncated, false)
+  })
+
+  it('defaults billing first pages to ten rows without modifying cursor continuations', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+    await history.handler({})
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?pageSize=10')
+    await history.handler({ cursor: 'next' })
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=next')
+    assert.equal(stub.calls.at(-1)?.maxBytes, 64 * 1024)
+  })
+
+  it('rejects oversized billing pages without returning partial records or a continuation cursor', async () => {
+    for (const format of ['json', 'csv']) {
+      const marker = 'private-ledger-record'
+      const body = format === 'json'
+        ? { data: [{ notes: marker + '🙂'.repeat(20_000) }], nextCursor: 'after-omitted-rows' }
+        : `notes\n"${marker}${'🙂'.repeat(20_000)}"`
+      const stub = new StubClient({ '/v1/billing/usage-history': () => body })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+      const result = await tool.handler({ format })
+      assert.equal(result.isError, true, format)
+      assert.equal(result.structuredContent, undefined)
+      const text = (result.content[0] as { text: string }).text
+      assert.match(text, /64 KiB/)
+      assert.match(text, /smaller page_size/)
+      assert.doesNotMatch(text, new RegExp(`${marker}|after-omitted-rows|stub-next-cursor`))
+    }
+  })
+
+  it('applies the billing output limit in bytes with an inclusive boundary', async () => {
+    for (const extraBytes of [0, 1]) {
+      const csv = 'notes\n' + 'x'.repeat(64 * 1024 - 6 + extraBytes)
+      const stub = new StubClient({ '/v1/billing/usage-history': () => csv })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+      const result = await tool.handler({ format: 'csv' })
+      if (extraBytes === 0) {
+        assert.equal(result.isError, undefined)
+        assert.equal((result.content[0] as { text: string }).text, csv)
+      } else {
+        assert.equal(result.isError, true)
+        assert.equal(result.structuredContent, undefined)
+      }
+    }
+  })
+
+  it('handles the HTTP response-size rejection without exposing a cursor', async () => {
+    const stub = new StubClient({ '/v1/billing/usage-history': () => {
+      throw new VeniceResponseTooLargeError('/v1/billing/usage-history', 64 * 1024)
+    } })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const result = await tool.handler({ cursor: 'next' })
+    assert.equal(result.isError, true)
+    assert.equal(result.structuredContent, undefined)
+    assert.match((result.content[0] as { text: string }).text, /same cursor/)
+  })
 })
 
 
@@ -1618,6 +1827,99 @@ describe('tool output shaping', () => {
     assert.equal(stub.calls.at(-1)?.auth, 'siwx')
   })
 
+  it('accepts EVM and Solana addresses on all x402 helpers and preserves Solana case', async () => {
+    const { get } = setup()
+    const evm = `0x${'A'.repeat(40)}`
+    const solana = 'So11111111111111111111111111111111111111112'
+    for (const name of ['venice_x402_balance', 'venice_x402_transactions']) {
+      const schema = z.object(get(name).inputSchema)
+      assert.equal(schema.safeParse({ wallet_address: evm }).success, true, `${name} EVM`)
+      assert.equal(schema.safeParse({ wallet_address: solana }).success, true, `${name} Solana`)
+      assert.equal(schema.safeParse({ wallet_address: 'not-a-wallet' }).success, false, `${name} invalid`)
+    }
+
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_x402_balance')!
+    await tool.handler({ wallet_address: solana } as never)
+    assert.equal(stub.calls.at(-1)?.path, `/v1/x402/balance/${solana}`)
+  })
+
+  it('uses cursor-only continuation and exposes JSON and CSV next cursors', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+
+    const invalid = await history.handler({ cursor: 'cursor_1', currency: 'USD' } as never)
+    assert.equal(invalid.isError, true)
+    assert.equal(stub.calls.length, 0)
+
+    const json = await history.handler({ cursor: 'cursor_1' } as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=cursor_1')
+    assert.equal(json.structuredContent?.nextCursor, 'stub-next-cursor')
+
+    const csvStub = new StubClient({
+      '/v1/billing/usage-history': () => 'timestamp,amount\n2026-08-01T00:00:00.000Z,-0.1',
+    })
+    const csvTool = buildTools(csvStub.asClient(), cfg).find(
+      (tool) => tool.name === 'venice_billing_usage_history',
+    )!
+    const csv = await csvTool.handler({ format: 'csv', page_size: 50 } as never)
+    assert.equal(csvStub.calls.at(-1)?.headers?.Accept, 'text/csv')
+    assert.equal(csv.structuredContent?.nextCursor, 'csv:stub-next-cursor')
+    assert.match((csv.content[0] as { text: string }).text, /timestamp,amount/)
+
+    const continued = await csvTool.handler({ cursor: csv.structuredContent?.nextCursor as string } as never)
+    assert.equal(csvStub.calls.at(-1)?.headers?.Accept, 'text/csv')
+    assert.equal(csvStub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=stub-next-cursor')
+    assert.equal(continued.structuredContent?.format, 'csv')
+  })
+
+  it('validates analytics filter combinations before making a request', async () => {
+    const { get, stub } = setup()
+    const analytics = get('venice_billing_usage_analytics')
+    assert.equal(
+      (await analytics.handler({ lookback: '7d', start_date: '2026-08-01', end_date: '2026-08-02' } as never)).isError,
+      true,
+    )
+    assert.equal((await analytics.handler({ lookback: '91d' } as never)).isError, true)
+    assert.equal((await analytics.handler({ start_date: '2026-08-01' } as never)).isError, true)
+    assert.equal(stub.calls.length, 0)
+  })
+
+  it('accepts high-precision RFC3339 timestamps on usage-history filters', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+    const schema = z.object(history.inputSchema)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.123456Z' }).success, true)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.1Z' }).success, true)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.123456789Z' }).success, true)
+
+    const result = await history.handler({
+      start_timestamp: '2026-08-01T00:00:00.123456Z',
+      end_timestamp: '2026-08-02T00:00:00.1Z',
+    } as never)
+    assert.equal(result.isError, undefined)
+    assert.equal(
+      stub.calls.at(-1)?.path,
+      '/v1/billing/usage-history?startTimestamp=2026-08-01T00%3A00%3A00.123456Z&endTimestamp=2026-08-02T00%3A00%3A00.1Z&pageSize=10',
+    )
+  })
+
+  it('redacts unexpected secret fields from operator API-key reads', async () => {
+    const secret = 'vk_should_not_escape'
+    const stub = new StubClient({
+      '/v1/api_keys': () => ({
+        object: 'list',
+        data: [{ id: 'key-1', last6Chars: 'escape', apiKey: secret, token: 'token-secret' }],
+      }),
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_list_api_keys')!
+    const result = await tool.handler({} as never)
+    const text = (result.content[0] as { text: string }).text
+    assert.doesNotMatch(text, new RegExp(secret))
+    assert.doesNotMatch(text, /token-secret/)
+    assert.match(text, /\[REDACTED\]/)
+  })
+
   it('venice_asr reports timeout when fetching audio_url stalls', async () => {
     const originalFetch = globalThis.fetch
     try {
@@ -1656,6 +1958,50 @@ describe('tool output shaping', () => {
       false,
       'venice_embeddings.model should be required'
     )
+  })
+})
+
+describe('x402 top-up discovery auth', () => {
+  it('posts an empty unauthenticated body so a configured API key is not forwarded', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
+    assert.deepEqual(Object.keys(tool.inputSchema), [])
+    assert.doesNotMatch(tool.description, /validated locally/)
+    await tool.handler({} as never)
+    const call = stub.calls.at(-1)
+    assert.equal(call?.path, '/v1/x402/top-up')
+    assert.deepEqual(call?.body, {})
+    assert.equal(call?.auth, 'none')
+  })
+
+  it('returns the documented Base and Solana payment options from the 402 body', async () => {
+    const base = {
+      scheme: 'exact',
+      network: 'eip155:8453',
+      amount: '5000000',
+      asset: '0xUSDC',
+      payTo: '0xRECEIVER',
+      maxTimeoutSeconds: 300,
+      extra: { name: 'USD Coin', version: '2' },
+    }
+    const solana = { ...base, network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', asset: 'MINT', payTo: 'SOLRECEIVER' }
+    const stub = new StubClient({
+      '/v1/x402/top-up': () => {
+        throw new VeniceUpstreamError({
+          message: 'pay',
+          status: 402,
+          body: { x402Version: 2, accepts: [{ ...base, internal: 'drop-me' }, solana], debug: 'drop-me' },
+        })
+      },
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
+    const result = await tool.handler({} as never)
+    assert.equal(result.isError, undefined)
+    assert.deepEqual(result.structuredContent, { x402Version: 2, accepts: [base, solana] })
+    const text = (result.content[0] as { text: string }).text
+    assert.match(text, /eip155:8453/)
+    assert.match(text, /solana:/)
+    assert.doesNotMatch(text, /drop-me/)
   })
 })
 
