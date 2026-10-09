@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **34 tools across all modalities, one config block.**
+Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **36 tools across all modalities, one config block.**
 
 ## Quick start
 
@@ -31,12 +31,12 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
 
 ### 3. Restart your MCP host
 
-That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 29 more Venice tools.
+That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 30 more Venice tools.
 
 
 ## What you get
 
-**34 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**36 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
 
 Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` annotations, so hosts can run lookups without prompting and ask before anything destructive, like media cleanup or a crypto relay.
 
@@ -44,8 +44,8 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 | Tool | Description |
 |---|---|
-| `venice_chat` | OpenAI-compatible chat completion against Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored, etc.). Supports `venice_parameters` for web search, citations, characters, and system prompt or reasoning control. |
-| `venice_responses` | OpenAI-compatible Responses API. Single-turn or multi-turn with tool support. Supports `venice_parameters`. |
+| `venice_chat` | Chat completions with documented text/image/audio/video/file blocks, structured response formats, function tools, prompt caching, and reasoning controls. Calls are plaintext and non-streaming. |
+| `venice_responses` | Alpha, stateless Responses API for text models. Supports text/image input and reasoning controls. E2EE-capable models are not supported, and this tool does not expose unreliable tool fields. |
 | `venice_embeddings` | Compute embeddings for text input (OpenAI-compatible). |
 | `venice_chat_with_character` | Chat with a Venice character by slug. |
 
@@ -103,6 +103,15 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 | `venice_list_characters` | List public Venice characters with search, tag/category/model, content, capability, sort, and pagination filters. API key only. |
 | `venice_get_character` | Get a public character by slug. API key only. |
 | `venice_character_reviews` | List paginated public reviews for a character. API key only. |
+
+### 🔐 TEE attestation
+
+| Tool | Description |
+|---|---|
+| `venice_tee_attestation` | Fetch Intel TDX attestation evidence, optional NVIDIA evidence, and the model signing key using a caller-generated 32-byte nonce. |
+| `venice_tee_signature` | Fetch the enclave response-signature payload for a chat completion request ID. |
+
+Both routes are currently live without authentication. They only apply to text models advertising `supportsTeeAttestation`. These tools expose evidence; they do not verify it, and this server does not encrypt chat. `venice_chat` rejects `enable_e2ee`.
 
 ### Media API behavior
 
@@ -247,7 +256,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 34 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 36 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -304,6 +313,8 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_audio_quote` | `POST /v1/audio/quote` |
 | `venice_video_quote` | `POST /v1/video/quote` |
 | `venice_crypto_networks` | `GET /v1/crypto/rpc/networks` |
+| `venice_tee_attestation` | `GET /v1/tee/attestation?model=:model&nonce=:64_hex_chars` |
+| `venice_tee_signature` | `GET /v1/tee/signature?model=:model&request_id=:completion_id` |
 
 ### Characters (API key only)
 
@@ -345,7 +356,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # 31 tool registry + endpoint+method+body mappings
+├── tools.test.ts              # 36 tool registry + endpoint+method+body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub
@@ -368,7 +379,7 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 34 tools × both auth modes, side-by-side report
+# Comprehensive — all 36 tools × both auth modes, side-by-side report
 VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 
@@ -385,7 +396,7 @@ Not in this server. You sign the SIWE message + USDC top-up authorizations in yo
 $5 USD (anti-dust). Minimum balance to call inference is $0.10. Default suggested top-up is $10.
 
 **Privacy guarantees?**
-No email, phone, or KYC if you go the SIWX path. The wallet ↔ credit account mapping is the only identity link. The MCP server itself does not log prompts or responses. Combine with `X-Venice-TEE-Required: 1` (passed through by your client) to also run inference inside Intel TDX + NVIDIA NRAS confidential compute.
+No email, phone, or KYC is required on the SIWX path. `venice_tee_attestation` and `venice_tee_signature` return hardware evidence for the caller to verify. This server does not encrypt chat.
 
 **DIEM staking?**
 If your wallet is linked to a Venice user with DIEM staked, calls consume from the staking balance instead of USDC credits — no top-up needed.
