@@ -21,7 +21,7 @@ function setup(config = cfg) {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented default set (40 tools)', () => {
+  it('registers exactly the documented default set (42 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
@@ -46,7 +46,9 @@ describe('tools registry', () => {
       'venice_list_api_keys',
       'venice_list_characters',
       'venice_list_models',
+      'venice_model_compatibility_mapping',
       'venice_model_details',
+      'venice_model_traits',
       'venice_music_complete',
       'venice_music_generate',
       'venice_music_status',
@@ -67,7 +69,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 40)
+    assert.equal(tools.length, 42)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -387,10 +389,10 @@ const MAPPINGS: Mapping[] = [
   // audio (TTS / ASR / voices)
   {
     tool: 'venice_tts',
-    args: { input: 'hello' },
+    args: { input: 'hello', temperature: 0.7, streaming: true },
     expectMethod: 'POST',
     expectPath: '/v1/audio/speech',
-    expectBodyContains: { input: 'hello' },
+    expectBodyContains: { input: 'hello', temperature: 0.7, streaming: true },
   },
   {
     tool: 'venice_asr',
@@ -402,9 +404,8 @@ const MAPPINGS: Mapping[] = [
   {
     tool: 'venice_voice_clone',
     args: { action: 'list' },
-    // Action 'list' returns static catalog without hitting API
     expectMethod: 'GET',
-    expectPath: '__no_api_call__',
+    expectPath: '/v1/models?type=tts',
   },
 
   // music (audio/queue + audio/retrieve + audio/complete)
@@ -460,9 +461,10 @@ const MAPPINGS: Mapping[] = [
   // augment
   {
     tool: 'venice_web_search',
-    args: { query: 'venice ai' },
+    args: { query: 'venice ai', search_provider: 'google' },
     expectMethod: 'POST',
     expectPath: '/v1/augment/search',
+    expectBodyContains: { search_provider: 'google' },
   },
   {
     tool: 'venice_web_scrape',
@@ -489,6 +491,25 @@ const MAPPINGS: Mapping[] = [
 
   // catalog
   { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models?type=all' },
+  { tool: 'venice_list_models', args: { type: 'video' }, expectMethod: 'GET', expectPath: '/v1/models?type=video' },
+  {
+    tool: 'venice_list_models',
+    args: { type: 'tts' },
+    expectMethod: 'GET',
+    expectPath: '/v1/models?type=tts',
+  },
+  {
+    tool: 'venice_model_traits',
+    args: { type: 'image' },
+    expectMethod: 'GET',
+    expectPath: '/v1/models/traits?type=image',
+  },
+  {
+    tool: 'venice_model_compatibility_mapping',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/models/compatibility_mapping',
+  },
   {
     tool: 'venice_model_details',
     args: { model_id: 'flux-2-pro', type: 'image' },
@@ -607,11 +628,6 @@ describe('tools endpoint + method mapping', () => {
         await t.handler(m.args as any)
       } finally {
         globalThis.fetch = originalFetch
-      }
-      // Some tools (e.g. voice_clone action=list, returns static catalog) make no API call.
-      if (m.expectPath === '__no_api_call__') {
-        assert.equal(stub.calls.length, 0, `${m.tool} should not hit the API for this args`)
-        return
       }
       assert.ok(stub.calls.length >= 1, `${m.tool} should hit the API at least once (got ${stub.calls.length})`)
       // Find the matching call (some tools fetch a remote URL first then call Venice)
@@ -1199,19 +1215,30 @@ describe('tool output shaping', () => {
     )
   })
 
-  it('venice_video_status ignores a caller download_url that is not a Venice host', async () => {
-    const stub = new StubClient({
-      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+  for (const downloadUrl of [
+    'https://evil.example/payload.mp4?secret=do-not-echo',
+    'http://venice.ai/payload.mp4',
+    'https://venice.ai.evil.example/payload.mp4',
+  ]) {
+    it(`venice_video_status explicitly rejects an untrusted caller download_url (${downloadUrl})`, async () => {
+      const stub = new StubClient({
+        '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+      })
+      const tools = buildTools(stub.asClient(), cfg)
+      const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+        queue_id: 'vps-1',
+        model: 'grok-imagine-text-to-video-private',
+        download_url: downloadUrl,
+      } as never)
+      assert.equal(r.isError, true)
+      assert.equal(
+        (r.content[0] as { text: string }).text,
+        'download_url rejected: must be https on venice.ai or a subdomain.',
+      )
+      assert.equal(JSON.stringify(r).includes(downloadUrl), false)
+      assert.deepEqual(r.structuredContent, { status: 'COMPLETED' })
     })
-    const tools = buildTools(stub.asClient(), cfg)
-    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
-      queue_id: 'vps-1',
-      model: 'grok-imagine-text-to-video-private',
-      download_url: 'https://evil.example/payload.mp4',
-    } as never)
-    assert.equal(r.isError, true)
-    assert.match((r.content[0] as { text: string }).text, /download_url/)
-  })
+  }
 
   it('venice_video_generate tells the host to pass queue-time download_url into status', async () => {
     const stub = new StubClient({
@@ -1446,6 +1473,453 @@ describe('tool output shaping', () => {
     assert.match((r.content[0] as { text: string }).text, /402 Payment Required/)
   })
 
+  it('venice_list_models forwards every documented type', async () => {
+    const { get } = setup()
+    const typeSchema = get('venice_list_models').inputSchema.type
+    for (const type of ['asr', 'decision', 'embedding', 'image', 'music', 'text', 'tts', 'upscale', 'inpaint', 'video', 'all', 'code']) {
+      assert.equal(typeSchema.safeParse(type).success, true, `missing model type ${type}`)
+    }
+    for (const name of ['venice_model_traits', 'venice_model_compatibility_mapping']) {
+      const schema = get(name).inputSchema.type
+      for (const type of ['asr', 'decision', 'embedding', 'image', 'music', 'text', 'tts', 'upscale', 'inpaint', 'video']) {
+        assert.equal(schema.safeParse(type).success, true, `${name} missing model type ${type}`)
+      }
+      assert.equal(schema.safeParse('all').success, false, `${name} does not accept all`)
+      assert.equal(schema.safeParse('code').success, false, `${name} does not accept code`)
+      assert.equal(schema.safeParse('some-new-type').success, true, `${name} accepts a new catalog type`)
+      assert.equal(schema.parse(' Image '), 'image')
+    }
+  })
+
+  it('venice_model_traits forwards a new catalog type upstream', async () => {
+    const { stub, get } = setup()
+    const args = z.object(get('venice_model_traits').inputSchema).parse({ type: 'some-new-type' })
+    await get('venice_model_traits').handler(args as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models/traits?type=some-new-type')
+  })
+
+  it('venice_list_models pages compact summaries and reports next_offset', async () => {
+    const models = Array.from({ length: 120 }, (_, i) => ({
+      id: `model-${i}`,
+      type: 'text',
+      object: 'model',
+      owned_by: 'venice.ai',
+      context_length: 128_000,
+      model_spec: {
+        name: `Model ${i}`,
+        description: 'long upstream description',
+        maxCompletionTokens: 8192,
+        capabilities: { supportsVision: true, supportsReasoning: false, quantization: 'fp8' },
+        traits: [],
+        privacy: 'private',
+        offline: false,
+        pricing: { input: { usd: 1 }, output: { usd: 2 } },
+      },
+    }))
+    const stub = new StubClient({ '/v1/models?type=text': () => ({ data: models }) })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')!
+
+    const first = await tool.handler({ type: 'text' } as never)
+    const s1 = first.structuredContent as { total: number; count: number; offset: number; next_offset: number | null; data: unknown[] }
+    assert.equal(s1.total, 120)
+    assert.equal(s1.count, 50)
+    assert.equal(s1.offset, 0)
+    assert.equal(s1.next_offset, 50)
+    const text = (first.content[0] as { text: string }).text
+    assert.doesNotMatch(text, /\n/, 'compact JSON')
+    assert.deepEqual(JSON.parse(text).data[0], {
+      id: 'model-0',
+      type: 'text',
+      name: 'Model 0',
+      context_length: 128_000,
+      max_completion_tokens: 8192,
+      capabilities: ['supportsVision'],
+      privacy: 'private',
+      pricing: { input: { usd: 1 }, output: { usd: 2 } },
+    })
+
+    const last = await tool.handler({ type: 'text', offset: 100, limit: 50 } as never)
+    const s2 = last.structuredContent as { count: number; next_offset: number | null }
+    assert.equal(s2.count, 20)
+    assert.equal(s2.next_offset, null)
+
+    const verbose = await tool.handler({ type: 'text', limit: 1, verbose: true } as never)
+    assert.deepEqual((verbose.structuredContent as { data: unknown[] }).data, [models[0]])
+    assert.equal(tool.inputSchema.limit.safeParse(201).success, false)
+  })
+
+  for (const verbose of [false, true]) {
+    it(`venice_list_models follows every page using only text content (verbose=${verbose})`, async () => {
+      const models = Array.from({ length: 120 }, (_, i) => ({
+        id: `model-${i}`,
+        type: 'text',
+        model_spec: { description: 'x'.repeat(1500) },
+      }))
+      const stub = new StubClient({ '/v1/models?type=all': () => ({ data: models }) })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')!
+      const seen: string[] = []
+      let offset: number | null = 0
+      while (offset !== null) {
+        const result = await tool.handler({ offset, verbose })
+        const text = result.content.filter((c) => c.type === 'text').map((c) => c.text).join('')
+        const page = JSON.parse(text)
+        assert.equal(page.total, models.length)
+        assert.deepEqual(page.ids, models.map((m) => m.id))
+        assert.equal(page.offset, offset)
+        assert.equal(page.count, page.data.length)
+        assert.ok(page.count > 0)
+        seen.push(...page.data.map((m: { id: string }) => m.id))
+        assert.ok(page.next_offset === null || page.next_offset === offset + page.count)
+        assert.ok(seen.length <= models.length)
+        offset = page.next_offset
+      }
+      assert.deepEqual(seen, models.map((m) => m.id))
+    })
+  }
+
+  it('venice_list_models caps verbose pages by size and continues via next_offset', async () => {
+    const models = Array.from({ length: 200 }, (_, i) => ({
+      id: `model-${i}`,
+      type: 'video',
+      model_spec: { description: 'x'.repeat(1500) },
+    }))
+    const stub = new StubClient({ '/v1/models?type=all': () => ({ data: models }) })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')!
+    const r = await tool.handler({ limit: 200, verbose: true } as never)
+    const s = r.structuredContent as { count: number; next_offset: number | null }
+    const text = (r.content[0] as { text: string }).text
+    assert.ok(s.count > 0 && s.count < 200)
+    assert.equal(s.next_offset, s.count)
+    assert.ok(text.length <= 64 * 1024)
+    assert.equal(JSON.parse(text).data.length, s.count)
+  })
+
+  it('venice_voice_clone list shapes live model-scoped voice metadata', async () => {
+    const { get, stub } = setup()
+    const r = await get('venice_voice_clone').handler({ action: 'list' } as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=tts')
+    const shaped = r.structuredContent as {
+      type: string
+      data: Array<{
+        id: string
+        voices: string[]
+        voice_cloning: { mode: string }
+        supported_formats: string[]
+      }>
+    }
+    assert.equal(shaped.type, 'tts')
+    assert.deepEqual(shaped.data[0].voices, ['voice-a', 'voice-b'])
+    assert.equal(shaped.data[0].voice_cloning.mode, 'persistent')
+    assert.deepEqual(shaped.data[0].supported_formats, ['mp3', 'wav'])
+  })
+
+  it('venice_voice_clone create leaves model to the upstream default and only accepts cloning models', async () => {
+    const { get, stub } = setup()
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/mpeg' },
+        })) as typeof fetch
+      const tool = get('venice_voice_clone')
+      const r = await tool.handler({
+        action: 'create',
+        sample_url: 'https://93.184.216.34/sample.mp3',
+      } as never)
+      assert.equal(r.isError, undefined)
+      const body = stub.callsTo('/v1/audio/voices')[0].body as Record<string, unknown>
+      assert.equal('model' in body, false)
+      assert.equal(tool.inputSchema.model.safeParse('tts-minimax-speech-02-hd').success, true)
+      assert.equal(tool.inputSchema.model.safeParse('tts-kokoro').success, false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_web_search returns parsed results as structuredContent', async () => {
+    const { get } = setup()
+    const r = await get('venice_web_search').handler({ query: 'venice' } as never)
+    assert.deepEqual(r.structuredContent, { results: [{ url: 'https://x', snippet: 's' }] })
+  })
+
+  it('catalog metadata tools preserve the upstream map envelope', async () => {
+    const { get } = setup()
+    const traits = await get('venice_model_traits').handler({} as never)
+    assert.deepEqual(traits.structuredContent, {
+      data: { default: 'deepseek-v4-flash-0731' },
+      object: 'list',
+      type: 'text',
+    })
+    const compatibility = await get('venice_model_compatibility_mapping').handler({} as never)
+    assert.deepEqual(compatibility.structuredContent, {
+      data: { 'gpt-4o': 'deepseek-v4-flash-0731' },
+      object: 'list',
+      type: 'text',
+    })
+  })
+
+  it('venice_asr forwards timestamps and preserves timestamp metadata', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })) as typeof fetch
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({
+          text: 'hello',
+          duration: 1.5,
+          timestamps: { word: [{ word: 'hello', start: 0, end: 1.5 }] },
+        }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        response_format: 'json',
+        timestamps: true,
+      } as never)
+      assert.equal(stub.calls.at(-1)?.maxBytes, 1024 * 1024)
+      const body = stub.calls.at(-1)?.body as Record<string, unknown>
+      assert.equal(body.response_format, 'json')
+      assert.equal(body.timestamps, 'true')
+      assert.deepEqual((r.structuredContent as { timestamps: unknown }).timestamps, {
+        word: [{ word: 'hello', start: 0, end: 1.5 }],
+      })
+      const textContent = JSON.parse((r.content[0] as { text: string }).text)
+      assert.equal(textContent.text, 'hello')
+      assert.deepEqual(textContent.timestamps, { word: [{ word: 'hello', start: 0, end: 1.5 }] })
+      assert.equal(textContent.result_handle, undefined)
+      assert.equal(r.structuredContent?.result_handle, undefined)
+      assert.equal(textContent.timestamps_truncated, false)
+      assert.equal(textContent.next_timestamp_offset, null)
+      assert.equal(tool.inputSchema.response_format.safeParse('srt').success, false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr does not retain timestamp results that fit the requested page', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = async () =>
+        new Response('mock audio', { headers: { 'content-type': 'audio/wav' } })
+      const words = Array.from({ length: 200 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: words } }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      for (const args of [{}, { timestamp_offset: 199, timestamp_limit: 1 }]) {
+        const result = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true, ...args })
+        assert.equal(result.isError, undefined)
+        assert.equal(result.structuredContent?.timestamps_truncated, false)
+        assert.equal(result.structuredContent?.result_handle, undefined)
+        assert.equal(JSON.parse((result.content[0] as { text: string }).text).result_handle, undefined)
+      }
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr pages a retained result without transcribing the clip twice', async () => {
+    const originalFetch = globalThis.fetch
+    let fetchCalls = 0
+    try {
+      globalThis.fetch = (async () => {
+        fetchCalls += 1
+        return new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })
+      }) as typeof fetch
+      const words = Array.from({ length: 250 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({
+          text: 'long transcript',
+          timestamps: { word: words },
+        }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        timestamps: true,
+      } as never)
+      const structured = r.structuredContent as {
+        timestamps: { word: unknown[] }
+        timestamp_total: { word: number }
+        timestamps_truncated: boolean
+        timestamp_limit: number
+        next_timestamp_offset: number | null
+        result_handle: string
+      }
+      assert.equal(structured.timestamps.word.length, 200)
+      assert.deepEqual(structured.timestamps.word[0], words[0])
+      assert.equal(structured.timestamp_total.word, 250)
+      assert.equal(structured.timestamps_truncated, true)
+      assert.equal(structured.timestamp_limit, 200)
+      assert.equal(typeof structured.result_handle, 'string')
+      assert.equal(structured.next_timestamp_offset, 200)
+      const text = (r.content[0] as { text: string }).text
+      assert.equal(JSON.parse(text).result_handle, structured.result_handle)
+      assert.equal(JSON.parse(text).next_timestamp_offset, 200)
+      assert.doesNotMatch(text, /w249/)
+
+      const page = await tool.handler({
+        result_handle: structured.result_handle,
+        timestamp_offset: 200,
+        timestamp_limit: 50,
+      } as never)
+      const paged = page.structuredContent as {
+        timestamps: { word: unknown[] }
+        timestamp_offset: number
+        timestamps_truncated: boolean
+        next_timestamp_offset: number | null
+        result_handle: string
+      }
+      assert.equal(paged.timestamps.word.length, 50)
+      assert.deepEqual(paged.timestamps.word[0], words[200])
+      assert.equal(paged.timestamp_offset, 200)
+      assert.equal(paged.timestamps_truncated, false)
+      assert.equal(paged.next_timestamp_offset, null)
+      assert.equal(paged.result_handle, structured.result_handle)
+      // The point of the handle: continuation must not pay for a second transcription.
+      assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 1)
+      assert.equal(fetchCalls, 1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr result handles are private to the tool set that created them', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })) as typeof fetch
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: Array.from({ length: 201 }, () => ({ word: 'hi', start: 0, end: 1 })) } }),
+      })
+      const sessionA = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const sessionB = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await sessionA.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true } as never)
+      const handle = (r.structuredContent as { result_handle: string }).result_handle
+      assert.equal(typeof handle, 'string')
+
+      const own = await sessionA.handler({ result_handle: handle } as never)
+      assert.equal(own.isError, undefined)
+      const other = await sessionB.handler({ result_handle: handle } as never)
+      assert.equal(other.isError, true)
+      assert.equal((other.structuredContent as { error: string }).error, 'asr_result_expired')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr pages a long transcript through the handle without transcribing again', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', { status: 200, headers: { 'content-type': 'audio/wav' } })) as typeof fetch
+      const transcript = 'a'.repeat(8000) + 'tail'
+      const stub = new StubClient({ '/v1/audio/transcriptions': () => transcript })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const first = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', response_format: 'text' } as never)
+      const s1 = first.structuredContent as { text: string; next_text_offset: number; result_handle: string }
+      assert.equal(s1.text.length, 8000)
+      assert.equal(s1.next_text_offset, 8000)
+      assert.equal(JSON.parse((first.content[0] as { text: string }).text).result_handle, s1.result_handle)
+
+      const next = await tool.handler({ result_handle: s1.result_handle, text_offset: s1.next_text_offset } as never)
+      const s2 = next.structuredContent as { text: string; next_text_offset: number | null }
+      assert.equal(s2.text, 'tail')
+      assert.equal(s2.next_text_offset, null)
+      assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr drops a retained result when its retention timer fires', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', { status: 200, headers: { 'content-type': 'audio/wav' } })) as typeof fetch
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: Array.from({ length: 201 }, () => ({ word: 'hi', start: 0, end: 1 })) } }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true } as never)
+      const handle = (r.structuredContent as { result_handle: string }).result_handle
+      assert.equal(typeof handle, 'string')
+      t.mock.timers.tick(10 * 60 * 1000)
+      const expired = await tool.handler({ result_handle: handle } as never)
+      assert.equal((expired.structuredContent as { error: string }).error, 'asr_result_expired')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_web_search caps query at the API maximum of 400 characters', () => {
+    const tool = buildTools(new StubClient().asClient(), cfg).find((t) => t.name === 'venice_web_search')!
+    const schema = z.object(tool.inputSchema)
+    assert.equal(schema.safeParse({ query: 'q'.repeat(400) }).success, true)
+    assert.equal(schema.safeParse({ query: 'q'.repeat(401) }).success, false)
+  })
+
+  it('venice_asr refuses to re-transcribe when a result handle is unknown or expired', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+    const r = await tool.handler({
+      result_handle: 'missing-handle',
+      timestamp_offset: 200,
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /expired result_handle/)
+    assert.equal((r.structuredContent as { error: string }).error, 'asr_result_expired')
+    assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 0)
+  })
+
+  it('venice_asr requires audio_url when no result handle is supplied', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+    const r = await tool.handler({ timestamps: true } as never)
+
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /audio_url is required/)
+    assert.equal(stub.calls.length, 0)
+  })
+
+  it('venice_asr rejects an oversized timestamped transcription before echoing it', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })) as typeof fetch
+      const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => {
+          throw new VeniceResponseTooLargeError('/v1/audio/transcriptions', 1024 * 1024)
+        },
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        timestamps: true,
+      } as never)
+      assert.equal(r.isError, true)
+      assert.match((r.content[0] as { text: string }).text, /1 MiB/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('venice_list_models forwards type to the catalog so non-text models are discoverable', async () => {
     const { stub, get } = setup()
     const r = await get('venice_list_models').handler({ type: 'image' } as never)
@@ -1478,6 +1952,19 @@ describe('tool output shaping', () => {
     assert.deepEqual(model.model_spec.constraints.aspectRatios, ['1:1', '16:9'])
     assert.equal(model.model_spec.pricing.generation.usd, 0.03)
     assert.equal(model.model_spec.supportsWebSearch, false)
+  })
+
+  it('venice_model_details reads a catalog returned under models', async () => {
+    const stub = new StubClient({
+      '/v1/models?type=video': () => ({ models: [{ id: 'video-model', type: 'video', model_spec: {} }] }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_model_details')!.handler({
+      model_id: 'video-model',
+      type: 'video',
+    } as never)
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { id: string }).id, 'video-model')
   })
 
   it('venice_model_details resolves a mixed-case id after schema normalization', async () => {

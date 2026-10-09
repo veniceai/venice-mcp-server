@@ -221,7 +221,7 @@ export class VeniceClient {
    * Caller passes a pre-built `FormData` instance; this helper wires up auth
    * headers and surfaces the upstream response identically to `post`.
    */
-  async postMultipart<T = unknown>(path: string, form: FormData, opts: { timeoutMs?: number } = {}): Promise<T> {
+  async postMultipart<T = unknown>(path: string, form: FormData, opts: { timeoutMs?: number; maxBytes?: number } = {}): Promise<T> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       Accept: 'application/json',
@@ -237,7 +237,7 @@ export class VeniceClient {
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
       const res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal })
-      const body = await parseResponse<T>(res, path)
+      const body = await parseResponse<T>(res, path, opts.maxBytes)
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
       return body
     } catch (err) {
@@ -517,8 +517,8 @@ function responseHeaders(res: Response): Record<string, string> {
  * Response parser used by `postMultipart`.
  * Handles JSON vs text content, surfaces 402 / 4xx / 5xx as VeniceUpstreamError.
  */
-async function parseResponse<T>(res: Response, path: string): Promise<T> {
-  if (!res.ok) throw await upstreamError(res, path)
-  const text = await res.text()
+async function parseResponse<T>(res: Response, path: string, maxBytes?: number): Promise<T> {
+  if (!res.ok) throw await upstreamError(res, path, maxBytes)
+  const text = (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
   return (isJsonContentType(res.headers.get('content-type') ?? '') ? parseSuccessJson(text, path) : text) as T
 }
