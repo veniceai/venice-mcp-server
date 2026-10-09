@@ -48,24 +48,61 @@ export class StubClient {
     return (defaultResponse(call.path, call.binary, call.eventStream) as T) ?? ({} as T)
   }
 
-  get<T>(path: string, headers?: Record<string, string>, opts: { auth?: StubCall['auth'] } = {}) {
-    return this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth })
+  async get<T>(
+    path: string,
+    headers?: Record<string, string>,
+    opts: {
+      auth?: StubCall['auth']
+      timeoutMs?: number
+      maxBytes?: number
+      maxResponseBytes?: number
+      responseType?: 'auto' | 'event-stream'
+      onResponse?: (metadata: { status: number; headers: Record<string, string> }) => void
+    } = {},
+  ) {
+    const result = await this.dispatch<T>({
+      method: 'GET',
+      path,
+      headers,
+      auth: opts.auth,
+      timeoutMs: opts.timeoutMs,
+      maxBytes: opts.maxBytes ?? opts.maxResponseBytes,
+      eventStream: opts.responseType === 'event-stream' ? true : undefined,
+    })
+    opts.onResponse?.({
+      status: 200,
+      headers: path.startsWith('/v1/billing/usage-history')
+        ? { 'x-next-cursor': 'stub-next-cursor' }
+        : {},
+    })
+    return result
   }
-  post<T>(
+  async post<T>(
     path: string,
     json: unknown,
     headers?: Record<string, string>,
-    opts: { auth?: StubCall['auth']; timeoutMs?: number; maxResponseBytes?: number } = {},
+    opts: {
+      auth?: StubCall['auth']
+      timeoutMs?: number
+      maxBytes?: number
+      maxResponseBytes?: number
+      responseType?: 'auto' | 'event-stream'
+      onResponse?: (metadata: { status: number; headers: Record<string, string> }) => void
+    } = {},
   ) {
-    return this.dispatch<T>({
+    const result = await this.dispatch<T>({
       method: 'POST',
       path,
       body: json,
       headers,
       auth: opts.auth,
       timeoutMs: opts.timeoutMs,
+      maxBytes: opts.maxBytes ?? opts.maxResponseBytes,
       maxResponseBytes: opts.maxResponseBytes,
+      eventStream: opts.responseType === 'event-stream' ? true : undefined,
     })
+    opts.onResponse?.({ status: 200, headers: {} })
+    return result
   }
   async postWithHeaders<T>(
     path: string,
@@ -194,8 +231,18 @@ export class StubClient {
     }
   }
   /** Stub for postMultipart — returns canned JSON like normal POST. */
-  async postMultipart<T>(path: string): Promise<T> {
-    this.calls.push({ method: 'POST', path, body: '<FormData>', multipart: true })
+  async postMultipart<T>(path: string, form: FormData, opts: { timeoutMs?: number; maxBytes?: number } = {}): Promise<T> {
+    this.calls.push({
+      method: 'POST',
+      path,
+      body: Object.fromEntries(form.entries()),
+      multipart: true,
+      maxBytes: opts.maxBytes,
+    })
+    const overrideKey = Object.keys(this.overrides).find((k) => path.startsWith(k))
+    if (overrideKey) {
+      return await this.overrides[overrideKey](this.calls.at(-1)!) as T
+    }
     return (defaultResponse(path, false) as T) ?? ({} as T)
   }
 
@@ -246,6 +293,29 @@ function defaultResponse(path: string, _binary?: boolean, _eventStream?: boolean
   if (path.startsWith('/v1/augment/scrape')) return { markdown: '# stub' }
   if (path.startsWith('/v1/augment/text-parser')) return { text: 'parsed text' }
   if (path.startsWith('/v1/crypto/rpc')) return { jsonrpc: '2.0', result: '0x1', id: 1 }
+  if (path.startsWith('/v1/models/traits'))
+    return { data: { default: 'deepseek-v4-flash-0731' }, object: 'list', type: 'text' }
+  if (path.startsWith('/v1/models/compatibility_mapping'))
+    return { data: { 'gpt-4o': 'deepseek-v4-flash-0731' }, object: 'list', type: 'text' }
+  if (path.startsWith('/v1/models?type=tts'))
+    return {
+      data: [{
+        id: 'tts-live',
+        type: 'tts',
+        owned_by: 'venice.ai',
+        model_spec: {
+          name: 'Live TTS',
+          voices: ['voice-a', 'voice-b'],
+          default_voice: 'voice-a',
+          supports_custom_voice_id: true,
+          voice_cloning: { mode: 'persistent', accepted_formats: ['mp3'] },
+          supported_formats: ['mp3', 'wav'],
+          default_format: 'mp3',
+        },
+      }],
+      object: 'list',
+      type: 'tts',
+    }
   if (path === '/v1/models?type=image')
     return {
       data: [{
@@ -296,6 +366,15 @@ function defaultResponse(path: string, _binary?: boolean, _eventStream?: boolean
   if (path.startsWith('/v1/tee/signature'))
     return { model: 'e2ee-model', request_id: 'chatcmpl-test', signature: '0xsigned' }
   if (path.startsWith('/v1/characters')) return { data: [{ slug: 'sample', name: 'Sample' }] }
+  if (path.startsWith('/v1/billing/balance'))
+    return { canConsume: true, consumptionCurrency: 'USD', balances: { usd: 10, diem: null }, diemEpochAllocation: 0 }
+  if (path.startsWith('/v1/billing/usage-analytics'))
+    return { lookback: '7d', byDate: [], byModel: [], byModelDaily: [], topModels: [], byKey: [], byKeyDaily: [], topKeyNames: [] }
+  if (path.startsWith('/v1/billing/usage-history')) return { data: [], nextCursor: 'stub-next-cursor' }
+  if (path === '/v1/api_keys') return { object: 'list', data: [] }
+  if (path === '/v1/api_keys/rate_limits') return { data: { accessPermitted: true, rateLimits: [] } }
+  if (path === '/v1/api_keys/rate_limits/log') return { object: 'list', data: [] }
+  if (path.startsWith('/v1/api_keys/')) return { data: { id: path.split('/').at(-1), last6Chars: 'abc123' } }
   if (path.startsWith('/v1/x402/balance')) return { walletAddress: '0x', balanceUsd: 5.42, currency: 'USDC' }
   if (path.startsWith('/v1/x402/transactions')) return { transactions: [] }
   return {}

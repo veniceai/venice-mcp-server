@@ -3,15 +3,15 @@ import assert from 'node:assert/strict'
 import { z } from 'zod'
 import { buildTools, type ToolDef } from '../src/tools/index.js'
 import { loadConfig } from '../src/config.js'
+import { VeniceUpstreamError } from '../src/types.js'
 import { VeniceResponseTooLargeError } from '../src/venice-client.js'
 import { StubClient } from './helpers/stub-client.js'
 import { TOOL_ANNOTATIONS } from '../src/tools/annotations.js'
 
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
-
-function setup() {
+function setup(config = cfg) {
   const stub = new StubClient()
-  const tools = buildTools(stub.asClient(), cfg)
+  const tools = buildTools(stub.asClient(), config)
   const get = (name: string): ToolDef => {
     const t = tools.find((x) => x.name === name)
     if (!t) throw new Error(`tool not found: ${name}`)
@@ -21,12 +21,17 @@ function setup() {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented set (36 tools)', () => {
+  it('registers exactly the documented default set (45 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
       'venice_asr',
       'venice_audio_quote',
+      'venice_api_key_rate_limit_logs',
+      'venice_api_key_rate_limits',
+      'venice_billing_balance',
+      'venice_billing_usage_analytics',
+      'venice_billing_usage_history',
       'venice_chat',
       'venice_chat_with_character',
       'venice_character_reviews',
@@ -40,9 +45,13 @@ describe('tools registry', () => {
       'venice_image_styles',
       'venice_image_upscale',
       'venice_get_character',
+      'venice_get_api_key',
+      'venice_list_api_keys',
       'venice_list_characters',
       'venice_list_models',
+      'venice_model_compatibility_mapping',
       'venice_model_details',
+      'venice_model_traits',
       'venice_music_complete',
       'venice_music_generate',
       'venice_music_status',
@@ -63,7 +72,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 36)
+    assert.equal(tools.length, 45)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -130,6 +139,44 @@ describe('tools registry', () => {
       assert.equal(schema.safeParse({ ...args, type: 'a'.repeat(65) }).success, false, name)
       assert.equal(schema.parse({ ...args, type: `  ${'A'.repeat(64)}  ` }).type, 'a'.repeat(64), name)
       assert.equal(schema.safeParse({ ...args, type: 'some-new-type' }).success, true, name)
+    }
+  })
+
+  it('billing and operator API-key tools call out API-key-only requirements', () => {
+    const { get } = setup()
+    for (const name of [
+      'venice_billing_balance',
+      'venice_billing_usage_analytics',
+      'venice_billing_usage_history',
+      'venice_list_api_keys',
+      'venice_get_api_key',
+      'venice_api_key_rate_limit_logs',
+    ]) {
+      assert.match(get(name).description, /ADMIN API key required/i, `${name} admin description`)
+    }
+    for (const name of ['venice_api_key_rate_limits']) {
+      assert.match(get(name).description, /API key required/i, `${name} auth description`)
+      assert.doesNotMatch(get(name).description, /ADMIN API key required/i, `${name} allows inference keys`)
+    }
+  })
+
+  it('all API_KEY_ONLY discovery and read tools force explicit API-key auth', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['venice_list_characters', { limit: 3 }],
+      ['venice_billing_balance', {}],
+      ['venice_billing_usage_analytics', { lookback: '7d' }],
+      ['venice_billing_usage_history', { page_size: 10 }],
+      ['venice_list_api_keys', {}],
+      ['venice_get_api_key', { id: 'key-1' }],
+      ['venice_api_key_rate_limits', {}],
+      ['venice_api_key_rate_limit_logs', {}],
+    ]
+    for (const [name, args] of cases) {
+      const stub = new StubClient()
+      const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === name)!
+      await tool.handler(args as never)
+      assert.equal(stub.calls.length, 1, `${name} request count`)
+      assert.equal(stub.calls[0].auth, 'apiKey', `${name} auth mode`)
     }
   })
 
@@ -366,10 +413,10 @@ const MAPPINGS: Mapping[] = [
   // audio (TTS / ASR / voices)
   {
     tool: 'venice_tts',
-    args: { input: 'hello' },
+    args: { input: 'hello', temperature: 0.7, streaming: true },
     expectMethod: 'POST',
     expectPath: '/v1/audio/speech',
-    expectBodyContains: { input: 'hello' },
+    expectBodyContains: { input: 'hello', temperature: 0.7, streaming: true },
   },
   {
     tool: 'venice_asr',
@@ -381,9 +428,8 @@ const MAPPINGS: Mapping[] = [
   {
     tool: 'venice_voice_clone',
     args: { action: 'list' },
-    // Action 'list' returns static catalog without hitting API
     expectMethod: 'GET',
-    expectPath: '__no_api_call__',
+    expectPath: '/v1/models?type=tts',
   },
 
   // music (audio/queue + audio/retrieve + audio/complete)
@@ -439,9 +485,10 @@ const MAPPINGS: Mapping[] = [
   // augment
   {
     tool: 'venice_web_search',
-    args: { query: 'venice ai' },
+    args: { query: 'venice ai', search_provider: 'google' },
     expectMethod: 'POST',
     expectPath: '/v1/augment/search',
+    expectBodyContains: { search_provider: 'google' },
   },
   {
     tool: 'venice_web_scrape',
@@ -474,6 +521,25 @@ const MAPPINGS: Mapping[] = [
 
   // catalog
   { tool: 'venice_list_models', args: {}, expectMethod: 'GET', expectPath: '/v1/models?type=all' },
+  { tool: 'venice_list_models', args: { type: 'video' }, expectMethod: 'GET', expectPath: '/v1/models?type=video' },
+  {
+    tool: 'venice_list_models',
+    args: { type: 'tts' },
+    expectMethod: 'GET',
+    expectPath: '/v1/models?type=tts',
+  },
+  {
+    tool: 'venice_model_traits',
+    args: { type: 'image' },
+    expectMethod: 'GET',
+    expectPath: '/v1/models/traits?type=image',
+  },
+  {
+    tool: 'venice_model_compatibility_mapping',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/models/compatibility_mapping',
+  },
   {
     tool: 'venice_model_details',
     args: { model_id: 'flux-2-pro', type: 'image' },
@@ -535,12 +601,58 @@ const MAPPINGS: Mapping[] = [
     expectBodyContains: { venice_parameters: { character_slug: 'alice' } },
   },
 
+  // billing
+  { tool: 'venice_billing_balance', args: {}, expectMethod: 'GET', expectPath: '/v1/billing/balance' },
+  {
+    tool: 'venice_billing_usage_analytics',
+    args: { start_date: '2026-08-01', end_date: '2026-08-10' },
+    expectMethod: 'GET',
+    expectPath: '/v1/billing/usage-analytics?startDate=2026-08-01&endDate=2026-08-10',
+  },
+  {
+    tool: 'venice_billing_usage_history',
+    args: {
+      currency: 'DIEM',
+      start_timestamp: '2026-08-01T00:00:00.000Z',
+      page_size: 100,
+    },
+    expectMethod: 'GET',
+    expectPath: '/v1/billing/usage-history?currency=DIEM&startTimestamp=2026-08-01T00%3A00%3A00.000Z&pageSize=100',
+  },
+
+  // API keys
+  { tool: 'venice_list_api_keys', args: {}, expectMethod: 'GET', expectPath: '/v1/api_keys' },
+  {
+    tool: 'venice_get_api_key',
+    args: { id: 'key/id' },
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/key%2Fid',
+  },
+  {
+    tool: 'venice_api_key_rate_limits',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/rate_limits',
+  },
+  {
+    tool: 'venice_api_key_rate_limit_logs',
+    args: {},
+    expectMethod: 'GET',
+    expectPath: '/v1/api_keys/rate_limits/log',
+  },
   // x402 helpers
   {
     tool: 'venice_x402_balance',
     args: { wallet_address: '0x' + 'a'.repeat(40) },
     expectMethod: 'GET',
     expectPath: `/v1/x402/balance/0x${'a'.repeat(40)}`,
+  },
+  {
+    tool: 'venice_x402_top_up_info',
+    args: {},
+    expectMethod: 'POST',
+    expectPath: '/v1/x402/top-up',
+    expectBodyContains: {},
   },
   {
     tool: 'venice_x402_transactions',
@@ -576,11 +688,6 @@ describe('tools endpoint + method mapping', () => {
       } finally {
         globalThis.fetch = originalFetch
       }
-      // Some tools (e.g. voice_clone action=list, returns static catalog) make no API call.
-      if (m.expectPath === '__no_api_call__') {
-        assert.equal(stub.calls.length, 0, `${m.tool} should not hit the API for this args`)
-        return
-      }
       assert.ok(stub.calls.length >= 1, `${m.tool} should hit the API at least once (got ${stub.calls.length})`)
       // Find the matching call (some tools fetch a remote URL first then call Venice)
       const call = stub.calls.find((c) => c.path === m.expectPath) || stub.calls[stub.calls.length - 1]
@@ -595,6 +702,123 @@ describe('tools endpoint + method mapping', () => {
       }
     })
   }
+})
+
+describe('billing input validation and output size', () => {
+  it('rejects impossible calendar dates and timestamps', () => {
+    const { get } = setup()
+    const analytics = z.object(get('venice_billing_usage_analytics').inputSchema)
+    for (const date of ['2026-13-45', '2026-02-30', '2026-00-10', '2025-02-29']) {
+      assert.equal(analytics.safeParse({ start_date: date, end_date: '2026-12-31' }).success, false, date)
+    }
+    assert.equal(analytics.safeParse({ start_date: '2028-02-29', end_date: '2028-03-01' }).success, true)
+
+    const history = z.object(get('venice_billing_usage_history').inputSchema)
+    for (const ts of ['2026-02-30T00:00:00Z', '2026-01-01T25:00:00Z', '2026-13-01T00:00:00Z']) {
+      assert.equal(history.safeParse({ start_timestamp: ts }).success, false, ts)
+    }
+  })
+
+  it('rejects an analytics start_date later than end_date', async () => {
+    const { get, stub } = setup()
+    const analytics = get('venice_billing_usage_analytics')
+    const reversed = await analytics.handler({ start_date: '2026-08-02', end_date: '2026-08-01' } as never)
+    assert.equal(reversed.isError, true)
+    assert.match((reversed.content[0] as { text: string }).text, /start_date cannot be later than end_date/)
+    assert.equal(stub.calls.length, 0)
+    const sameDay = await analytics.handler({ start_date: '2026-08-01', end_date: '2026-08-01' } as never)
+    assert.equal(sameDay.isError, undefined)
+  })
+
+  it('caps plain cursors at 512 characters and allows the csv: prefix on top', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_billing_usage_history').inputSchema)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(512) }).success, true)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(513) }).success, false)
+    assert.equal(schema.safeParse({ cursor: 'a'.repeat(516) }).success, false)
+    assert.equal(schema.safeParse({ cursor: `csv:${'a'.repeat(512)}` }).success, true)
+    assert.equal(schema.safeParse({ cursor: `csv:${'a'.repeat(513)}` }).success, false)
+    assert.equal(schema.safeParse({ cursor: 'csv:' }).success, false)
+    assert.equal(schema.safeParse({ cursor: '' }).success, false)
+  })
+
+  it('returns complete usage-history JSON and CSV pages beyond the old 8K cutoff', async () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      timestamp: '2026-08-01T00:00:00Z', amount: -0.1, sku: `model-${i}`, notes: 'n'.repeat(600),
+    }))
+    const jsonStub = new StubClient({ '/v1/billing/usage-history': () => ({ data: rows, nextCursor: 'next' }) })
+    const jsonTool = buildTools(jsonStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const json = await jsonTool.handler({ page_size: 20 })
+    assert.equal(json.isError, undefined)
+    const jsonText = (json.content[0] as { text: string }).text
+    assert.ok(jsonText.length > 8000)
+    assert.deepEqual(JSON.parse(jsonText), { data: rows, nextCursor: 'next' })
+    assert.deepEqual(json.structuredContent, { format: 'json', count: 20, nextCursor: 'next', truncated: false })
+
+    const csvBody = `timestamp,amount,notes\r\n${rows.map((r) => `${r.timestamp},${r.amount},"line one\n${r.notes}"`).join('\r\n')}`
+    const csvStub = new StubClient({ '/v1/billing/usage-history': () => csvBody })
+    const csvTool = buildTools(csvStub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const csv = await csvTool.handler({ format: 'csv', page_size: 20 })
+    assert.equal(csv.isError, undefined)
+    assert.equal((csv.content[0] as { text: string }).text, csvBody)
+    assert.equal(csv.structuredContent?.nextCursor, 'csv:stub-next-cursor')
+    assert.equal(csv.structuredContent?.truncated, false)
+  })
+
+  it('defaults billing first pages to ten rows without modifying cursor continuations', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+    await history.handler({})
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?pageSize=10')
+    await history.handler({ cursor: 'next' })
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=next')
+    assert.equal(stub.calls.at(-1)?.maxBytes, 64 * 1024)
+  })
+
+  it('rejects oversized billing pages without returning partial records or a continuation cursor', async () => {
+    for (const format of ['json', 'csv']) {
+      const marker = 'private-ledger-record'
+      const body = format === 'json'
+        ? { data: [{ notes: marker + '🙂'.repeat(20_000) }], nextCursor: 'after-omitted-rows' }
+        : `notes\n"${marker}${'🙂'.repeat(20_000)}"`
+      const stub = new StubClient({ '/v1/billing/usage-history': () => body })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+      const result = await tool.handler({ format })
+      assert.equal(result.isError, true, format)
+      assert.equal(result.structuredContent, undefined)
+      const text = (result.content[0] as { text: string }).text
+      assert.match(text, /64 KiB/)
+      assert.match(text, /smaller page_size/)
+      assert.doesNotMatch(text, new RegExp(`${marker}|after-omitted-rows|stub-next-cursor`))
+    }
+  })
+
+  it('applies the billing output limit in bytes with an inclusive boundary', async () => {
+    for (const extraBytes of [0, 1]) {
+      const csv = 'notes\n' + 'x'.repeat(64 * 1024 - 6 + extraBytes)
+      const stub = new StubClient({ '/v1/billing/usage-history': () => csv })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+      const result = await tool.handler({ format: 'csv' })
+      if (extraBytes === 0) {
+        assert.equal(result.isError, undefined)
+        assert.equal((result.content[0] as { text: string }).text, csv)
+      } else {
+        assert.equal(result.isError, true)
+        assert.equal(result.structuredContent, undefined)
+      }
+    }
+  })
+
+  it('handles the HTTP response-size rejection without exposing a cursor', async () => {
+    const stub = new StubClient({ '/v1/billing/usage-history': () => {
+      throw new VeniceResponseTooLargeError('/v1/billing/usage-history', 64 * 1024)
+    } })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_billing_usage_history')!
+    const result = await tool.handler({ cursor: 'next' })
+    assert.equal(result.isError, true)
+    assert.equal(result.structuredContent, undefined)
+    assert.match((result.content[0] as { text: string }).text, /same cursor/)
+  })
 })
 
 const UNSAFE_PATH_SEGMENTS = ['..', '.', '%2e%2e', '%2E%2E', '../reviews', 'a/b', 'a\\b', '/', '', 'a.b', 'a b', 'a?b', 'a#b']
@@ -1537,19 +1761,30 @@ describe('tool output shaping', () => {
     )
   })
 
-  it('venice_video_status ignores a caller download_url that is not a Venice host', async () => {
-    const stub = new StubClient({
-      '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+  for (const downloadUrl of [
+    'https://evil.example/payload.mp4?secret=do-not-echo',
+    'http://venice.ai/payload.mp4',
+    'https://venice.ai.evil.example/payload.mp4',
+  ]) {
+    it(`venice_video_status explicitly rejects an untrusted caller download_url (${downloadUrl})`, async () => {
+      const stub = new StubClient({
+        '/v1/video/retrieve': () => ({ status: 'COMPLETED' }),
+      })
+      const tools = buildTools(stub.asClient(), cfg)
+      const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
+        queue_id: 'vps-1',
+        model: 'grok-imagine-text-to-video-private',
+        download_url: downloadUrl,
+      } as never)
+      assert.equal(r.isError, true)
+      assert.equal(
+        (r.content[0] as { text: string }).text,
+        'download_url rejected: must be https on venice.ai or a subdomain.',
+      )
+      assert.equal(JSON.stringify(r).includes(downloadUrl), false)
+      assert.deepEqual(r.structuredContent, { status: 'COMPLETED' })
     })
-    const tools = buildTools(stub.asClient(), cfg)
-    const r = await tools.find((t) => t.name === 'venice_video_status')!.handler({
-      queue_id: 'vps-1',
-      model: 'grok-imagine-text-to-video-private',
-      download_url: 'https://evil.example/payload.mp4',
-    } as never)
-    assert.equal(r.isError, true)
-    assert.match((r.content[0] as { text: string }).text, /download_url/)
-  })
+  }
 
   it('venice_video_generate tells the host to pass queue-time download_url into status', async () => {
     const stub = new StubClient({
@@ -1784,6 +2019,453 @@ describe('tool output shaping', () => {
     assert.match((r.content[0] as { text: string }).text, /402 Payment Required/)
   })
 
+  it('venice_list_models forwards every documented type', async () => {
+    const { get } = setup()
+    const typeSchema = get('venice_list_models').inputSchema.type
+    for (const type of ['asr', 'decision', 'embedding', 'image', 'music', 'text', 'tts', 'upscale', 'inpaint', 'video', 'all', 'code']) {
+      assert.equal(typeSchema.safeParse(type).success, true, `missing model type ${type}`)
+    }
+    for (const name of ['venice_model_traits', 'venice_model_compatibility_mapping']) {
+      const schema = get(name).inputSchema.type
+      for (const type of ['asr', 'decision', 'embedding', 'image', 'music', 'text', 'tts', 'upscale', 'inpaint', 'video']) {
+        assert.equal(schema.safeParse(type).success, true, `${name} missing model type ${type}`)
+      }
+      assert.equal(schema.safeParse('all').success, false, `${name} does not accept all`)
+      assert.equal(schema.safeParse('code').success, false, `${name} does not accept code`)
+      assert.equal(schema.safeParse('some-new-type').success, true, `${name} accepts a new catalog type`)
+      assert.equal(schema.parse(' Image '), 'image')
+    }
+  })
+
+  it('venice_model_traits forwards a new catalog type upstream', async () => {
+    const { stub, get } = setup()
+    const args = z.object(get('venice_model_traits').inputSchema).parse({ type: 'some-new-type' })
+    await get('venice_model_traits').handler(args as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models/traits?type=some-new-type')
+  })
+
+  it('venice_list_models pages compact summaries and reports next_offset', async () => {
+    const models = Array.from({ length: 120 }, (_, i) => ({
+      id: `model-${i}`,
+      type: 'text',
+      object: 'model',
+      owned_by: 'venice.ai',
+      context_length: 128_000,
+      model_spec: {
+        name: `Model ${i}`,
+        description: 'long upstream description',
+        maxCompletionTokens: 8192,
+        capabilities: { supportsVision: true, supportsReasoning: false, quantization: 'fp8' },
+        traits: [],
+        privacy: 'private',
+        offline: false,
+        pricing: { input: { usd: 1 }, output: { usd: 2 } },
+      },
+    }))
+    const stub = new StubClient({ '/v1/models?type=text': () => ({ data: models }) })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')!
+
+    const first = await tool.handler({ type: 'text' } as never)
+    const s1 = first.structuredContent as { total: number; count: number; offset: number; next_offset: number | null; data: unknown[] }
+    assert.equal(s1.total, 120)
+    assert.equal(s1.count, 50)
+    assert.equal(s1.offset, 0)
+    assert.equal(s1.next_offset, 50)
+    const text = (first.content[0] as { text: string }).text
+    assert.doesNotMatch(text, /\n/, 'compact JSON')
+    assert.deepEqual(JSON.parse(text).data[0], {
+      id: 'model-0',
+      type: 'text',
+      name: 'Model 0',
+      context_length: 128_000,
+      max_completion_tokens: 8192,
+      capabilities: ['supportsVision'],
+      privacy: 'private',
+      pricing: { input: { usd: 1 }, output: { usd: 2 } },
+    })
+
+    const last = await tool.handler({ type: 'text', offset: 100, limit: 50 } as never)
+    const s2 = last.structuredContent as { count: number; next_offset: number | null }
+    assert.equal(s2.count, 20)
+    assert.equal(s2.next_offset, null)
+
+    const verbose = await tool.handler({ type: 'text', limit: 1, verbose: true } as never)
+    assert.deepEqual((verbose.structuredContent as { data: unknown[] }).data, [models[0]])
+    assert.equal(tool.inputSchema.limit.safeParse(201).success, false)
+  })
+
+  for (const verbose of [false, true]) {
+    it(`venice_list_models follows every page using only text content (verbose=${verbose})`, async () => {
+      const models = Array.from({ length: 120 }, (_, i) => ({
+        id: `model-${i}`,
+        type: 'text',
+        model_spec: { description: 'x'.repeat(1500) },
+      }))
+      const stub = new StubClient({ '/v1/models?type=all': () => ({ data: models }) })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')!
+      const seen: string[] = []
+      let offset: number | null = 0
+      while (offset !== null) {
+        const result = await tool.handler({ offset, verbose })
+        const text = result.content.filter((c) => c.type === 'text').map((c) => c.text).join('')
+        const page = JSON.parse(text)
+        assert.equal(page.total, models.length)
+        assert.deepEqual(page.ids, models.map((m) => m.id))
+        assert.equal(page.offset, offset)
+        assert.equal(page.count, page.data.length)
+        assert.ok(page.count > 0)
+        seen.push(...page.data.map((m: { id: string }) => m.id))
+        assert.ok(page.next_offset === null || page.next_offset === offset + page.count)
+        assert.ok(seen.length <= models.length)
+        offset = page.next_offset
+      }
+      assert.deepEqual(seen, models.map((m) => m.id))
+    })
+  }
+
+  it('venice_list_models caps verbose pages by size and continues via next_offset', async () => {
+    const models = Array.from({ length: 200 }, (_, i) => ({
+      id: `model-${i}`,
+      type: 'video',
+      model_spec: { description: 'x'.repeat(1500) },
+    }))
+    const stub = new StubClient({ '/v1/models?type=all': () => ({ data: models }) })
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')!
+    const r = await tool.handler({ limit: 200, verbose: true } as never)
+    const s = r.structuredContent as { count: number; next_offset: number | null }
+    const text = (r.content[0] as { text: string }).text
+    assert.ok(s.count > 0 && s.count < 200)
+    assert.equal(s.next_offset, s.count)
+    assert.ok(text.length <= 64 * 1024)
+    assert.equal(JSON.parse(text).data.length, s.count)
+  })
+
+  it('venice_voice_clone list shapes live model-scoped voice metadata', async () => {
+    const { get, stub } = setup()
+    const r = await get('venice_voice_clone').handler({ action: 'list' } as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=tts')
+    const shaped = r.structuredContent as {
+      type: string
+      data: Array<{
+        id: string
+        voices: string[]
+        voice_cloning: { mode: string }
+        supported_formats: string[]
+      }>
+    }
+    assert.equal(shaped.type, 'tts')
+    assert.deepEqual(shaped.data[0].voices, ['voice-a', 'voice-b'])
+    assert.equal(shaped.data[0].voice_cloning.mode, 'persistent')
+    assert.deepEqual(shaped.data[0].supported_formats, ['mp3', 'wav'])
+  })
+
+  it('venice_voice_clone create leaves model to the upstream default and only accepts cloning models', async () => {
+    const { get, stub } = setup()
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/mpeg' },
+        })) as typeof fetch
+      const tool = get('venice_voice_clone')
+      const r = await tool.handler({
+        action: 'create',
+        sample_url: 'https://93.184.216.34/sample.mp3',
+      } as never)
+      assert.equal(r.isError, undefined)
+      const body = stub.callsTo('/v1/audio/voices')[0].body as Record<string, unknown>
+      assert.equal('model' in body, false)
+      assert.equal(tool.inputSchema.model.safeParse('tts-minimax-speech-02-hd').success, true)
+      assert.equal(tool.inputSchema.model.safeParse('tts-kokoro').success, false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_web_search returns parsed results as structuredContent', async () => {
+    const { get } = setup()
+    const r = await get('venice_web_search').handler({ query: 'venice' } as never)
+    assert.deepEqual(r.structuredContent, { results: [{ url: 'https://x', snippet: 's' }] })
+  })
+
+  it('catalog metadata tools preserve the upstream map envelope', async () => {
+    const { get } = setup()
+    const traits = await get('venice_model_traits').handler({} as never)
+    assert.deepEqual(traits.structuredContent, {
+      data: { default: 'deepseek-v4-flash-0731' },
+      object: 'list',
+      type: 'text',
+    })
+    const compatibility = await get('venice_model_compatibility_mapping').handler({} as never)
+    assert.deepEqual(compatibility.structuredContent, {
+      data: { 'gpt-4o': 'deepseek-v4-flash-0731' },
+      object: 'list',
+      type: 'text',
+    })
+  })
+
+  it('venice_asr forwards timestamps and preserves timestamp metadata', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })) as typeof fetch
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({
+          text: 'hello',
+          duration: 1.5,
+          timestamps: { word: [{ word: 'hello', start: 0, end: 1.5 }] },
+        }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        response_format: 'json',
+        timestamps: true,
+      } as never)
+      assert.equal(stub.calls.at(-1)?.maxBytes, 1024 * 1024)
+      const body = stub.calls.at(-1)?.body as Record<string, unknown>
+      assert.equal(body.response_format, 'json')
+      assert.equal(body.timestamps, 'true')
+      assert.deepEqual((r.structuredContent as { timestamps: unknown }).timestamps, {
+        word: [{ word: 'hello', start: 0, end: 1.5 }],
+      })
+      const textContent = JSON.parse((r.content[0] as { text: string }).text)
+      assert.equal(textContent.text, 'hello')
+      assert.deepEqual(textContent.timestamps, { word: [{ word: 'hello', start: 0, end: 1.5 }] })
+      assert.equal(textContent.result_handle, undefined)
+      assert.equal(r.structuredContent?.result_handle, undefined)
+      assert.equal(textContent.timestamps_truncated, false)
+      assert.equal(textContent.next_timestamp_offset, null)
+      assert.equal(tool.inputSchema.response_format.safeParse('srt').success, false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr does not retain timestamp results that fit the requested page', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = async () =>
+        new Response('mock audio', { headers: { 'content-type': 'audio/wav' } })
+      const words = Array.from({ length: 200 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: words } }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      for (const args of [{}, { timestamp_offset: 199, timestamp_limit: 1 }]) {
+        const result = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true, ...args })
+        assert.equal(result.isError, undefined)
+        assert.equal(result.structuredContent?.timestamps_truncated, false)
+        assert.equal(result.structuredContent?.result_handle, undefined)
+        assert.equal(JSON.parse((result.content[0] as { text: string }).text).result_handle, undefined)
+      }
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr pages a retained result without transcribing the clip twice', async () => {
+    const originalFetch = globalThis.fetch
+    let fetchCalls = 0
+    try {
+      globalThis.fetch = (async () => {
+        fetchCalls += 1
+        return new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })
+      }) as typeof fetch
+      const words = Array.from({ length: 250 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({
+          text: 'long transcript',
+          timestamps: { word: words },
+        }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        timestamps: true,
+      } as never)
+      const structured = r.structuredContent as {
+        timestamps: { word: unknown[] }
+        timestamp_total: { word: number }
+        timestamps_truncated: boolean
+        timestamp_limit: number
+        next_timestamp_offset: number | null
+        result_handle: string
+      }
+      assert.equal(structured.timestamps.word.length, 200)
+      assert.deepEqual(structured.timestamps.word[0], words[0])
+      assert.equal(structured.timestamp_total.word, 250)
+      assert.equal(structured.timestamps_truncated, true)
+      assert.equal(structured.timestamp_limit, 200)
+      assert.equal(typeof structured.result_handle, 'string')
+      assert.equal(structured.next_timestamp_offset, 200)
+      const text = (r.content[0] as { text: string }).text
+      assert.equal(JSON.parse(text).result_handle, structured.result_handle)
+      assert.equal(JSON.parse(text).next_timestamp_offset, 200)
+      assert.doesNotMatch(text, /w249/)
+
+      const page = await tool.handler({
+        result_handle: structured.result_handle,
+        timestamp_offset: 200,
+        timestamp_limit: 50,
+      } as never)
+      const paged = page.structuredContent as {
+        timestamps: { word: unknown[] }
+        timestamp_offset: number
+        timestamps_truncated: boolean
+        next_timestamp_offset: number | null
+        result_handle: string
+      }
+      assert.equal(paged.timestamps.word.length, 50)
+      assert.deepEqual(paged.timestamps.word[0], words[200])
+      assert.equal(paged.timestamp_offset, 200)
+      assert.equal(paged.timestamps_truncated, false)
+      assert.equal(paged.next_timestamp_offset, null)
+      assert.equal(paged.result_handle, structured.result_handle)
+      // The point of the handle: continuation must not pay for a second transcription.
+      assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 1)
+      assert.equal(fetchCalls, 1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr result handles are private to the tool set that created them', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })) as typeof fetch
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: Array.from({ length: 201 }, () => ({ word: 'hi', start: 0, end: 1 })) } }),
+      })
+      const sessionA = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const sessionB = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await sessionA.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true } as never)
+      const handle = (r.structuredContent as { result_handle: string }).result_handle
+      assert.equal(typeof handle, 'string')
+
+      const own = await sessionA.handler({ result_handle: handle } as never)
+      assert.equal(own.isError, undefined)
+      const other = await sessionB.handler({ result_handle: handle } as never)
+      assert.equal(other.isError, true)
+      assert.equal((other.structuredContent as { error: string }).error, 'asr_result_expired')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr pages a long transcript through the handle without transcribing again', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', { status: 200, headers: { 'content-type': 'audio/wav' } })) as typeof fetch
+      const transcript = 'a'.repeat(8000) + 'tail'
+      const stub = new StubClient({ '/v1/audio/transcriptions': () => transcript })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const first = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', response_format: 'text' } as never)
+      const s1 = first.structuredContent as { text: string; next_text_offset: number; result_handle: string }
+      assert.equal(s1.text.length, 8000)
+      assert.equal(s1.next_text_offset, 8000)
+      assert.equal(JSON.parse((first.content[0] as { text: string }).text).result_handle, s1.result_handle)
+
+      const next = await tool.handler({ result_handle: s1.result_handle, text_offset: s1.next_text_offset } as never)
+      const s2 = next.structuredContent as { text: string; next_text_offset: number | null }
+      assert.equal(s2.text, 'tail')
+      assert.equal(s2.next_text_offset, null)
+      assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_asr drops a retained result when its retention timer fires', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'Date'] })
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', { status: 200, headers: { 'content-type': 'audio/wav' } })) as typeof fetch
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => ({ text: 'hi', timestamps: { word: Array.from({ length: 201 }, () => ({ word: 'hi', start: 0, end: 1 })) } }),
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({ audio_url: 'https://93.184.216.34/audio.wav', timestamps: true } as never)
+      const handle = (r.structuredContent as { result_handle: string }).result_handle
+      assert.equal(typeof handle, 'string')
+      t.mock.timers.tick(10 * 60 * 1000)
+      const expired = await tool.handler({ result_handle: handle } as never)
+      assert.equal((expired.structuredContent as { error: string }).error, 'asr_result_expired')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('venice_web_search caps query at the API maximum of 400 characters', () => {
+    const tool = buildTools(new StubClient().asClient(), cfg).find((t) => t.name === 'venice_web_search')!
+    const schema = z.object(tool.inputSchema)
+    assert.equal(schema.safeParse({ query: 'q'.repeat(400) }).success, true)
+    assert.equal(schema.safeParse({ query: 'q'.repeat(401) }).success, false)
+  })
+
+  it('venice_asr refuses to re-transcribe when a result handle is unknown or expired', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+    const r = await tool.handler({
+      result_handle: 'missing-handle',
+      timestamp_offset: 200,
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /expired result_handle/)
+    assert.equal((r.structuredContent as { error: string }).error, 'asr_result_expired')
+    assert.equal(stub.callsTo('/v1/audio/transcriptions').length, 0)
+  })
+
+  it('venice_asr requires audio_url when no result handle is supplied', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+    const r = await tool.handler({ timestamps: true } as never)
+
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /audio_url is required/)
+    assert.equal(stub.calls.length, 0)
+  })
+
+  it('venice_asr rejects an oversized timestamped transcription before echoing it', async () => {
+    const originalFetch = globalThis.fetch
+    try {
+      globalThis.fetch = (async () =>
+        new Response('mock audio', {
+          status: 200,
+          headers: { 'content-type': 'audio/wav' },
+        })) as typeof fetch
+      const { VeniceResponseTooLargeError } = await import('../src/venice-client.js')
+      const stub = new StubClient({
+        '/v1/audio/transcriptions': () => {
+          throw new VeniceResponseTooLargeError('/v1/audio/transcriptions', 1024 * 1024)
+        },
+      })
+      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_asr')!
+      const r = await tool.handler({
+        audio_url: 'https://93.184.216.34/audio.wav',
+        timestamps: true,
+      } as never)
+      assert.equal(r.isError, true)
+      assert.match((r.content[0] as { text: string }).text, /1 MiB/)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('venice_list_models forwards type to the catalog so non-text models are discoverable', async () => {
     const { stub, get } = setup()
     const r = await get('venice_list_models').handler({ type: 'image' } as never)
@@ -1794,48 +2476,6 @@ describe('tool output shaping', () => {
 
     await get('venice_list_models').handler({} as never)
     assert.equal(stub.calls.at(-1)?.path, '/v1/models?type=all')
-  })
-
-  for (const count of [5, 80, 81]) {
-    it(`venice_list_models bounds ${count} large rows while preserving JSON and all ids`, async () => {
-      const models = Array.from({ length: count }, (_, i) => ({
-        id: `model-${i}`,
-        description: 'd'.repeat(count === 5 ? 3000 : 1000),
-      }))
-      const stub = new StubClient({ '/v1/models?type=all': () => ({ data: models }) })
-      const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')
-      assert.ok(tool)
-      const result = await tool.handler({})
-      assert.equal(result.isError, undefined)
-      assert.equal(result.content.length, 2)
-      assert.deepEqual(JSON.parse((result.content[1] as { text: string }).text), { ids: models.map((m) => m.id) })
-      const text = (result.content[0] as { text: string }).text
-      assert.ok(text.length <= 8000)
-      const parsed = JSON.parse(text)
-      assert.equal(parsed.truncated, true)
-      assert.equal(parsed.total, count)
-      assert.ok(parsed.returned > 0 && parsed.returned < count)
-      assert.deepEqual(parsed.data, models.slice(0, parsed.returned))
-      assert.deepEqual(result.structuredContent, {
-        type: 'all',
-        count,
-        ids: models.map((m) => m.id),
-        truncated: true,
-        returned: parsed.returned,
-        total: count,
-      })
-    })
-  }
-
-  it('venice_list_models keeps small catalogs as a JSON array', async () => {
-    const models = [{ id: 'small-model', description: 'Small row' }]
-    const stub = new StubClient({ '/v1/models?type=all': () => ({ models }) })
-    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_list_models')
-    assert.ok(tool)
-    const result = await tool.handler({})
-    assert.equal(result.content.length, 1)
-    assert.deepEqual(JSON.parse((result.content[0] as { text: string }).text), models)
-    assert.deepEqual(result.structuredContent, { type: 'all', count: 1, ids: ['small-model'] })
   })
 
   it('venice_model_details returns the full matching catalog row', async () => {
@@ -1858,6 +2498,19 @@ describe('tool output shaping', () => {
     assert.deepEqual(model.model_spec.constraints.aspectRatios, ['1:1', '16:9'])
     assert.equal(model.model_spec.pricing.generation.usd, 0.03)
     assert.equal(model.model_spec.supportsWebSearch, false)
+  })
+
+  it('venice_model_details reads a catalog returned under models', async () => {
+    const stub = new StubClient({
+      '/v1/models?type=video': () => ({ models: [{ id: 'video-model', type: 'video', model_spec: {} }] }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_model_details')!.handler({
+      model_id: 'video-model',
+      type: 'video',
+    } as never)
+    assert.equal(r.isError, undefined)
+    assert.equal((r.structuredContent as { id: string }).id, 'video-model')
   })
 
   it('venice_model_details resolves a mixed-case id after schema normalization', async () => {
@@ -2207,6 +2860,99 @@ describe('tool output shaping', () => {
     assert.equal(stub.calls.at(-1)?.auth, 'siwx')
   })
 
+  it('accepts EVM and Solana addresses on all x402 helpers and preserves Solana case', async () => {
+    const { get } = setup()
+    const evm = `0x${'A'.repeat(40)}`
+    const solana = 'So11111111111111111111111111111111111111112'
+    for (const name of ['venice_x402_balance', 'venice_x402_transactions']) {
+      const schema = z.object(get(name).inputSchema)
+      assert.equal(schema.safeParse({ wallet_address: evm }).success, true, `${name} EVM`)
+      assert.equal(schema.safeParse({ wallet_address: solana }).success, true, `${name} Solana`)
+      assert.equal(schema.safeParse({ wallet_address: 'not-a-wallet' }).success, false, `${name} invalid`)
+    }
+
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_x402_balance')!
+    await tool.handler({ wallet_address: solana } as never)
+    assert.equal(stub.calls.at(-1)?.path, `/v1/x402/balance/${solana}`)
+  })
+
+  it('uses cursor-only continuation and exposes JSON and CSV next cursors', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+
+    const invalid = await history.handler({ cursor: 'cursor_1', currency: 'USD' } as never)
+    assert.equal(invalid.isError, true)
+    assert.equal(stub.calls.length, 0)
+
+    const json = await history.handler({ cursor: 'cursor_1' } as never)
+    assert.equal(stub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=cursor_1')
+    assert.equal(json.structuredContent?.nextCursor, 'stub-next-cursor')
+
+    const csvStub = new StubClient({
+      '/v1/billing/usage-history': () => 'timestamp,amount\n2026-08-01T00:00:00.000Z,-0.1',
+    })
+    const csvTool = buildTools(csvStub.asClient(), cfg).find(
+      (tool) => tool.name === 'venice_billing_usage_history',
+    )!
+    const csv = await csvTool.handler({ format: 'csv', page_size: 50 } as never)
+    assert.equal(csvStub.calls.at(-1)?.headers?.Accept, 'text/csv')
+    assert.equal(csv.structuredContent?.nextCursor, 'csv:stub-next-cursor')
+    assert.match((csv.content[0] as { text: string }).text, /timestamp,amount/)
+
+    const continued = await csvTool.handler({ cursor: csv.structuredContent?.nextCursor as string } as never)
+    assert.equal(csvStub.calls.at(-1)?.headers?.Accept, 'text/csv')
+    assert.equal(csvStub.calls.at(-1)?.path, '/v1/billing/usage-history?cursor=stub-next-cursor')
+    assert.equal(continued.structuredContent?.format, 'csv')
+  })
+
+  it('validates analytics filter combinations before making a request', async () => {
+    const { get, stub } = setup()
+    const analytics = get('venice_billing_usage_analytics')
+    assert.equal(
+      (await analytics.handler({ lookback: '7d', start_date: '2026-08-01', end_date: '2026-08-02' } as never)).isError,
+      true,
+    )
+    assert.equal((await analytics.handler({ lookback: '91d' } as never)).isError, true)
+    assert.equal((await analytics.handler({ start_date: '2026-08-01' } as never)).isError, true)
+    assert.equal(stub.calls.length, 0)
+  })
+
+  it('accepts high-precision RFC3339 timestamps on usage-history filters', async () => {
+    const { get, stub } = setup()
+    const history = get('venice_billing_usage_history')
+    const schema = z.object(history.inputSchema)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.123456Z' }).success, true)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.1Z' }).success, true)
+    assert.equal(schema.safeParse({ start_timestamp: '2026-08-01T00:00:00.123456789Z' }).success, true)
+
+    const result = await history.handler({
+      start_timestamp: '2026-08-01T00:00:00.123456Z',
+      end_timestamp: '2026-08-02T00:00:00.1Z',
+    } as never)
+    assert.equal(result.isError, undefined)
+    assert.equal(
+      stub.calls.at(-1)?.path,
+      '/v1/billing/usage-history?startTimestamp=2026-08-01T00%3A00%3A00.123456Z&endTimestamp=2026-08-02T00%3A00%3A00.1Z&pageSize=10',
+    )
+  })
+
+  it('redacts unexpected secret fields from operator API-key reads', async () => {
+    const secret = 'vk_should_not_escape'
+    const stub = new StubClient({
+      '/v1/api_keys': () => ({
+        object: 'list',
+        data: [{ id: 'key-1', last6Chars: 'escape', apiKey: secret, token: 'token-secret' }],
+      }),
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_list_api_keys')!
+    const result = await tool.handler({} as never)
+    const text = (result.content[0] as { text: string }).text
+    assert.doesNotMatch(text, new RegExp(secret))
+    assert.doesNotMatch(text, /token-secret/)
+    assert.match(text, /\[REDACTED\]/)
+  })
+
   it('venice_asr reports timeout when fetching audio_url stalls', async () => {
     const originalFetch = globalThis.fetch
     try {
@@ -2259,6 +3005,50 @@ describe('character discovery auth', () => {
       stub.calls.map((call) => call.auth),
       ['apiKey', 'apiKey', 'apiKey'],
     )
+  })
+})
+
+describe('x402 top-up discovery auth', () => {
+  it('posts an empty unauthenticated body so a configured API key is not forwarded', async () => {
+    const stub = new StubClient()
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
+    assert.deepEqual(Object.keys(tool.inputSchema), [])
+    assert.doesNotMatch(tool.description, /validated locally/)
+    await tool.handler({} as never)
+    const call = stub.calls.at(-1)
+    assert.equal(call?.path, '/v1/x402/top-up')
+    assert.deepEqual(call?.body, {})
+    assert.equal(call?.auth, 'none')
+  })
+
+  it('returns the documented Base and Solana payment options from the 402 body', async () => {
+    const base = {
+      scheme: 'exact',
+      network: 'eip155:8453',
+      amount: '5000000',
+      asset: '0xUSDC',
+      payTo: '0xRECEIVER',
+      maxTimeoutSeconds: 300,
+      extra: { name: 'USD Coin', version: '2' },
+    }
+    const solana = { ...base, network: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', asset: 'MINT', payTo: 'SOLRECEIVER' }
+    const stub = new StubClient({
+      '/v1/x402/top-up': () => {
+        throw new VeniceUpstreamError({
+          message: 'pay',
+          status: 402,
+          body: { x402Version: 2, accepts: [{ ...base, internal: 'drop-me' }, solana], debug: 'drop-me' },
+        })
+      },
+    })
+    const tool = buildTools(stub.asClient(), cfg).find((item) => item.name === 'venice_x402_top_up_info')!
+    const result = await tool.handler({} as never)
+    assert.equal(result.isError, undefined)
+    assert.deepEqual(result.structuredContent, { x402Version: 2, accepts: [base, solana] })
+    const text = (result.content[0] as { text: string }).text
+    assert.match(text, /eip155:8453/)
+    assert.match(text, /solana:/)
+    assert.doesNotMatch(text, /drop-me/)
   })
 })
 

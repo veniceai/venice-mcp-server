@@ -80,6 +80,7 @@ describe('loadConfig', () => {
     assert.equal(cfg.defaultTtsModel, 'venice-tts-2')
     assert.equal(cfg.defaultAsrModel, 'venice-asr-2')
   })
+
 })
 
 describe('server version', () => {

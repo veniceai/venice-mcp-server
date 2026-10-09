@@ -5,7 +5,7 @@
 [![npm](https://img.shields.io/npm/v/@veniceai/mcp-server.svg)](https://www.npmjs.com/package/@veniceai/mcp-server)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds. **36 tools across all modalities, one config block.**
+Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds, including billing and API-key operations. **45 tools across all modalities, one config block.**
 
 ## Quick start
 
@@ -31,12 +31,12 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
 
 ### 3. Restart your MCP host
 
-That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 30 more Venice tools.
+That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 39 more Venice tools.
 
 
 ## What you get
 
-**36 tools** spanning every Venice modality, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer).
+**45 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer). The voices resource is built live from each TTS model's catalog metadata.
 
 Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` annotations, so hosts can run lookups without prompting and ask before anything destructive, like media cleanup or a crypto relay.
 
@@ -73,9 +73,9 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 | Tool | Description |
 |---|---|
-| `venice_tts` | Convert text to speech. Supports cloned voices + emotion tags (`[whispers]`, `[sarcastically]`, etc.). |
-| `venice_asr` | Transcribe audio from a URL. |
-| `venice_voice_clone` | List built-in voices or clone a new voice from a sample audio URL. |
+| `venice_tts` | Convert text to speech. Supports cloned voices, temperature, and Venice's streaming flag; MCP returns the completed audio as one buffered result. |
+| `venice_asr` | Transcribe audio from a URL as JSON or text, with optional word and character timestamps. |
+| `venice_voice_clone` | Discover live model-scoped voice metadata, or clone a voice from a sample audio URL for `tts-chatterbox-hd` (default) or `tts-minimax-speech-02-hd`. Cloned voices are returned as a `vv_<id>` handle to pass as the `venice_tts` voice. |
 | `venice_audio_quote` | Get a price quote for music generation BEFORE queuing. |
 
 ### 🎵 Music
@@ -90,7 +90,7 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 | Tool | Description |
 |---|---|
-| `venice_web_search` | Search the web (Firecrawl-backed). Returns ranked results with snippets. |
+| `venice_web_search` | Search with Brave (default, Zero Data Retention) or Google (proxied/anonymized by Venice). Returns the parsed `{ query, results }` as structured content. |
 | `venice_web_scrape` | Scrape one URL into markdown text. |
 | `venice_text_parser` | Extract text from a document URL (PDF, DOCX, EPUB, PPTX, XLSX, …). |
 
@@ -98,8 +98,10 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 | Tool | Description |
 |---|---|
-| `venice_list_models` | List the live model catalog with capabilities and prices. |
+| `venice_list_models` | Page through the live model catalog, every type by default, with server-side filtering for `asr`, `decision`, `embedding`, `image`, `music`, `text`, `tts`, `upscale`, `inpaint`, `video`, `all`, `code`, or any newer catalog type. Returns compact summaries (50 per page by default, up to 200) with `total`, `next_offset`, and every matching model id; set `verbose` for full model objects. |
 | `venice_model_details` | Get one exact model's full catalog row, including `model_spec` constraints, capabilities, and pricing. |
+| `venice_model_traits` | Get the live trait-name to model-id mapping for a model type. |
+| `venice_model_compatibility_mapping` | Get compatible model-name to Venice model-id mappings. |
 | `venice_list_characters` | List public Venice characters with search, tag/category/model, content, capability, sort, and pagination filters. API key only. |
 | `venice_get_character` | Get a public character by slug. API key only. |
 | `venice_character_reviews` | List paginated public reviews for a character. API key only. |
@@ -126,6 +128,29 @@ Both routes are currently live without authentication. They only apply to text m
 | `venice_crypto_networks` | List the live network slugs supported by the crypto RPC proxy. No authentication required. |
 | `venice_crypto_rpc` | Proxy one JSON-RPC request or a batch of up to 100 requests. Returns compact JSON (max 64 KiB) plus Venice's credit, cost, and idempotent-replay headers. Transaction broadcasts must be sent as single requests with `idempotency_key`. |
 
+### 💰 Billing (ADMIN API key only)
+
+| Tool | Description |
+|---|---|
+| `venice_billing_balance` | Get current USD, DIEM, and bundled-credit availability. |
+| `venice_billing_usage_analytics` | Get beta aggregate usage by date, model, and API key using a lookback or custom date range. |
+| `venice_billing_usage_history` | Walk detailed usage with cursor pagination, first-page filters, and JSON or CSV output. |
+
+Usage-history first pages default to 10 rows. JSON and CSV pages are returned whole, never truncated. A page exceeding 64 KiB returns an error without partial rows or a continuation cursor; restart with the original filters and a smaller `page_size` (minimum 10), or a narrower timestamp range. Retrying the same cursor cannot reduce the page size encoded in it.
+
+Usage-history continuation calls must send `cursor` without the original filters. CSV pages return a `csv:`-prefixed `nextCursor` so a cursor-only follow-up stays on `text/csv`. The deprecated `/billing/usage` route is not wrapped. Billing tools require an ADMIN `VENICE_API_KEY` and fail locally instead of falling back to SIWX. Inference keys cannot call these endpoints.
+
+### 🔑 API keys
+
+| Tool | Description |
+|---|---|
+| `venice_list_api_keys` | List active key metadata without full key secrets. ADMIN API key only. |
+| `venice_get_api_key` | Get one key's metadata, usage, balances, and rate limits. ADMIN API key only. |
+| `venice_api_key_rate_limits` | Get current balances, access status, tier, and model limits. API key only. |
+| `venice_api_key_rate_limit_logs` | Get the last 50 exceeded rate-limit events. ADMIN API key only; experimental upstream. |
+
+List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_key_rate_limits` accepts an INFERENCE or ADMIN key. These tools never forward `SIGN-IN-WITH-X`. Web3 challenge and mint are not registered here.
+
 ### 💳 x402 wallet helpers
 
 > Optional — only needed if you authenticate with a wallet via **x402** instead of an API key. See [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required).
@@ -133,7 +158,7 @@ Both routes are currently live without authentication. They only apply to text m
 | Tool | Description |
 |---|---|
 | `venice_x402_balance` | Check the prepaid x402 credit balance for a wallet address. |
-| `venice_x402_top_up_info` | Fetch top-up requirements (network, USDC token address, receiver wallet, minimum amount). |
+| `venice_x402_top_up_info` | Fetch the top-up payment requirements: the accepted Base and Solana USDC options, each with network, asset, receiver wallet, and minimum amount. Takes no arguments. |
 | `venice_x402_transactions` | List recent x402 top-up + debit transactions for a wallet. |
 
 ## Configuration
@@ -180,7 +205,7 @@ Or run from source — see [Development](#development) below.
 
 > Skip this section if you're using `VENICE_API_KEY`. Everything below is optional and only matters if you specifically want to pay with a crypto wallet instead of a Venice account.
 
-Venice supports authenticating with a **SIWE-signed wallet token** (a.k.a. SIWX) backed by **prepaid USDC credit on Base mainnet**, in addition to the normal API key flow. This lets you use Venice with no email, phone, or KYC — your wallet is the only identity.
+Venice supports **EVM SIWE or Solana SIWX wallet authentication** backed by prepaid USDC credit on **Base or Solana mainnet**, in addition to the normal API key flow. This lets you use Venice with no email, phone, or KYC — your wallet is the only identity.
 
 ### Two-line config
 
@@ -190,33 +215,33 @@ Venice supports authenticating with a **SIWE-signed wallet token** (a.k.a. SIWX)
     "venice": {
       "command": "npx",
       "args": ["-y", "@veniceai/mcp-server@0.2.0"],
-      "env": { "VENICE_SIWX_TOKEN": "<base64 SIWE payload>" }
+      "env": { "VENICE_SIWX_TOKEN": "<base64 signed SIWX payload>" }
     }
   }
 }
 ```
 
-The MCP server forwards `VENICE_SIWX_TOKEN` as the `X-Sign-In-With-X` header on every Venice API call.
+The MCP server forwards the existing `VENICE_SIWX_TOKEN` env format using Venice's preferred `SIGN-IN-WITH-X` header.
 
 ### How it works
 
 ```
 ONE-TIME SETUP (per wallet)
-  Sign a SIWE message → produces a SIWX token (base64 JSON)
+  Sign an EVM SIWE or Solana SIWX message → produces a SIWX token (base64 JSON)
   Set VENICE_SIWX_TOKEN in this MCP server's env
 
 TOP UP (when balance is low)
   POST /api/v1/x402/top-up  (no payment header)  →  402 + payment requirements
-  Sign a USDC EIP-3009 transferWithAuthorization in your wallet
-  POST /api/v1/x402/top-up with X-402-Payment: <signed>  →  Venice settles via
-  Coinbase CDP facilitator and credits your prepaid balance
+  Choose a Base or Solana USDC option and sign it in your wallet
+  POST /api/v1/x402/top-up with PAYMENT-SIGNATURE: <signed>  →  Venice settles
+  the payment and credits your prepaid balance
 
 EVERY INFERENCE CALL
-  MCP server sends X-Sign-In-With-X: <SIWX token>
+  MCP server sends SIGN-IN-WITH-X: <SIWX token>
   Venice → wallet → credit account → debits and runs inference
 ```
 
-This MCP server **never sees your private key**. SIWE signing and USDC authorization happen in your wallet (MetaMask, Coinbase Wallet, viem script, etc.) — the server is purely a header forwarder.
+This MCP server **never sees your private key**. EVM/Solana SIWX signing and USDC payment signing happen in your wallet — the server forwards only the signed SIWX token. The top-up helper discovers requirements but does not accept or submit payment signatures.
 
 The helper tools `venice_x402_balance`, `venice_x402_top_up_info`, and `venice_x402_transactions` make balance + top-up flow inspectable from inside the agent.
 
@@ -230,7 +255,7 @@ The helper tools `venice_x402_balance`, `venice_x402_top_up_info`, and `venice_x
 
 ### Per-call HTTP 402 — not supported
 
-Venice rejects `X-402-Payment` on inference routes. The header is only accepted on `/api/v1/x402/top-up`. This is by design — Venice settles top-ups in batches via the Coinbase CDP facilitator, then debits a fast off-chain credit account on inference. If you need per-call settlement semantics, you'll need a separate proxy that pays the credit account on demand.
+Venice rejects payment headers on inference routes. The preferred `PAYMENT-SIGNATURE` header is only used when submitting a signed payment to `/api/v1/x402/top-up`; this MCP server does not submit payments. After an external top-up, Venice debits the wallet's off-chain credit account on inference.
 
 ### Auth-mode coverage notes
 
@@ -256,7 +281,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 ```
 ┌──────────────────────┐        stdio  OR        ┌────────────────────────┐
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
-│  (Claude / Cursor /  ├────────────────────────▶│  - 36 tools            │
+│  (Claude / Cursor /  ├────────────────────────▶│  - 45 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
 └──────────────────────┘                         │  - 3 prompts           │
                                                  │  - header forwarder    │
@@ -264,7 +289,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
                                                               │ HTTPS
                                                               │   Authorization: Bearer ***
                                                               │   OR
-                                                              │   X-Sign-In-With-X: <SIWX>
+                                                              │   SIGN-IN-WITH-X: <SIWX>
                                                               ▼
                                                  ┌────────────────────────┐
                                                  │  Venice API            │
@@ -294,7 +319,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_video_complete` | `POST /v1/video/complete` |
 | `venice_tts` | `POST /v1/audio/speech` |
 | `venice_asr` | `POST /v1/audio/transcriptions` |
-| `venice_voice_clone` | `POST /v1/audio/voices` |
+| `venice_voice_clone` (`create`) | `POST /v1/audio/voices` |
 | `venice_music_generate` | `POST /v1/audio/queue` |
 | `venice_music_status` | `POST /v1/audio/retrieve` |
 | `venice_music_complete` | `POST /v1/audio/complete` |
@@ -307,8 +332,11 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 
 | Tool | Endpoint |
 |---|---|
-| `venice_list_models` | `GET /v1/models` |
+| `venice_list_models` | `GET /v1/models?type=…` (`type=all` when omitted) |
 | `venice_model_details` | `GET /v1/models?type=:type` (exact ID match in the filtered catalog) |
+| `venice_model_traits` | `GET /v1/models/traits` |
+| `venice_model_compatibility_mapping` | `GET /v1/models/compatibility_mapping` |
+| `venice_voice_clone` (`list`) / `venice://voices` | `GET /v1/models?type=tts` |
 | `venice_image_styles` | `GET /v1/image/styles` |
 | `venice_audio_quote` | `POST /v1/audio/quote` |
 | `venice_video_quote` | `POST /v1/video/quote` |
@@ -325,7 +353,19 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 | `venice_character_reviews` | `GET /v1/characters/:slug/reviews` |
 | `venice_chat_with_character` | `POST /v1/chat/completions` (with `character_slug`) |
 
-### x402 wallet helpers (SIWX only)
+### Billing and API-key reads (ADMIN API key only, except rate-limit tools)
+
+| Tool | Endpoint |
+|---|---|
+| `venice_billing_balance` | `GET /v1/billing/balance` |
+| `venice_billing_usage_analytics` | `GET /v1/billing/usage-analytics` |
+| `venice_billing_usage_history` | `GET /v1/billing/usage-history` |
+| `venice_list_api_keys` | `GET /v1/api_keys` |
+| `venice_get_api_key` | `GET /v1/api_keys/:id` |
+| `venice_api_key_rate_limits` | `GET /v1/api_keys/rate_limits` (INFERENCE or ADMIN) |
+| `venice_api_key_rate_limit_logs` | `GET /v1/api_keys/rate_limits/log` (ADMIN) |
+
+### x402 wallet helpers (SIWX reads + auth-free discovery)
 
 | Tool | Endpoint |
 |---|---|
@@ -356,7 +396,7 @@ test/
 ├── config.test.ts             # env parsing, defaults, header precedence
 ├── format.test.ts             # 402 formatter cases
 ├── venice-client.test.ts      # HTTP client + real mock Venice
-├── tools.test.ts              # 36 tool registry + endpoint+method+body mappings
+├── tools.test.ts              # tool registry (45 tools) + endpoint/method/body mappings
 ├── integration.test.ts        # end-to-end JSON-RPC over stdio against a mock Venice
 └── helpers/
     ├── stub-client.ts         # in-process VeniceClient stub
@@ -365,9 +405,9 @@ test/
 
 The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/stdout, exercising `initialize` → `tools/list` → `tools/call` → `resources/list` → `resources/read` against a real HTTP mock Venice in three auth scenarios (API key only, SIWX only, no auth).
 
-### End-to-end with live Venice + Base mainnet
+### End-to-end with live Venice + Base EVM harness
 
-`test/e2e/` is a phased harness against the **real** Venice API and **real** Base mainnet — not a mock. It generates a throwaway wallet, signs SIWE + EIP-3009 payloads with `viem`, and drives the MCP server via JSON-RPC over stdio. The wallet is persisted at `.e2e-wallet.json` (chmod 600, gitignored — **never commit**).
+`test/e2e/` currently exercises the EVM rail against the **real** Venice API and **real** Base mainnet—not a mock. Venice and the MCP x402 helpers support both Base and Solana, but this harness generates a throwaway EVM wallet and signs SIWE + EIP-3009 payloads with `viem`. The wallet is persisted at `.e2e-wallet.json` (chmod 600, gitignored—**never commit**).
 
 | Phase | npm script | Cost | What it tests |
 |---|---|---|---|
@@ -379,8 +419,8 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 | `safe` | `test:e2e:safe` | free | `create` + `empty` + `balance` (no money spent) |
 
 ```bash
-# Comprehensive — all 36 tools × both auth modes, side-by-side report
-VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
+# Comprehensive — all 45 tools × both auth modes, side-by-side report (mint is always skipped)
+env VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 ```
 
 ## FAQ
@@ -389,7 +429,7 @@ VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 No. The simple path is `VENICE_API_KEY` + a normal Venice account. x402 is an *option* for users who want a wallet-only flow.
 
 **Where does the wallet's private key live?**
-Not in this server. You sign the SIWE message + USDC top-up authorizations in your own wallet (MetaMask, Coinbase Wallet, viem-script, etc.). The server only sees the resulting SIWX token and never sees a private key.
+Not in this server. You sign the EVM SIWE or Solana SIWX message and any USDC top-up payment in your own wallet. The server only sees signed payloads and never accepts a private key.
 
 
 **Minimum top-up?**

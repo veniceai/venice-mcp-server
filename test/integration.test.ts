@@ -74,6 +74,16 @@ interface RpcResult {
   error?: { code: number; message: string }
 }
 
+const billingRows = Array.from({ length: 23 }, (_, i) => ({
+  timestamp: '2026-08-01T00:00:00.000Z',
+  amount: -0.01,
+  sku: `model-${i}`,
+  notes: 'Detailed usage note. '.repeat(60),
+}))
+
+const billingCsv = (rows: typeof billingRows) =>
+  `timestamp,amount,sku,notes\r\n${rows.map((r) => `${r.timestamp},${r.amount},${r.sku},"line one\n${r.notes}"`).join('\r\n')}`
+
 describe('integration — JSON-RPC over stdio with mock Venice', () => {
   let venice: MockVeniceServer
   let mcp: ChildProcessWithoutNullStreams
@@ -98,7 +108,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
         match: 'GET /v1/crypto/rpc/networks',
         reply: ({ headers }) => ({
           networks: ['base-mainnet', 'ethereum-mainnet'],
-          receivedAuth: headers.authorization ?? headers['x-sign-in-with-x'] ?? null,
+          receivedAuth: headers.authorization ?? headers['sign-in-with-x'] ?? null,
         }),
       },
       {
@@ -112,6 +122,31 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
       {
         match: 'GET /v1/characters/alan-watts/reviews?page=2&pageSize=10',
         reply: { object: 'list', data: [], pagination: { page: 2, pageSize: 10, total: 0, totalPages: 0 } },
+      },
+      {
+        match: 'GET /v1/models?type=tts',
+        reply: {
+          data: [{
+            id: 'tts-mock',
+            type: 'tts',
+            model_spec: {
+              voices: ['mock-voice'],
+              supported_formats: ['mp3'],
+              default_format: 'mp3',
+              voice_cloning: { mode: 'zero_shot' },
+            },
+          }],
+          object: 'list',
+          type: 'tts',
+        },
+      },
+      {
+        match: 'GET /v1/models/traits',
+        reply: { data: { default: 'deepseek-v4-flash-0731' }, object: 'list', type: 'text' },
+      },
+      {
+        match: 'GET /v1/models/compatibility_mapping',
+        reply: { data: { 'gpt-4o': 'deepseek-v4-flash-0731' }, object: 'list', type: 'text' },
       },
       {
         match: 'GET /v1/models?type=image',
@@ -145,7 +180,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
               message: {
                 content:
                   `auth=${headers.authorization ?? 'none'};` +
-                  `siwx=${headers['x-sign-in-with-x'] ?? 'none'};` +
+                  `siwx=${headers['sign-in-with-x'] ?? 'none'};` +
                   `model=${(body as { model?: string }).model};`,
               },
             },
@@ -179,6 +214,40 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
                   __body: Buffer.from('integration-mp4'),
                   __headers: { 'content-type': 'video/mp4' },
                 },
+      },
+      {
+        match: 'GET /v1/billing/usage-history?currency=USD&pageSize=10',
+        reply: {
+          data: [{ timestamp: '2026-08-01T00:00:00.000Z', amount: -0.01, currency: 'USD' }],
+          nextCursor: 'integration-cursor',
+        },
+      },
+      {
+        match: 'GET /v1/billing/usage-history*',
+        reply: ({ path, headers }) => {
+          const params = new URL(path, 'http://fixture').searchParams
+          const csv = headers.accept === 'text/csv'
+          if (params.get('cursor') === 'oversized') {
+            return {
+              __status: 200,
+              __body: csv
+                ? `notes\n"${'🙂'.repeat(20_000)}"`
+                : { data: [{ notes: '🙂'.repeat(20_000) }], nextCursor: 'must-not-escape' },
+              __headers: { 'content-type': csv ? 'text/csv' : 'application/json', 'x-next-cursor': 'must-not-escape' },
+            }
+          }
+          const offset = Number(params.get('cursor')?.replace('page_', '') ?? 0)
+          const data = billingRows.slice(offset, offset + 10)
+          const nextCursor = offset + data.length < billingRows.length ? `page_${offset + data.length}` : null
+          return {
+            __status: 200,
+            __body: csv ? billingCsv(data) : { data, nextCursor },
+            __headers: {
+              'content-type': csv ? 'text/csv' : 'application/json',
+              ...(nextCursor ? { 'x-next-cursor': nextCursor } : {}),
+            },
+          }
+        },
       },
       {
         match: 'GET /v1/tee/attestation*',
@@ -265,19 +334,24 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 36 tools over JSON-RPC', async () => {
+  it('lists 45 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 36)
+    assert.equal(list.length, 45)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
     assert.ok(names.includes('venice_model_details'))
     assert.ok(names.includes('venice_video_status'))
+    assert.ok(names.includes('venice_model_traits'))
+    assert.ok(names.includes('venice_model_compatibility_mapping'))
     assert.ok(names.includes('venice_x402_balance'))
     assert.ok(names.includes('venice_crypto_networks'))
     assert.ok(names.includes('venice_get_character'))
     assert.ok(names.includes('venice_character_reviews'))
+    assert.ok(names.includes('venice_billing_usage_history'))
+    assert.equal(names.includes('venice_web3_key_challenge'), false)
+    assert.equal(names.includes('venice_web3_key_mint'), false)
     assert.ok(names.includes('venice_tee_attestation'))
     assert.ok(names.includes('venice_tee_signature'))
   })
@@ -371,7 +445,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.match(attestationCall.path, /model=e2ee-model/)
     assert.match(attestationCall.path, new RegExp(`nonce=${'a'.repeat(64)}`))
     assert.equal(attestationCall.headers.authorization, undefined)
-    assert.equal(attestationCall.headers['x-sign-in-with-x'], undefined)
+    assert.equal(attestationCall.headers['sign-in-with-x'], undefined)
 
     const signature = (await rpc.request('tools/call', {
       name: 'venice_tee_signature',
@@ -463,7 +537,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(result.structuredContent?.count, 2)
     const call = venice.calls.find((entry) => entry.path === '/v1/crypto/rpc/networks')
     assert.equal(call?.headers.authorization, undefined)
-    assert.equal(call?.headers['x-sign-in-with-x'], undefined)
+    assert.equal(call?.headers['sign-in-with-x'], undefined)
   })
 
   it('forwards crypto JSON-RPC batches through MCP unchanged', async () => {
@@ -492,7 +566,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(characterCalls.length, 2)
     for (const call of characterCalls) {
       assert.equal(call.headers.authorization, 'Bearer vk_integration')
-      assert.equal(call.headers['x-sign-in-with-x'], undefined)
+      assert.equal(call.headers['sign-in-with-x'], undefined)
     }
   })
 
@@ -509,6 +583,75 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     }
     assert.equal(venice.calls.length, callsBefore)
   })
+
+  it('walks billing usage history through MCP with nextCursor metadata', async () => {
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_billing_usage_history',
+      arguments: { currency: 'USD', page_size: 10 },
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as {
+      content: Array<{ text: string }>
+      structuredContent?: { count?: number; nextCursor?: string }
+    }
+    assert.match(result.content[0].text, /2026-08-01/)
+    assert.equal(result.structuredContent?.count, 1)
+    assert.equal(result.structuredContent?.nextCursor, 'integration-cursor')
+    const upstreamCall = venice.calls.find(
+      (call) => call.path === '/v1/billing/usage-history?currency=USD&pageSize=10',
+    )
+    assert.equal(upstreamCall?.headers.authorization, 'Bearer vk_integration')
+    assert.equal(upstreamCall?.headers['sign-in-with-x'], undefined)
+  })
+
+  for (const format of ['json', 'csv']) {
+    it(`walks complete ${format} billing pages over MCP without losing rows`, async () => {
+      const beforeCalls = venice.calls.length
+      let cursor: string | null = null
+      let offset = 0
+      do {
+        const r = (await rpc.request('tools/call', {
+          name: 'venice_billing_usage_history',
+          arguments: cursor ? { cursor } : { format },
+        })) as RpcResult
+        assert.equal(r.error, undefined)
+        const result = r.result as {
+          isError?: boolean
+          content: Array<{ text: string }>
+          structuredContent: { nextCursor: string | null; truncated: boolean }
+        }
+        assert.equal(result.isError, undefined)
+        assert.equal(result.structuredContent.truncated, false)
+        const expected = billingRows.slice(offset, offset + 10)
+        if (format === 'json') assert.deepEqual(JSON.parse(result.content[0].text).data, expected)
+        else assert.equal(result.content[0].text, billingCsv(expected))
+        offset += expected.length
+        cursor = result.structuredContent.nextCursor
+        assert.ok(offset <= billingRows.length)
+      } while (cursor)
+      assert.equal(offset, billingRows.length)
+      const calls = venice.calls.slice(beforeCalls)
+      assert.deepEqual(calls.map((call) => call.path), [
+        '/v1/billing/usage-history?pageSize=10',
+        '/v1/billing/usage-history?cursor=page_10',
+        '/v1/billing/usage-history?cursor=page_20',
+      ])
+      for (const call of calls) assert.equal(call.headers.authorization, 'Bearer vk_integration')
+    })
+
+    it(`rejects an oversized ${format} billing body over HTTP and MCP without its cursor`, async () => {
+      const r = (await rpc.request('tools/call', {
+        name: 'venice_billing_usage_history',
+        arguments: { cursor: format === 'csv' ? 'csv:oversized' : 'oversized' },
+      })) as RpcResult
+      assert.equal(r.error, undefined)
+      const result = r.result as { isError?: boolean; content: Array<{ text: string }>; structuredContent?: unknown }
+      assert.equal(result.isError, true)
+      assert.equal(result.structuredContent, undefined)
+      assert.match(result.content[0].text, /64 KiB/)
+      assert.doesNotMatch(JSON.stringify(result), /must-not-escape/)
+    })
+  }
 
   it('venice_model_details returns the exact full catalog row from the mock API', async () => {
     const r = (await rpc.request('tools/call', {
@@ -545,6 +688,29 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     const text = (r.result as { contents: Array<{ text: string }> }).contents[0].text
     assert.match(text, /deepseek-v4-flash-0731/)
   })
+
+  it('reads venice://voices from live TTS model metadata', async () => {
+    const r = (await rpc.request('resources/read', { uri: 'venice://voices' })) as RpcResult
+    assert.equal(r.error, undefined)
+    const text = (r.result as { contents: Array<{ text: string }> }).contents[0].text
+    assert.match(text, /tts-mock/)
+    assert.match(text, /mock-voice/)
+    assert.equal(venice.calls.at(-1)?.path, '/v1/models?type=tts')
+  })
+
+  it('calls auth-free catalog metadata tools', async () => {
+    const traits = (await rpc.request('tools/call', {
+      name: 'venice_model_traits',
+      arguments: {},
+    })) as RpcResult
+    assert.match(JSON.stringify(traits.result), /deepseek-v4-flash-0731/)
+
+    const compatibility = (await rpc.request('tools/call', {
+      name: 'venice_model_compatibility_mapping',
+      arguments: {},
+    })) as RpcResult
+    assert.match(JSON.stringify(compatibility.result), /gpt-4o/)
+  })
 })
 
 describe('integration — x402-only mode (no API key)', () => {
@@ -557,9 +723,9 @@ describe('integration — x402-only mode (no API key)', () => {
       {
         match: 'POST /v1/chat/completions',
         reply: ({ headers }) =>
-          headers['x-sign-in-with-x']
+          headers['sign-in-with-x']
             ? {
-                choices: [{ message: { content: `siwx=${headers['x-sign-in-with-x']}` } }],
+                choices: [{ message: { content: `siwx=${headers['sign-in-with-x']}` } }],
               }
             : {
                 __status: 402,
@@ -605,6 +771,41 @@ describe('integration — x402-only mode (no API key)', () => {
     })) as RpcResult
     const text = (r.result as { content: Array<{ text: string }> }).content[0].text
     assert.match(text, /siwx=siwx_integration_token/)
+
+    const characterChat = (await rpc.request('tools/call', {
+      name: 'venice_chat_with_character',
+      arguments: {
+        character_slug: 'venice',
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+    })) as RpcResult
+    const characterText = (characterChat.result as { content: Array<{ text: string }> }).content[0].text
+    assert.match(characterText, /siwx=siwx_integration_token/)
+  })
+
+  it('rejects every API_KEY_ONLY discovery/read tool locally without contacting upstream', async () => {
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['venice_list_characters', { limit: 3 }],
+      ['venice_billing_balance', {}],
+      ['venice_billing_usage_analytics', { lookback: '7d' }],
+      ['venice_billing_usage_history', { page_size: 10 }],
+      ['venice_list_api_keys', {}],
+      ['venice_get_api_key', { id: 'key-1' }],
+      ['venice_api_key_rate_limits', {}],
+      ['venice_api_key_rate_limit_logs', {}],
+    ]
+    const callsBefore = venice.calls.length
+    for (const [name, arguments_] of cases) {
+      const r = (await rpc.request('tools/call', {
+        name,
+        arguments: arguments_,
+      })) as RpcResult
+      assert.equal(r.error, undefined, `${name} protocol error`)
+      const result = r.result as { isError?: boolean; content: Array<{ text: string }> }
+      assert.equal(result.isError, true, `${name} should fail`)
+      assert.match(result.content[0].text, /VENICE_API_KEY is required/, `${name} safe error`)
+    }
+    assert.equal(venice.calls.length, callsBefore)
   })
 
   it('rejects all character discovery locally without an API key', async () => {

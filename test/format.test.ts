@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { fitJson, fitJsonList, formatToolError, truncate } from '../src/format.js'
+import { ASR_TEXT_PAGE_CHARS, ASR_TIMESTAMP_DEFAULT_LIMIT, boundAsrResult, fitJson, fitJsonList, formatToolError, truncate } from '../src/format.js'
 import { VeniceUpstreamError } from '../src/types.js'
 
 describe('formatToolError', () => {
@@ -329,5 +329,95 @@ describe('fitJsonList', () => {
     assert.equal(truncated, true)
     assert.equal(returned, 0)
     assert.deepEqual((JSON.parse(text) as { data: unknown[] }).data, [])
+  })
+})
+
+describe('boundAsrResult', () => {
+  it('keeps the transcript and a full small timestamp page', () => {
+    const out = boundAsrResult({
+      text: 'hello',
+      duration: 1.5,
+      timestamps: { word: [{ word: 'hello', start: 0, end: 1.5 }] },
+    })
+    assert.equal(out.text, 'hello')
+    assert.deepEqual(out.structured, {
+      text: 'hello',
+      duration: 1.5,
+      timestamps: { word: [{ word: 'hello', start: 0, end: 1.5 }] },
+      timestamp_offset: 0,
+      timestamp_limit: ASR_TIMESTAMP_DEFAULT_LIMIT,
+      timestamp_total: { word: 1 },
+      timestamps_truncated: false,
+      next_timestamp_offset: null,
+    })
+    assert.equal(out.paged, true)
+  })
+
+  it('reports no further page on the last timestamp page', () => {
+    const words = Array.from({ length: 5 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
+    const out = boundAsrResult({ text: 'x', timestamps: { word: words } }, 3, 2)
+    assert.deepEqual(out.structured.timestamps, { word: words.slice(3, 5) })
+    assert.equal(out.structured.timestamps_truncated, false)
+    assert.equal(out.structured.next_timestamp_offset, null)
+  })
+
+  it('pages a long transcript by character offset', () => {
+    const transcript = 'a'.repeat(ASR_TEXT_PAGE_CHARS) + 'b'.repeat(10)
+    const first = boundAsrResult({ text: transcript })
+    assert.equal(first.paged, true)
+    assert.equal(first.structured.text, 'a'.repeat(ASR_TEXT_PAGE_CHARS))
+    assert.equal(first.structured.text_total, transcript.length)
+    assert.equal(first.structured.next_text_offset, ASR_TEXT_PAGE_CHARS)
+    const last = boundAsrResult({ text: transcript }, 0, ASR_TIMESTAMP_DEFAULT_LIMIT, ASR_TEXT_PAGE_CHARS)
+    assert.equal(last.structured.text, 'b'.repeat(10))
+    assert.equal(last.structured.next_text_offset, null)
+  })
+
+  it('leaves a short plain transcript unpaged', () => {
+    const out = boundAsrResult({ text: 'short' })
+    assert.equal(out.paged, false)
+    assert.deepEqual(out.structured, { text: 'short' })
+  })
+
+  it('slices each timestamp array and reports totals', () => {
+    const words = Array.from({ length: 5 }, (_, i) => ({ word: `w${i}`, start: i, end: i + 1 }))
+    const out = boundAsrResult({
+      text: 'many words',
+      timestamps: { word: words, char: [{ char: 'm', start: 0, end: 0.1 }] },
+    }, 1, 2)
+    assert.equal(out.text, 'many words')
+    assert.deepEqual(out.structured.timestamps, {
+      word: words.slice(1, 3),
+      char: [],
+    })
+    assert.deepEqual(out.structured.timestamp_total, { word: 5, char: 1 })
+    assert.equal(out.structured.timestamps_truncated, true)
+    assert.equal(out.structured.next_timestamp_offset, 3)
+    assert.equal(out.structured.timestamp_offset, 1)
+    assert.equal(out.structured.timestamp_limit, 2)
+  })
+
+  for (const timestamps of [null, 'unexpected', 42, true]) {
+    it(`returns a null continuation for omitted scalar timestamps (${timestamps})`, () => {
+      const out = boundAsrResult({ text: 'ok', timestamps })
+      assert.deepEqual(out.structured, {
+        text: 'ok',
+        timestamp_offset: 0,
+        timestamp_limit: ASR_TIMESTAMP_DEFAULT_LIMIT,
+        timestamps_omitted: true,
+        timestamps_truncated: true,
+        next_timestamp_offset: null,
+      })
+    })
+  }
+
+  it('omits unrecognized timestamp objects instead of echoing them', () => {
+    const huge = { custom: 'x'.repeat(100) }
+    const out = boundAsrResult({ text: 'ok', timestamps: huge })
+    assert.equal(out.text, 'ok')
+    assert.equal(out.structured.timestamps, undefined)
+    assert.equal(out.structured.timestamps_omitted, true)
+    assert.equal(out.structured.timestamps_truncated, true)
+    assert.equal(out.structured.next_timestamp_offset, null)
   })
 })

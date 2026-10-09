@@ -17,6 +17,13 @@ export interface RequestInitJSON {
   maxResponseBytes?: number
   /** Reject a successful response body larger than this many bytes. */
   maxBytes?: number
+  /** Observe response metadata without changing the existing body-only return type. */
+  onResponse?: (metadata: ResponseMetadata) => void
+}
+
+export interface ResponseMetadata {
+  status: number
+  headers: Record<string, string>
 }
 
 export interface VeniceResponse<T> {
@@ -64,12 +71,12 @@ export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
 /**
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
- * - Otherwise adds `X-Sign-In-With-X` when a SIWX token is configured.
+ * - Otherwise adds the canonical `SIGN-IN-WITH-X` when a SIWX token is configured.
  * - Surfaces 402 responses as `VeniceUpstreamError(isPaymentRequired)` so tools
  *   can format a helpful top-up message back to the MCP host.
  *
- * We deliberately never set `X-402-Payment` on inference routes; Venice
- * rejects that header outside `/x402/top-up`.
+ * We deliberately never set a payment header. Payment submission belongs only
+ * on `/x402/top-up`, and this client currently exposes discovery—not settlement.
  */
 export class VeniceClient {
   constructor(private readonly cfg: Config) {}
@@ -116,13 +123,13 @@ export class VeniceClient {
     } else if (auth === 'siwx') {
       delete headers.Authorization
       delete headers.authorization
-      if (this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
-        headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+      if (this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
+        headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
       }
     } else if (auth === 'default' && this.cfg.apiKey && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    } else if (auth === 'default' && this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
-      headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    } else if (auth === 'default' && this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
+      headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
     }
 
     const ac = new AbortController()
@@ -157,6 +164,7 @@ export class VeniceClient {
         throw err
       }
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
+      init.onResponse?.({ status: res.status, headers: responseHeaders(res) })
       if (init.responseType === 'event-stream') {
         assertCompleteEventStream(text, contentType, path)
         body = text
@@ -190,7 +198,7 @@ export class VeniceClient {
   get<T = unknown>(
     path: string,
     headers?: Record<string, string>,
-    opts: { auth?: RequestInitJSON['auth']; timeoutMs?: number } = {},
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse' | 'maxBytes' | 'maxResponseBytes' | 'responseType'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'GET', headers, ...opts })
   }
@@ -200,7 +208,7 @@ export class VeniceClient {
     path: string,
     json: unknown,
     headers?: Record<string, string>,
-    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'maxBytes' | 'maxResponseBytes' | 'responseType'> = {},
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs' | 'onResponse' | 'maxBytes' | 'maxResponseBytes' | 'responseType'> = {},
   ): Promise<T> {
     return this.request<T>(path, { method: 'POST', json, headers, ...opts })
   }
@@ -234,14 +242,14 @@ export class VeniceClient {
    * Caller passes a pre-built `FormData` instance; this helper wires up auth
    * headers and surfaces the upstream response identically to `post`.
    */
-  async postMultipart<T = unknown>(path: string, form: FormData, opts: { timeoutMs?: number } = {}): Promise<T> {
+  async postMultipart<T = unknown>(path: string, form: FormData, opts: { timeoutMs?: number; maxBytes?: number } = {}): Promise<T> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       Accept: 'application/json',
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
     }
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    else if (this.cfg.siwxToken) headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
     // NOTE: don't set Content-Type — fetch sets the boundary automatically.
 
     const ac = new AbortController()
@@ -250,7 +258,7 @@ export class VeniceClient {
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
       const res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal })
-      const body = await parseResponse<T>(res, path)
+      const body = await parseResponse<T>(res, path, opts.maxBytes)
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
       return body
     } catch (err) {
@@ -276,7 +284,7 @@ export class VeniceClient {
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
     }
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    else if (this.cfg.siwxToken) headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
 
     let body: any
     if ('form' in init) {
@@ -530,8 +538,8 @@ function responseHeaders(res: Response): Record<string, string> {
  * Response parser used by `postMultipart`.
  * Handles JSON vs text content, surfaces 402 / 4xx / 5xx as VeniceUpstreamError.
  */
-async function parseResponse<T>(res: Response, path: string): Promise<T> {
-  if (!res.ok) throw await upstreamError(res, path)
-  const text = await res.text()
+async function parseResponse<T>(res: Response, path: string, maxBytes?: number): Promise<T> {
+  if (!res.ok) throw await upstreamError(res, path, maxBytes)
+  const text = (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
   return (isJsonContentType(res.headers.get('content-type') ?? '') ? parseSuccessJson(text, path) : text) as T
 }

@@ -13,24 +13,38 @@
  *      - crypto/rpc/:network
  *   ⚠️  API key only (no x402):
  *      - characters (list, get, reviews)
- *      - billing/* (balance, cost, usage, usage-analytics)
- *      - api_keys/*, support-bot
+ *      - api_keys/rate_limits (INFERENCE or ADMIN); rate_limits/log requires ADMIN
+ *      - billing/* and api_keys list/get require an ADMIN key
+ *      - support-bot
  *   🔓 Auth-free:
  *      - models, models/traits
  *      - crypto/rpc/networks
  *      - image/styles
  *      - audio/quote, video/quote
- *      - x402/balance, x402/top-up, x402/transactions
+ *      - x402/top-up requirement discovery
  *      - tee/attestation, tee/signature
+ *   👛 SIWX only:
+ *      - x402/balance, x402/transactions
  */
+import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
+import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import type { VeniceClient } from '../venice-client.js'
 import { VeniceResponseTooLargeError } from '../venice-client.js'
 import type { Config } from '../config.js'
-import { VeniceUpstreamError } from '../types.js'
-import { fitJson, fitJsonList, formatToolError, truncate } from '../format.js'
+import { shapeTtsVoiceCatalog, VeniceUpstreamError, type ModelCatalogItem, type ModelCatalogResponse } from '../types.js'
+import {
+  ASR_TEXT_PAGE_CHARS,
+  ASR_TIMESTAMP_DEFAULT_LIMIT,
+  ASR_TIMESTAMP_MAX_LIMIT,
+  boundAsrResult,
+  fitJson,
+  fitJsonList,
+  formatToolError,
+  truncate,
+  type AsrUpstreamBody,
+} from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
-
 /**
  * Sniff the MIME type of a base64-encoded image from its magic bytes.
  * Falls back to 'image/png' if the format is unrecognised.
@@ -88,6 +102,7 @@ export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
   name: string
   title: string
   description: string
+  annotations?: ToolAnnotations
   inputSchema: S
   handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
 }
@@ -198,7 +213,94 @@ function needsConsentDetails(err: unknown): NeedsConsentBody | undefined {
 
 const X402_OK = ' Supports x402 wallet auth (no Venice account needed) and API key.'
 const API_KEY_ONLY = ' API key required — this endpoint does not accept x402 wallet auth.'
+const ADMIN_API_KEY_ONLY =
+  ' ADMIN API key required — inference keys cannot call this endpoint. This endpoint does not accept x402 wallet auth.'
 const NO_AUTH = ' No authentication required.'
+const walletAddressSchema = z
+  .string()
+  .regex(
+    /^(0x[a-fA-F0-9]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/,
+    'Must be an EVM (0x + 40 hex characters) or Solana base58 wallet address.',
+  )
+function isCalendarDate(value: string): boolean {
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+}
+
+const dateSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Must use YYYY-MM-DD format.')
+  .refine(isCalendarDate, 'Must be a real calendar date.')
+const utcTimestampSchema = z
+  .string()
+  .max(40)
+  .regex(
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/,
+    'Must be an ISO 8601 UTC timestamp with a Z suffix.',
+  )
+  // Date.parse rolls impossible days such as Feb 30 into the next month.
+  .refine(
+    (value) => isCalendarDate(value) && Number.isFinite(Date.parse(value)),
+    'Must be a real calendar date and time.',
+  )
+
+function normalizeExpiresAt(value: string | undefined): string | undefined {
+  if (!value) return undefined
+  const match = value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/)
+  if (!match || !match[2] || match[2].length === 3) return value
+  return `${match[1]}.${match[2].padEnd(3, '0').slice(0, 3)}Z`
+}
+
+function normalizeWalletAddress(address: string): string {
+  return address.startsWith('0x') ? address.toLowerCase() : address
+}
+
+const TOP_UP_ACCEPT_FIELDS = ['scheme', 'network', 'amount', 'asset', 'payTo', 'maxTimeoutSeconds', 'extra'] as const
+
+/** Keeps only the documented x402 requirement fields rather than reflecting the raw 402 body. */
+function topUpRequirements(body: unknown): { x402Version: unknown; accepts: Record<string, unknown>[] } | undefined {
+  if (typeof body !== 'object' || body === null) return undefined
+  const { x402Version, accepts } = body as { x402Version?: unknown; accepts?: unknown }
+  if (!Array.isArray(accepts)) return undefined
+  return {
+    x402Version,
+    accepts: accepts
+      .filter((option): option is Record<string, unknown> => typeof option === 'object' && option !== null)
+      .map((option) =>
+        Object.fromEntries(TOP_UP_ACCEPT_FIELDS.filter((field) => field in option).map((field) => [field, option[field]])),
+      ),
+  }
+}
+
+function redactSecretFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSecretFields)
+  if (typeof value !== 'object' || value === null) return value
+  const redacted: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const normalizedKey = key.replace(/[^a-z0-9]/gi, '').toLowerCase()
+    redacted[key] = ['apikey', 'signature', 'token', 'paymentsignature', 'authorization', 'secret', 'privatekey', 'password', 'key'].includes(normalizedKey)
+      ? '[REDACTED]'
+      : redactSecretFields(child)
+  }
+  return redacted
+}
+
+function safeJson(value: unknown): string {
+  return JSON.stringify(redactSecretFields(value), null, 2)
+}
+
+const BILLING_USAGE_DEFAULT_PAGE_SIZE = 10
+const BILLING_USAGE_MAX_RESPONSE_BYTES = 64 * 1024
+const BILLING_USAGE_TOO_LARGE =
+  'Billing usage page exceeds 64 KiB. No partial records or continuation cursor were returned. ' +
+  'Restart with the original filters and a smaller page_size (minimum 10), or a narrower timestamp range. ' +
+  'Retrying the same cursor cannot shrink its page because the cursor fixes page_size.'
+
+function usageHistoryResult(text: string, metadata: Record<string, unknown>): ToolResult {
+  if (Buffer.byteLength(text, 'utf8') > BILLING_USAGE_MAX_RESPONSE_BYTES) return fail(BILLING_USAGE_TOO_LARGE)
+  return ok(text, { ...metadata, truncated: false })
+}
 /** Types in the live catalog (GET /v1/models?type=all). Accepted as strings so a new Venice type still works. */
 const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'music', 'tts', 'asr', 'embedding', 'decision'] as const
 /** Shared by music generation and quote so a quoted request is always queueable. */
@@ -212,6 +314,86 @@ const modelTypeSchema = z
   .max(64)
   .toLowerCase()
   .regex(/^[a-z][a-z0-9_-]*$/, 'Must be a catalog type such as "video".')
+/** Single-type endpoints reject the list-only "all" and "code" filters. */
+const concreteModelTypeSchema = modelTypeSchema.refine(
+  (t) => t !== 'all' && t !== 'code',
+  'Use a concrete type such as "video"; "all" and "code" are not allowed.',
+)
+
+// First entry is the upstream default for POST /audio/voices when model is omitted.
+const VOICE_CLONE_MODELS = ['tts-chatterbox-hd', 'tts-minimax-speech-02-hd'] as const
+
+const MODEL_LIST_DEFAULT_LIMIT = 50
+const MODEL_LIST_MAX_LIMIT = 200
+// A full video model entry is ~1.5 KB, so 200 verbose entries would still be
+// hundreds of KB; pages stop early at this budget and report next_offset.
+const MODEL_LIST_MAX_PAGE_CHARS = 64 * 1024
+
+function compactModel(model: ModelCatalogItem): Record<string, unknown> {
+  const spec = model.model_spec ?? {}
+  const capabilities = spec.capabilities
+  const enabled =
+    capabilities && typeof capabilities === 'object'
+      ? Object.entries(capabilities).filter(([, v]) => v === true).map(([k]) => k)
+      : []
+  const traits = Array.isArray(spec.traits) && spec.traits.length > 0 ? spec.traits : undefined
+  return {
+    id: model.id,
+    type: model.type,
+    name: spec.name,
+    context_length: model.context_length,
+    max_completion_tokens: spec.maxCompletionTokens,
+    capabilities: enabled.length > 0 ? enabled : undefined,
+    traits,
+    privacy: spec.privacy,
+    offline: spec.offline === true ? true : undefined,
+    beta: spec.betaModel === true ? true : undefined,
+    pricing: spec.pricing,
+  }
+}
+
+// Transcription is charged per successful request, so a paged timestamp walk has
+// to read one retained result rather than transcribe the clip again. Retention is
+// capped in both lifetime and entry count so a long-lived server cannot accumulate
+// full transcripts indefinitely.
+const ASR_RESULT_TTL_MS = 10 * 60 * 1000
+const ASR_RESULT_MAX_ENTRIES = 16
+
+/** Retained ASR results, scoped to one buildTools call so HTTP sessions never share handles. */
+class AsrResultStore {
+  private readonly results = new Map<string, { body: AsrUpstreamBody; expiresAt: number; timer: NodeJS.Timeout }>()
+
+  remember(body: AsrUpstreamBody): string {
+    // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
+    while (this.results.size >= ASR_RESULT_MAX_ENTRIES) {
+      const oldest = this.results.keys().next()
+      if (oldest.done) break
+      this.evict(oldest.value)
+    }
+    const handle = randomUUID()
+    // Unref'd so a retained transcript never keeps the process alive.
+    const timer = setTimeout(() => this.evict(handle), ASR_RESULT_TTL_MS).unref()
+    this.results.set(handle, { body, expiresAt: Date.now() + ASR_RESULT_TTL_MS, timer })
+    return handle
+  }
+
+  get(handle: string): AsrUpstreamBody | undefined {
+    const entry = this.results.get(handle)
+    if (!entry) return undefined
+    if (entry.expiresAt <= Date.now()) {
+      this.evict(handle)
+      return undefined
+    }
+    return entry.body
+  }
+
+  private evict(handle: string): void {
+    const entry = this.results.get(handle)
+    if (!entry) return
+    clearTimeout(entry.timer)
+    this.results.delete(handle)
+  }
+}
 
 const CRYPTO_RPC_MAX_RESPONSE_BYTES = 64 * 1024
 const CRYPTO_RPC_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{1,255}$/
@@ -503,6 +685,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     cfg.apiKey
       ? undefined
       : fail('VENICE_API_KEY is required for character discovery; x402 wallet authentication is not supported.')
+  const asrResults = new AsrResultStore()
   const queueDownloadUrls = new QueueDownloadUrlStore()
 
   const tools: ToolDef[] = [
@@ -1069,7 +1252,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if (resp.status === 'COMPLETED') {
             if (!url) {
               return fail(
-                'Video completed but Venice returned neither a video/mp4 body nor a download_url.',
+                queueDownloadUrl !== undefined
+                  ? 'download_url rejected: must be https on venice.ai or a subdomain.'
+                  : 'Video completed but Venice returned neither a video/mp4 body nor a download_url.',
                 { status: 'COMPLETED' },
               )
             }
@@ -1153,13 +1338,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_tts',
       title: 'Venice TTS (Speech)',
-      description: `Convert text to speech. Supports cloned voices + emotion tags ([whispers], [sarcastically], etc.).${X402_OK}`,
+      description: `Convert text to speech. Supports cloned voices + emotion tags ([whispers], [sarcastically], etc.). When streaming=true, Venice streams upstream but this MCP tool buffers and returns one complete audio result; it does not emit incremental MCP chunks.${X402_OK}`,
       inputSchema: {
         input: z.string().min(1).max(4096).describe('Text to convert to speech (max 4096 chars).'),
         voice: z.string().optional().describe('Voice id; see venice://voices.'),
         model: z.string().optional(),
         speed: z.number().min(0.25).max(4).optional(),
         response_format: z.enum(['mp3', 'wav', 'opus', 'aac', 'flac', 'pcm']).optional(),
+        temperature: z.number().min(0).max(2).optional().describe('Sampling temperature. Only supported by some TTS models; unsupported models ignore it.'),
+        streaming: z.boolean().optional().describe('Forward Venice\'s streaming flag. The MCP result is still buffered into one complete audio response, not delivered incrementally.'),
       },
       handler: async (args) => {
         try {
@@ -1180,14 +1367,46 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_asr',
       title: 'Venice ASR (Speech-to-Text)',
-      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload.${X402_OK}`,
+      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory. Timestamp arrays and transcripts longer than ${ASR_TEXT_PAGE_CHARS} characters are paged in the MCP result: such a transcription returns result_handle alongside the first page, and every later page must be requested with that handle so the clip is transcribed — and charged — exactly once. Handles are held in memory, per MCP session, for ${ASR_RESULT_TTL_MS / 60_000} minutes and only the ${ASR_RESULT_MAX_ENTRIES} most recent survive, after which paging fails and a fresh transcription is needed.${X402_OK}`,
       inputSchema: {
-        audio_url: z.string().url(),
+        audio_url: z.string().url().optional().describe('Audio to transcribe. Required unless result_handle is supplied.'),
+        result_handle: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(`Handle returned by an earlier paged transcription. Pages that retained result without submitting another transcription, so audio_url is ignored when this is set. Expires after ${ASR_RESULT_TTL_MS / 60_000} minutes or once ${ASR_RESULT_MAX_ENTRIES} newer results are retained; an expired handle is an error rather than a silent re-transcription.`),
         model: z.string().optional(),
         language: z.string().optional(),
-        response_format: z.enum(['json', 'text', 'srt', 'verbose_json', 'vtt']).optional(),
+        response_format: z.enum(['json', 'text']).optional(),
+        timestamps: z.boolean().optional().describe('Include word and character timestamps in JSON responses. Defaults to false.'),
+        timestamp_offset: z.number().int().min(0).optional().describe('Start index into each timestamp array (word/segment/char). Defaults to 0. Use result_handle to move past the first page.'),
+        timestamp_limit: z.number().int().min(1).max(ASR_TIMESTAMP_MAX_LIMIT).optional().describe(`Max entries returned per timestamp array. Defaults to ${ASR_TIMESTAMP_DEFAULT_LIMIT}. Follow next_timestamp_offset; it is null on the last page.`),
+        text_offset: z.number().int().min(0).optional().describe(`Start character of the transcript page (${ASR_TEXT_PAGE_CHARS} characters each). Defaults to 0. Use result_handle with next_text_offset to read past the first page.`),
       },
       handler: async (args) => {
+        const offset = args.timestamp_offset ?? 0
+        const limit = args.timestamp_limit ?? ASR_TIMESTAMP_DEFAULT_LIMIT
+        const textOffset = args.text_offset ?? 0
+        const respond = (body: AsrUpstreamBody, handle: string | undefined) => {
+          const { text, structured, paged } = boundAsrResult(body, offset, limit, textOffset)
+          const pageable = structured.timestamps_truncated || structured.next_text_offset != null
+          const resultHandle = handle ?? (pageable ? asrResults.remember(body) : undefined)
+          const full = resultHandle ? { ...structured, result_handle: resultHandle } : structured
+          // Hosts that read only text content still need the page and its continuation handle.
+          return ok(paged ? JSON.stringify(full) : text, full)
+        }
+        if (args.result_handle) {
+          const retained = asrResults.get(args.result_handle)
+          if (!retained) {
+            return fail(
+              `Unknown or expired result_handle. Retained transcriptions are dropped after ${ASR_RESULT_TTL_MS / 60_000} minutes, or sooner once ${ASR_RESULT_MAX_ENTRIES} newer results are retained. ` +
+                'Call venice_asr again with audio_url to transcribe the audio afresh; paging never re-submits a transcription on your behalf because each one is charged.',
+              { error: 'asr_result_expired', result_handle: args.result_handle },
+            )
+          }
+          return respond(retained, args.result_handle)
+        }
+        if (!args.audio_url) return fail('audio_url is required unless result_handle is supplied')
         try {
           const source = await fetchUploadSource(args.audio_url, {
             label: 'audio_url',
@@ -1201,12 +1420,22 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           form.set('model', args.model ?? cfg.defaultAsrModel)
           if (args.language) form.set('language', args.language)
           if (args.response_format) form.set('response_format', args.response_format)
-          const resp = await client.postMultipart<{ text?: string; transcription?: string }>(
+          if (args.timestamps !== undefined) form.set('timestamps', String(args.timestamps))
+          const resp = await client.postMultipart<
+            string | { text?: string; transcription?: string; duration?: number; timestamps?: unknown }
+          >(
             '/v1/audio/transcriptions',
             form,
+            { maxBytes: 1024 * 1024 },
           )
-          return ok(truncate(resp.text ?? resp.transcription ?? JSON.stringify(resp)))
+          const body: AsrUpstreamBody = typeof resp === 'string' ? { text: resp } : resp
+          return respond(body, undefined)
         } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) {
+            return fail(
+              'Transcription response exceeds 1 MiB. Disable timestamps or transcribe a shorter clip; timestamped word/character arrays are unbounded upstream.',
+            )
+          }
           return fail(formatToolError(err))
         }
       },
@@ -1215,34 +1444,25 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_voice_clone',
       title: 'Venice Voice Clone / List',
-      description: `Manage TTS voices. Action 'list' returns the static catalog of built-in voices grouped by TTS model (Venice does not expose a list endpoint). Action 'create' clones a voice from a sample audio URL via multipart upload to /v1/audio/voices. ${X402_OK}`,
+      description: `Discover or clone TTS voices. Action 'list' reads live per-model voice metadata from auth-free GET /v1/models?type=tts. Action 'create' requires sample_url, then uploads the sample to POST /v1/audio/voices for the chosen cloning model. Cloned voices come back as a \`vv_<id>\` handle; pass it as venice_tts voice together with the same model.${X402_OK}`,
       inputSchema: {
-        action: z.enum(['list', 'create']).describe('list = show built-in voices, create = clone from sample_url'),
-        sample_url: z.string().url().optional().describe('Audio sample URL for action=create. WAV/MP3/M4A.'),
-        model: z.string().optional().describe('Voice cloning model. Required for action=create. Examples: tts-chatterbox-hd, tts-minimax-speech-02-hd.'),
+        action: z.enum(['list', 'create']).describe('list = fetch live TTS model voice metadata; create requires sample_url'),
+        sample_url: z
+          .string()
+          .url()
+          .optional()
+          .describe('Required for action=create. Audio sample URL; tts-chatterbox-hd accepts MP3/WAV/FLAC/M4A, tts-minimax-speech-02-hd MP3/WAV only.'),
+        model: z
+          .enum(VOICE_CLONE_MODELS)
+          .optional()
+          .describe(`TTS model the cloned voice is paired with (action=create). Defaults to ${VOICE_CLONE_MODELS[0]}.`),
       },
       handler: async (args) => {
         try {
           if (args.action === 'list') {
-            // Static reference — Venice doesn't expose GET /v1/audio/voices.
-            // Voice IDs come from each TTS model's hardcoded list. Group by model
-            // for clarity. Cloned voices use the `vv_<id>` handle returned by
-            // POST /v1/audio/voices.
-            const voices = {
-              note: 'Venice does not expose a list endpoint. These are the built-in voices available across TTS models. Cloned voices come back as `vv_<id>` from action=create.',
-              kokoro: {
-                description: 'Default model "tts-kokoro" — fast, multilingual, 70+ voices',
-                examples: ['af_heart', 'af_alloy', 'af_aoede', 'af_bella', 'af_jessica', 'af_kore', 'af_nicole', 'af_nova', 'af_river', 'af_sarah', 'af_sky', 'am_adam', 'am_echo', 'am_eric', 'am_fenrir', 'am_liam', 'am_michael', 'am_onyx', 'am_puck'],
-              },
-              orpheus: {
-                description: 'Model "tts-orpheus" — expressive, supports emotion tags',
-                voices: ['leah', 'jess', 'mia', 'zoe', 'leo', 'dan', 'zac', 'tara'],
-              },
-              other_models: ['tts-qwen3-0-6b', 'tts-qwen3-1-7b', 'tts-xai-v1', 'tts-inworld-1-5-max', 'tts-chatterbox-hd', 'tts-elevenlabs-turbo-v2-5', 'tts-minimax-speech-02-hd', 'tts-gemini-3-1-flash'],
-              voice_cloning_supported: ['tts-chatterbox-hd', 'tts-minimax-speech-02-hd'],
-              docs: 'https://docs.venice.ai/api-reference/api-spec/tts',
-            }
-            return ok(JSON.stringify(voices, null, 2))
+            const resp = await client.get<ModelCatalogResponse>('/v1/models?type=tts')
+            const voices = shapeTtsVoiceCatalog(resp)
+            return ok(JSON.stringify(voices, null, 2), voices)
           }
           // action === 'create'
           if (!args.sample_url) return fail('sample_url is required for action=create')
@@ -1369,15 +1589,18 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_web_search',
       title: 'Venice Web Search',
-      description: `Search the web (Firecrawl-backed). Returns ranked results with snippets.${X402_OK}`,
+      description: `Search the web with Brave Search (default, Zero Data Retention) or Google Search (proxied and anonymized by Venice). Returns structured results with titles, URLs, snippets, and dates.${X402_OK}`,
       inputSchema: {
-        query: z.string().min(1).max(500),
+        query: z.string().min(1).max(400),
         limit: z.number().int().min(1).max(20).optional(),
+        search_provider: z.enum(['brave', 'google']).optional().describe('brave (default) uses Zero Data Retention; google is proxied/anonymized by Venice.'),
       },
       handler: async (args) => {
         try {
           const resp = await client.post<unknown>('/v1/augment/search', args)
-          return ok(JSON.stringify(resp, null, 2))
+          const structured =
+            resp && typeof resp === 'object' && !Array.isArray(resp) ? (resp as Record<string, unknown>) : undefined
+          return ok(JSON.stringify(resp, null, 2), structured)
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1592,27 +1815,99 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_list_models',
       title: 'Venice List Models',
-      description: `List the live model catalog with capabilities and prices.${NO_AUTH}`,
+      description: `List the live model catalog, one page at a time. Omitting type lists every model type (sent upstream as type=all). Each entry is a compact summary (id, type, name, context length, enabled capabilities, traits, privacy, pricing); set verbose=true for the full upstream model objects. Returns total, next_offset, and every matching model id in ids; call again with offset=next_offset until next_offset is null.${NO_AUTH}`,
       inputSchema: {
         type: modelTypeSchema
           .optional()
           .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}, "code", or "all" (default). Without a type Venice returns only text models, so pass one to find video, image or audio ids.`),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(MODEL_LIST_MAX_LIMIT)
+          .optional()
+          .describe(`Max models per page. Defaults to ${MODEL_LIST_DEFAULT_LIMIT}. A page may hold fewer when entries are large; follow next_offset.`),
+        offset: z.number().int().min(0).optional().describe('Index of the first model to return. Defaults to 0.'),
+        verbose: z.boolean().optional().describe('Return full upstream model objects instead of compact summaries. Defaults to false.'),
       },
-      handler: async ({ type }) => {
+      handler: async ({ type, limit, offset, verbose }) => {
         try {
-          const query = new URLSearchParams({ type: type ?? 'all' }).toString()
-          const resp = await client.get<{ data?: unknown[]; models?: unknown[] }>(`/v1/models?${query}`)
+          const requestedType = type ?? 'all'
+          const query = new URLSearchParams({ type: requestedType }).toString()
+          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`)
           const models = resp.data ?? resp.models ?? []
           const ids = models
             .map((m) => (typeof m === 'object' && m !== null ? (m as { id?: unknown }).id : undefined))
             .filter((id): id is string => typeof id === 'string')
-          const fitted = fitJsonList(models)
-          return ok(fitted.text, {
-            type: type ?? 'all',
-            count: models.length,
+          const start = offset ?? 0
+          const end = Math.min(models.length, start + (limit ?? MODEL_LIST_DEFAULT_LIMIT))
+          const page: unknown[] = []
+          const result = {
+            requested_type: requestedType,
+            total: models.length,
+            count: end - start,
+            offset: start,
+            next_offset: end as number | null,
             ids,
-            ...(fitted.truncated ? { truncated: true, returned: fitted.returned, total: models.length } : {}),
-          }, fitted.truncated ? [JSON.stringify({ ids })] : [])
+            data: page,
+          }
+          let chars = JSON.stringify(result).length
+          for (let i = start; i < end; i++) {
+            const entry = verbose ? models[i] : compactModel(models[i])
+            const size = JSON.stringify(entry).length + 1
+            if (page.length > 0 && chars + size > MODEL_LIST_MAX_PAGE_CHARS) break
+            page.push(entry)
+            chars += size
+          }
+          const next = start + page.length
+          const nextOffset = next < models.length ? next : null
+          result.count = page.length
+          result.next_offset = nextOffset
+          return ok(JSON.stringify(result), result)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_model_traits',
+      title: 'Venice Model Traits',
+      description: `Return the live trait-name to model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
+      inputSchema: {
+        type: concreteModelTypeSchema
+          .optional()
+          .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}. Defaults to text upstream.`),
+      },
+      handler: async ({ type }) => {
+        try {
+          const path = type
+            ? `/v1/models/traits?type=${encodeURIComponent(type)}`
+            : '/v1/models/traits'
+          const resp = await client.get<Record<string, unknown>>(path)
+          return ok(JSON.stringify(resp, null, 2), resp)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_model_compatibility_mapping',
+      title: 'Venice Model Compatibility Mapping',
+      description: `Return the live compatible model-name to Venice model-id mapping for a model type. The API defaults to text when type is omitted.${NO_AUTH}`,
+      inputSchema: {
+        type: concreteModelTypeSchema
+          .optional()
+          .describe(`Catalog type: ${KNOWN_MODEL_TYPES.join(', ')}. Defaults to text upstream.`),
+      },
+      handler: async ({ type }) => {
+        try {
+          const path = type
+            ? `/v1/models/compatibility_mapping?type=${encodeURIComponent(type)}`
+            : '/v1/models/compatibility_mapping'
+          const resp = await client.get<Record<string, unknown>>(path)
+          return ok(JSON.stringify(resp, null, 2), resp)
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1625,15 +1920,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       description: `Get one exact model's full catalog row, including model_spec constraints, capabilities, and pricing when available. Requires a concrete type to keep the upstream catalog response bounded.${NO_AUTH}`,
       inputSchema: {
         model_id: z.string().trim().min(1).describe('Exact model id, e.g. from venice_list_models({ type: "video" }).'),
-        type: modelTypeSchema
-          .refine((t) => t !== 'all' && t !== 'code', 'Use a concrete type such as "video"; "all" and "code" are not allowed.')
+        type: concreteModelTypeSchema
           .describe(`Catalog type the model belongs to: ${KNOWN_MODEL_TYPES.join(', ')}.`),
       },
       handler: async ({ model_id, type }) => {
         try {
           const query = new URLSearchParams({ type }).toString()
-          const resp = await client.get<{ data?: unknown[] }>(`/v1/models?${query}`)
-          const model = (resp.data ?? [])
+          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`)
+          const models: unknown[] = resp.data ?? resp.models ?? []
+          const model = models
             .filter((candidate): candidate is Record<string, unknown> =>
               typeof candidate === 'object' && candidate !== null
             )
@@ -1852,21 +2147,248 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     },
 
     // ========================================================================
-    // x402 wallet helpers — auth-free
+    // BILLING — ADMIN API KEY ONLY
+    // ========================================================================
+
+    {
+      name: 'venice_billing_balance',
+      title: 'Venice Billing Balance',
+      description: `Get current USD, DIEM, and bundled-credit availability for the authenticated Venice account.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<unknown>('/v1/billing/balance', undefined, { auth: 'apiKey' })
+          return ok(JSON.stringify(resp, null, 2))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_billing_usage_analytics',
+      title: 'Venice Billing Usage Analytics',
+      description: `Get beta aggregated usage by date, model, and API key. Data is cached for 10 minutes. Choose either lookback or a complete start/end date range.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        lookback: z
+          .string()
+          .regex(/^[1-9]\d*d$/, 'Must be a number of days such as 7d or 30d.')
+          .optional()
+          .describe('Relative lookback from 1d through 90d. Cannot be combined with start_date/end_date.'),
+        start_date: dateSchema.optional().describe('Inclusive custom range start in YYYY-MM-DD format. Requires end_date.'),
+        end_date: dateSchema.optional().describe('Custom range end in YYYY-MM-DD format. Requires start_date.'),
+      },
+      handler: async (args) => {
+        try {
+          if (args.lookback && (args.start_date || args.end_date)) {
+            return fail('Choose either lookback or start_date/end_date, not both.')
+          }
+          if ((args.start_date && !args.end_date) || (!args.start_date && args.end_date)) {
+            return fail('start_date and end_date must be provided together.')
+          }
+          if (args.start_date && args.end_date && args.start_date > args.end_date) {
+            return fail('start_date cannot be later than end_date.')
+          }
+          if (args.lookback && Number(args.lookback.slice(0, -1)) > 90) {
+            return fail('lookback cannot exceed 90d.')
+          }
+          const params = new URLSearchParams()
+          if (args.lookback) params.set('lookback', args.lookback)
+          if (args.start_date) params.set('startDate', args.start_date)
+          if (args.end_date) params.set('endDate', args.end_date)
+          const query = params.toString()
+          const resp = await client.get<unknown>(
+            `/v1/billing/usage-analytics${query ? `?${query}` : ''}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(truncate(JSON.stringify(resp, null, 2)))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_billing_usage_history',
+      title: 'Venice Billing Usage History',
+      description: `Walk detailed billing usage in ascending timestamp order using cursor pagination. Supports complete JSON or upstream CSV pages, defaulting to 10 rows. Pages exceeding 64 KiB fail without returning partial rows or a next cursor. On continuation, send cursor without the original filters; CSV nextCursor values already encode format=csv so a cursor-only follow-up stays on text/csv. This uses /billing/usage-history, never deprecated /billing/usage.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        currency: z.enum(['USD', 'DIEM', 'BUNDLED_CREDITS']).optional(),
+        cursor: z
+          .string()
+          .regex(
+            /^(?:csv:)?[A-Za-z0-9_-]{1,512}$/,
+            'Must be a nextCursor from a previous page: up to 512 URL-safe characters, optionally prefixed with csv:.',
+          )
+          .optional()
+          .describe('Opaque nextCursor from the previous page. CSV pages return a csv: prefix so continuation stays on text/csv. Cannot be combined with filters or page_size.'),
+        start_timestamp: utcTimestampSchema
+          .optional()
+          .describe('Inclusive first-page lower bound, ISO 8601 UTC with Z suffix.'),
+        end_timestamp: utcTimestampSchema
+          .optional()
+          .describe('Exclusive first-page upper bound, ISO 8601 UTC with Z suffix.'),
+        page_size: z.number().int().min(10).max(1000).optional()
+          .describe('First-page row count. Defaults to 10. Complete pages larger than 64 KiB are rejected; use smaller pages or narrower timestamp filters.'),
+        format: z.enum(['json', 'csv']).optional().describe('Defaults to json. Optional on continuation; CSV nextCursor values already stay on CSV.'),
+      },
+      handler: async (args) => {
+        try {
+          if (
+            args.cursor &&
+            (args.currency || args.start_timestamp || args.end_timestamp || args.page_size !== undefined)
+          ) {
+            return fail('cursor must be sent without currency, timestamps, or page_size. format may be resent.')
+          }
+          if (
+            args.start_timestamp &&
+            args.end_timestamp &&
+            Date.parse(args.start_timestamp) >= Date.parse(args.end_timestamp)
+          ) {
+            return fail('end_timestamp must be later than start_timestamp.')
+          }
+          const CSV_CURSOR_PREFIX = 'csv:'
+          const rawCursor = args.cursor?.startsWith(CSV_CURSOR_PREFIX)
+            ? args.cursor.slice(CSV_CURSOR_PREFIX.length)
+            : args.cursor
+          if (args.cursor?.startsWith(CSV_CURSOR_PREFIX) && args.format === 'json') {
+            return fail('csv-prefixed cursor cannot be combined with format=json.')
+          }
+          const wantCsv = args.format === 'csv' || Boolean(args.cursor?.startsWith(CSV_CURSOR_PREFIX))
+          const params = new URLSearchParams()
+          if (rawCursor) params.set('cursor', rawCursor)
+          if (args.currency) params.set('currency', args.currency)
+          if (args.start_timestamp) params.set('startTimestamp', args.start_timestamp)
+          if (args.end_timestamp) params.set('endTimestamp', args.end_timestamp)
+          if (!rawCursor) params.set('pageSize', String(args.page_size ?? BILLING_USAGE_DEFAULT_PAGE_SIZE))
+          const query = params.toString()
+          const path = `/v1/billing/usage-history${query ? `?${query}` : ''}`
+          if (wantCsv) {
+            let nextCursor: string | undefined
+            const csv = await client.get<string>(
+              path,
+              { Accept: 'text/csv' },
+              {
+                auth: 'apiKey',
+                maxBytes: BILLING_USAGE_MAX_RESPONSE_BYTES,
+                onResponse: ({ headers }) => {
+                  nextCursor = headers['x-next-cursor']
+                },
+              },
+            )
+            return usageHistoryResult(csv, {
+              format: 'csv',
+              nextCursor: nextCursor ? `${CSV_CURSOR_PREFIX}${nextCursor}` : null,
+            })
+          }
+          const resp = await client.get<{ data?: unknown[]; nextCursor?: string | null }>(
+            path,
+            undefined,
+            { auth: 'apiKey', maxBytes: BILLING_USAGE_MAX_RESPONSE_BYTES },
+          )
+          return usageHistoryResult(JSON.stringify(resp, null, 2), {
+            format: 'json',
+            count: resp.data?.length ?? 0,
+            nextCursor: resp.nextCursor ?? null,
+          })
+        } catch (err) {
+          if (err instanceof VeniceResponseTooLargeError) return fail(BILLING_USAGE_TOO_LARGE)
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    // ========================================================================
+    // API KEYS — safe reads. Web3 challenge and mint live on a follow-up.
+    // ========================================================================
+
+    {
+      name: 'venice_list_api_keys',
+      title: 'Venice List API Keys',
+      description: `List active API-key metadata, including only the documented last six characters—not full key secrets.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<{ data?: unknown[] }>('/v1/api_keys', undefined, { auth: 'apiKey' })
+          return ok(safeJson(resp), { count: resp.data?.length ?? 0 })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_get_api_key',
+      title: 'Venice Get API Key Details',
+      description: `Get metadata, usage, balances, and rate-limit details for one API-key ID. The documented response does not reveal the full key secret.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {
+        id: z.string().min(1).max(256).describe('API-key ID, not the key secret.'),
+      },
+      handler: async ({ id }) => {
+        try {
+          const resp = await client.get<unknown>(
+            `/v1/api_keys/${encodeURIComponent(id)}`,
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(safeJson(resp))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_api_key_rate_limits',
+      title: 'Venice API Key Rate Limits',
+      description: `Get the current key's balances, access status, tier, expiration, and model-specific rate limits.${API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<unknown>('/v1/api_keys/rate_limits', undefined, { auth: 'apiKey' })
+          return ok(safeJson(resp))
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_api_key_rate_limit_logs',
+      title: 'Venice API Key Rate Limit Logs',
+      description: `Get the last 50 exceeded rate-limit events for the account. This read-only endpoint is experimental.${ADMIN_API_KEY_ONLY}`,
+      inputSchema: {},
+      handler: async () => {
+        try {
+          const resp = await client.get<{ data?: unknown[] }>(
+            '/v1/api_keys/rate_limits/log',
+            undefined,
+            { auth: 'apiKey' },
+          )
+          return ok(safeJson(resp), { count: resp.data?.length ?? 0 })
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    // ========================================================================
+    // x402 wallet helpers — SIWX reads + auth-free top-up discovery
     // ========================================================================
 
     {
       name: 'venice_x402_balance',
       title: 'Venice x402 Wallet Balance',
       description:
-        `Check the prepaid x402 credit balance for a wallet address. SIWX-ONLY: this endpoint rejects API key auth and requires X-Sign-In-With-X (forwarded from VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
+        `Check the prepaid x402 credit balance for an EVM or Solana wallet address. SIWX-ONLY: this endpoint rejects API key auth and requires SIGN-IN-WITH-X (forwarded from VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
       inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+        wallet_address: walletAddressSchema,
       },
       handler: async ({ wallet_address }) => {
         try {
           const resp = await client.get<unknown>(
-            `/v1/x402/balance/${encodeURIComponent(wallet_address.toLowerCase())}`,
+            `/v1/x402/balance/${encodeURIComponent(normalizeWalletAddress(wallet_address))}`,
             undefined,
             { auth: 'siwx' },
           )
@@ -1881,20 +2403,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       name: 'venice_x402_top_up_info',
       title: 'Venice x402 Top-up Requirements',
       description:
-        `Fetch step-1 top-up requirements (network, USDC token address, receiver wallet, min amount). Steps 2 (sign USDC authorization) and 3 (POST signed payment) require a wallet and happen OUTSIDE this MCP server.`,
-      inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-        amount_usd: z.number().min(1).max(1_000_000).optional(),
-      },
-      handler: async (args) => {
+        `Fetch the x402 top-up payment requirements: the accepted USDC payment options (currently Base and Solana), each with network, asset, receiver wallet (payTo), minimum amount in base units, and settlement timeout. Sends an empty POST with no payment header, so nothing is charged. Signing and PAYMENT-SIGNATURE submission happen OUTSIDE this MCP server.${NO_AUTH}`,
+      inputSchema: {},
+      handler: async () => {
         try {
-          await client.post('/v1/x402/top-up', {
-            walletAddress: args.wallet_address,
-            amountUsd: args.amount_usd ?? 10,
-          })
+          await client.post('/v1/x402/top-up', {}, undefined, { auth: 'none' })
           return ok('Unexpected non-402 response. Top-up may already be processed.')
         } catch (err) {
-          if (err instanceof Error && (err as { status?: number }).status === 402) {
+          if (err instanceof VeniceUpstreamError && err.status === 402) {
+            const requirements = topUpRequirements(err.body)
+            if (requirements) return ok(JSON.stringify(requirements, null, 2), requirements)
             return ok(formatToolError(err))
           }
           return fail(formatToolError(err))
@@ -1905,16 +2423,16 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_x402_transactions',
       title: 'Venice x402 Transaction History',
-      description: `List recent x402 top-up + debit transactions for a wallet. SIWX-ONLY: rejects API key, requires X-Sign-In-With-X (VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
+      description: `List recent x402 top-up + debit transactions for an EVM or Solana wallet. SIWX-ONLY: rejects API key, requires SIGN-IN-WITH-X (VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
       inputSchema: {
-        wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+        wallet_address: walletAddressSchema,
         limit: z.number().int().min(1).max(100).optional(),
       },
       handler: async ({ wallet_address, limit }) => {
         try {
           const qs = limit ? `?limit=${limit}` : ''
           const resp = await client.get<unknown>(
-            `/v1/x402/transactions/${encodeURIComponent(wallet_address.toLowerCase())}${qs}`,
+            `/v1/x402/transactions/${encodeURIComponent(normalizeWalletAddress(wallet_address))}${qs}`,
             undefined,
             { auth: 'siwx' },
           )

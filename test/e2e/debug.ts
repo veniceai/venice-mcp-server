@@ -24,7 +24,7 @@ const payload = {
 }
 const token = Buffer.from(JSON.stringify(payload)).toString('base64')
 
-console.log('payload:', JSON.stringify({ ...payload, signature: signature.slice(0, 20) + '...' }, null, 2))
+console.log('payload:', JSON.stringify({ ...payload, signature: '[REDACTED]' }, null, 2))
 
 // Now hit the actual endpoint and read the response
 console.log('\nposting to /chat/completions...')
@@ -32,7 +32,7 @@ const res = await fetch('https://api.venice.ai/api/v1/chat/completions', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'X-Sign-In-With-X': token,
+    'SIGN-IN-WITH-X': token,
   },
   body: JSON.stringify({
     model: 'deepseek-v4-flash-0731',

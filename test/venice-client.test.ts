@@ -44,9 +44,35 @@ describe('VeniceClient', () => {
       {
         match: 'POST /v1/needs-siwx',
         reply: ({ headers }) =>
-          headers['x-sign-in-with-x']
-            ? { ok: true, siwx: headers['x-sign-in-with-x'] }
+          headers['sign-in-with-x']
+            ? { ok: true, siwx: headers['sign-in-with-x'] }
             : { __status: 401, __body: { error: 'no auth' } },
+      },
+      {
+        match: 'POST /v1/no-auth',
+        reply: ({ headers }) => ({
+          authorization: headers.authorization,
+          siwx: headers['sign-in-with-x'],
+          payment: headers['payment-signature'],
+        }),
+      },
+      {
+        match: 'GET /v1/api-key-only',
+        reply: ({ headers }) => ({
+          authorization: headers.authorization,
+          siwx: headers['sign-in-with-x'],
+          legacySiwx: headers['x-sign-in-with-x'],
+          payment: headers['payment-signature'],
+          legacyPayment: headers['x-402-payment'],
+        }),
+      },
+      {
+        match: 'GET /v1/csv',
+        reply: {
+          __status: 200,
+          __body: 'a,b\n1,2',
+          __headers: { 'content-type': 'text/csv', 'x-next-cursor': 'cursor-2' },
+        },
       },
       {
         match: 'POST /v1/insufficient',
@@ -141,6 +167,20 @@ describe('VeniceClient', () => {
           __headers: { 'content-type': 'video/mp4' },
           __stallBody: true,
         },
+      },
+      { match: 'POST /v1/multipart/ok', reply: { text: 'hello' } },
+      { match: 'POST /v1/multipart/over-limit', reply: { text: 'x'.repeat(2048) } },
+      {
+        match: 'POST /v1/multipart/stalled-body',
+        reply: { __status: 200, __body: '{"text":"par', __stallBody: true },
+      },
+      {
+        match: 'POST /v1/multipart/invalid-json',
+        reply: { __status: 200, __body: '{"text": "trunc', __headers: { 'content-type': 'application/json' } },
+      },
+      {
+        match: 'POST /v1/multipart/oversized-error',
+        reply: { __status: 500, __body: { error: 'x'.repeat(2048) } },
       },
       {
         match: 'POST /v1/json-stalled-body',
@@ -261,6 +301,10 @@ describe('VeniceClient', () => {
             setTimeout(() => resolve({ ok: true }), 500)
           }) as unknown,
       },
+      {
+        match: 'POST /v1/stalled-body',
+        reply: { __status: 200, __stallBody: '{"success":true,"data":' },
+      },
     ])
   })
 
@@ -283,7 +327,7 @@ describe('VeniceClient', () => {
     assert.equal(r.key, 'Bearer vk_abc')
   })
 
-  it('forwards X-Sign-In-With-X when only SIWX token set', async () => {
+  it('forwards preferred SIGN-IN-WITH-X when only SIWX token set', async () => {
     const c = new VeniceClient(makeCfg({ siwxToken: 'siwx_token_xyz' }))
     const r = await c.post<{ ok: boolean; siwx: string }>('/v1/needs-siwx', {})
     assert.equal(r.ok, true)
@@ -301,10 +345,10 @@ describe('VeniceClient', () => {
         return true
       }
     )
-    // Verify on the wire: last request had Authorization but no X-Sign-In-With-X
+    // Verify on the wire: last request had Authorization but no SIWX header
     const last = server.calls[server.calls.length - 1]
     assert.ok(last.headers.authorization)
-    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+    assert.equal(last.headers['sign-in-with-x'], undefined)
   })
 
   it('can force SIWX auth for endpoints that reject API keys', async () => {
@@ -312,7 +356,67 @@ describe('VeniceClient', () => {
     await c.get('/v1/models', undefined, { auth: 'siwx' })
     const last = server.calls[server.calls.length - 1]
     assert.equal(last.headers.authorization, undefined)
-    assert.equal(last.headers['x-sign-in-with-x'], 'siwx_token_xyz')
+    assert.equal(last.headers['sign-in-with-x'], 'siwx_token_xyz')
+  })
+
+  it('can suppress configured auth and never invent a payment header', async () => {
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
+    const response = await c.post<{
+      authorization?: string
+      siwx?: string
+      payment?: string
+    }>('/v1/no-auth', {}, undefined, { auth: 'none' })
+    assert.equal(response.authorization, undefined)
+    assert.equal(response.siwx, undefined)
+    assert.equal(response.payment, undefined)
+  })
+
+  it('forces Bearer-only auth for API-key-only endpoints', async () => {
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
+    const response = await c.get<{
+      authorization?: string
+      siwx?: string
+      legacySiwx?: string
+      payment?: string
+      legacyPayment?: string
+    }>(
+      '/v1/api-key-only',
+      {
+        authorization: 'Bearer caller-controlled',
+        'SIGN-IN-WITH-X': 'caller-canonical-siwx',
+        'X-Sign-In-With-X': 'caller-legacy-siwx',
+        'PAYMENT-SIGNATURE': 'caller-payment',
+        'X-402-Payment': 'caller-legacy-payment',
+      },
+      { auth: 'apiKey' },
+    )
+    assert.equal(response.authorization, 'Bearer vk_abc')
+    assert.equal(response.siwx, undefined)
+    assert.equal(response.legacySiwx, undefined)
+    assert.equal(response.payment, undefined)
+    assert.equal(response.legacyPayment, undefined)
+  })
+
+  it('fails API-key-only auth locally without contacting upstream', async () => {
+    const c = new VeniceClient(makeCfg({ siwxToken: 'siwx_token_xyz' }))
+    const callsBefore = server.calls.length
+    await assert.rejects(
+      () => c.get('/v1/api-key-only', undefined, { auth: 'apiKey' }),
+      /VENICE_API_KEY is required for this API-key-only endpoint/,
+    )
+    assert.equal(server.calls.length, callsBefore)
+  })
+
+  it('exposes response headers through the metadata callback', async () => {
+    const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc' }))
+    let nextCursor: string | undefined
+    const csv = await c.get<string>('/v1/csv', { Accept: 'text/csv' }, {
+      onResponse: ({ headers }) => {
+        nextCursor = headers['x-next-cursor']
+      },
+    })
+    assert.equal(csv, 'a,b\n1,2')
+    assert.equal(nextCursor, 'cursor-2')
   })
 
   it('can suppress configured auth on demand', async () => {
@@ -320,7 +424,7 @@ describe('VeniceClient', () => {
     await c.post('/v1/chat/completions', {}, undefined, { auth: 'none' })
     const last = server.calls[server.calls.length - 1]
     assert.equal(last.headers.authorization, undefined)
-    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+    assert.equal(last.headers['sign-in-with-x'], undefined)
   })
 
   it('can suppress configured credentials for auth-free endpoints', async () => {
@@ -328,7 +432,7 @@ describe('VeniceClient', () => {
     await c.get('/v1/models', undefined, { auth: 'none' })
     const last = server.calls[server.calls.length - 1]
     assert.equal(last.headers.authorization, undefined)
-    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+    assert.equal(last.headers['sign-in-with-x'], undefined)
   })
 
   it('forces Bearer-only auth for API-key-only endpoints', async () => {
@@ -336,7 +440,7 @@ describe('VeniceClient', () => {
     await c.get('/v1/models', undefined, { auth: 'apiKey' })
     const last = server.calls[server.calls.length - 1]
     assert.equal(last.headers.authorization, 'Bearer vk_abc')
-    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+    assert.equal(last.headers['sign-in-with-x'], undefined)
   })
 
   it('fails API-key-only auth locally without contacting upstream', async () => {
@@ -633,6 +737,26 @@ describe('VeniceClient', () => {
     )
   })
 
+  function form(): FormData {
+    const f = new FormData()
+    f.set('file', new Blob(['audio'], { type: 'audio/wav' }), 'audio.wav')
+    return f
+  }
+
+  it('postMultipart enforces its byte limit on a successful response', async () => {
+    const c = new VeniceClient(makeCfg())
+    const r = await c.postMultipart<{ text: string }>('/v1/multipart/ok', form(), { maxBytes: 1024 })
+    assert.equal(r.text, 'hello')
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/over-limit', form(), { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceResponseTooLargeError)
+        assert.equal(err.maxBytes, 1024)
+        return true
+      },
+    )
+  })
+
   it('parses E2EE 402 JSON before SSE success validation', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
@@ -651,10 +775,36 @@ describe('VeniceClient', () => {
     )
   })
 
+  it('postMultipart times out when headers arrive but the bounded body stalls', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/stalled-body', form(), { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 504)
+        assert.match(err.message, /timed out after 30ms/)
+        return true
+      },
+    )
+  })
+
   it('postMultipart times out when headers arrive but the JSON body stalls', async () => {
     const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
     await assert.rejects(
       () => c.postMultipart('/v1/json-stalled-body', new FormData()),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 504)
+        assert.match(err.message, /timed out after 30ms/)
+        return true
+      },
+    )
+  })
+
+  it('postMultipart times out when an unbounded body stalls', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/stalled-body', form()),
       (err: unknown) => {
         assert.ok(err instanceof VeniceUpstreamError)
         assert.equal(err.status, 504)
@@ -788,12 +938,36 @@ describe('VeniceClient', () => {
     assert.equal(server.calls.at(-1)?.path, '/v1/text-stalled-body')
   })
 
+  it('postMultipart rejects malformed JSON on a bounded 2xx instead of returning an empty object', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/invalid-json', form(), { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceMalformedResponseError)
+        return true
+      },
+    )
+  })
+
+  it('postMultipart reports an oversized error body as the upstream status, not a size-limit error', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.postMultipart('/v1/multipart/oversized-error', form(), { maxBytes: 1024 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 500)
+        return true
+      },
+    )
+  })
+
   it('keeps the HTTP status when a non-OK error body stalls past the timeout', async () => {
     const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
     for (const [path, status] of [['/v1/stalled-402', 402], ['/v1/stalled-500', 500]] as const) {
       for (const call of [
         () => c.post(path, {}),
-        () => c.postMultipart(path, new FormData()),
+        () => c.postMultipart(path, form()),
+        () => c.postMultipart(path, form(), { maxBytes: 1024 }),
         () => c.postBinary(path, { json: {} }, { maxBytes: 1024 }),
         () => c.postMixed(path, {}),
       ]) {
@@ -813,7 +987,8 @@ describe('VeniceClient', () => {
     assert.equal(mixed.kind, 'json')
     if (mixed.kind === 'json') assert.equal(mixed.data.status, 'PROCESSING')
     assert.deepEqual(await c.post('/v1/mixed-case-json', {}), { status: 'PROCESSING' })
-    assert.deepEqual(await c.postMultipart('/v1/mixed-case-json', new FormData()), { status: 'PROCESSING' })
+    assert.deepEqual(await c.postMultipart('/v1/mixed-case-json', form()), { status: 'PROCESSING' })
+    assert.deepEqual(await c.postMultipart('/v1/mixed-case-json', form(), { maxBytes: 1024 }), { status: 'PROCESSING' })
   })
 
   it('postMixed rejects malformed mixed-case JSON rather than returning it as binary', async () => {
@@ -826,10 +1001,9 @@ describe('VeniceClient', () => {
 
   it('rejects a malformed 2xx JSON body instead of returning {}', async () => {
     const c = new VeniceClient(makeCfg())
-    const form = new FormData()
     for (const call of [
       () => c.post('/v1/malformed-json', {}),
-      () => c.postMultipart('/v1/malformed-json', form),
+      () => c.postMultipart('/v1/malformed-json', form()),
       () => c.postMixed('/v1/malformed-json', {}),
     ]) {
       await assert.rejects(call, (err: unknown) => {
@@ -854,6 +1028,18 @@ describe('VeniceClient', () => {
         assert.equal(e.status, 504)
         return true
       }
+    )
+  })
+
+  it('times out a 200 whose body stalls after the headers arrive', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 50 }))
+    await assert.rejects(
+      () => c.post('/v1/stalled-body', {}),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 504)
+        return true
+      },
     )
   })
 
