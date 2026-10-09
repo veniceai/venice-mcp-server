@@ -139,6 +139,10 @@ class QueueDownloadUrlStore {
     return this.urls.get(queueId)?.url
   }
 
+  delete(queueId: string): void {
+    this.urls.delete(queueId)
+  }
+
   private prune(now = Date.now()): void {
     for (const [queueId, entry] of this.urls) {
       if (entry.expiresAt <= now) this.urls.delete(queueId)
@@ -207,7 +211,7 @@ const NO_AUTH = ' No authentication required.'
 const KNOWN_MODEL_TYPES = ['text', 'image', 'inpaint', 'upscale', 'video', 'music', 'tts', 'asr', 'embedding', 'decision'] as const
 /** Shared by music generation and quote so a quoted request is always queueable. */
 const musicDurationSecondsSchema = z
-  .union([z.number().int().positive(), z.string().regex(/^\d+$/, 'Must be a numeric string')])
+  .union([z.number().int().positive(), z.string().regex(/^[1-9]\d*$/, 'Must be a positive integer string')])
   .optional()
   .describe('Optional duration in seconds as a positive integer or numeric string. Model-specific.')
 const modelTypeSchema = z
@@ -296,6 +300,155 @@ class AsrResultStore {
   }
 }
 
+const cacheControlSchema = z
+  .object({
+    type: z.literal('ephemeral'),
+    ttl: z.string().optional().describe('Optional extended cache TTL, for example "1h".'),
+  })
+  .describe('Prompt cache control for providers that support it.')
+
+const textContentPartSchema = z.object({
+  type: z.literal('text'),
+  text: z.string().min(1),
+  cache_control: cacheControlSchema.optional(),
+})
+
+const chatUserContentPartSchema = z.union([
+  textContentPartSchema,
+  z.object({
+    type: z.literal('image_url'),
+    image_url: z.object({
+      url: z.string().min(1).describe('Public URL or base64 data URL for an image at least 64px square.'),
+    }),
+    cache_control: cacheControlSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('input_audio'),
+    input_audio: z.object({
+      data: z.string().min(1).describe('Base64-encoded audio bytes; direct audio URLs are not supported.'),
+      format: z.enum(['wav', 'mp3', 'aiff', 'aac', 'ogg', 'flac', 'm4a', 'pcm16', 'pcm24']).optional(),
+    }),
+    cache_control: cacheControlSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('video_url'),
+    video_url: z.object({
+      url: z.string().min(1).describe('Public video URL, supported YouTube URL, or base64 video data URL.'),
+    }),
+    cache_control: cacheControlSchema.optional(),
+  }),
+  z.object({
+    type: z.literal('file'),
+    file: z.object({
+      file_data: z.string().min(1).describe('Public file URL or base64 data URL.'),
+      filename: z.string().optional(),
+    }),
+    cache_control: cacheControlSchema.optional(),
+  }),
+])
+
+const assistantToolCallSchema = z.object({
+  id: z.string(),
+  type: z.literal('function'),
+  thought_signature: z.string().optional(),
+  function: z.object({
+    name: z.string(),
+    arguments: z.string(),
+  }),
+})
+
+const chatMessageSchema = z.union([
+  z.object({
+    role: z.literal('user'),
+    content: z.union([z.string(), z.array(chatUserContentPartSchema).min(1)]),
+    name: z.string().optional(),
+  }),
+  z.object({
+    role: z.literal('assistant'),
+    content: z.union([z.string(), z.array(textContentPartSchema), z.null()]).optional(),
+    name: z.string().optional(),
+    tool_calls: z.array(assistantToolCallSchema).optional(),
+    reasoning_content: z.string().nullable().optional(),
+    reasoning_details: z.array(z.object({
+      type: z.string(),
+      data: z.string().optional(),
+      format: z.string().optional(),
+      id: z.string().optional(),
+      index: z.number().optional(),
+      text: z.string().optional(),
+    })).optional(),
+    thought_signature: z.string().nullable().optional(),
+  }),
+  z.object({
+    role: z.literal('tool'),
+    content: z.string(),
+    tool_call_id: z.string(),
+    name: z.string().optional(),
+  }),
+  z.object({
+    role: z.enum(['system', 'developer']),
+    content: z.union([z.string(), z.array(textContentPartSchema).min(1)]),
+    name: z.string().optional(),
+  }),
+])
+
+const reasoningEffortSchema = z.enum(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+const reasoningSchema = z.object({
+  effort: reasoningEffortSchema.optional(),
+  summary: z.enum(['auto', 'concise', 'detailed']).optional(),
+})
+
+const jsonSchemaValue = z.record(z.unknown())
+const responseFormatSchema = z.union([
+  z.object({ type: z.literal('json_schema'), json_schema: jsonSchemaValue }),
+  z.object({ type: z.literal('json_object') }),
+  z.object({ type: z.literal('text') }),
+])
+
+const chatFunctionToolSchema = z.object({
+  type: z.literal('function').optional(),
+  id: z.string().optional(),
+  function: z.object({
+    name: z.string().min(1),
+    description: z.string().optional(),
+    parameters: jsonSchemaValue.optional(),
+    strict: z.boolean().optional(),
+  }),
+})
+
+const chatToolSchema = z.union([
+  chatFunctionToolSchema,
+  z.object({ type: z.enum(['web_search', 'x_search']) }),
+])
+
+const chatToolChoiceSchema = z.union([
+  z.enum(['none', 'auto', 'required']),
+  z.object({
+    type: z.literal('function'),
+    function: z.object({ name: z.string().min(1) }),
+  }),
+])
+
+const responsesContentPartSchema = z.union([
+  z.object({ type: z.enum(['input_text', 'text', 'output_text']), text: z.string() }),
+  z.object({
+    type: z.enum(['input_image', 'image_url']),
+    image_url: z.union([
+      z.string().min(1),
+      z.object({
+        url: z.string().min(1),
+        detail: z.enum(['auto', 'low', 'high']).optional(),
+      }),
+    ]),
+  }),
+])
+
+const responsesMessageSchema = z.object({
+  role: z.enum(['system', 'developer', 'user', 'assistant']),
+  content: z.union([z.string(), z.array(responsesContentPartSchema).min(1)]),
+  type: z.literal('message').optional(),
+})
+
 /**
  * Venice-specific extensions to the OpenAI body. `/responses` accepts a
  * narrower set than `/chat/completions` and silently strips the rest, so the
@@ -340,8 +493,9 @@ const veniceParametersSchema = z
       .optional()
       .describe('Turn reasoning off entirely on supported models, and strip the <think></think> blocks.'),
   })
+  .strict()
   .optional()
-  .describe('Venice-only options: web search, citations, system prompt control, reasoning control, characters.')
+  .describe('Venice-only options: web search, citations, system prompt control, reasoning control, and characters.')
 
 const responsesVeniceParametersSchema = z
   .object(sharedVeniceParameters)
@@ -361,38 +515,70 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's uncensored LLM catalog (Claude, GPT-5, Llama, DeepSeek, Qwen, GLM, Kimi, Venice Uncensored 1.1, etc.). Use venice_parameters for live web search with citations, character personas, and system prompt or reasoning control.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
-          .array(z.object({ role: z.enum(['system', 'user', 'assistant']), content: z.string() }))
+          .array(chatMessageSchema)
           .min(1)
-          .describe('Chat messages, OpenAI format.'),
+          .describe('Chat messages. Multimodal image, audio, video, and file blocks belong in user messages.'),
         model: z.string().optional().describe(`Model id. Defaults to ${cfg.defaultChatModel}.`),
         temperature: z.number().min(0).max(2).optional(),
         max_tokens: z.number().int().positive().max(32_000).optional(),
+        max_completion_tokens: z.number().int().positive().optional().describe('Maximum visible plus reasoning tokens. Preferred over deprecated max_tokens.'),
         top_p: z.number().min(0).max(1).optional(),
-        stop: z.array(z.string()).max(8).optional(),
+        stop: z.union([z.string(), z.array(z.string()).min(1).max(4)]).optional(),
         verbosity: z.enum(['low', 'medium', 'high', 'auto']).optional().describe('How much text the model returns.'),
+        response_format: responseFormatSchema.optional(),
+        tools: z.array(chatToolSchema).optional(),
+        tool_choice: chatToolChoiceSchema.optional(),
+        parallel_tool_calls: z.boolean().optional(),
+        prompt_cache_key: z.string().optional(),
+        prompt_cache_retention: z.enum(['default', 'extended', '24h']).optional(),
+        reasoning: reasoningSchema.optional(),
+        reasoning_effort: reasoningEffortSchema.optional().describe('Takes precedence over reasoning.effort.'),
         venice_parameters: veniceParametersSchema,
+        timeout_ms: z
+          .number()
+          .int()
+          .min(1_000)
+          .max(600_000)
+          .optional()
+          .describe('Upstream timeout for this call, covering the full response body. Long generations may need more than the VENICE_HTTP_TIMEOUT_MS default.'),
       },
       handler: async (args) => {
         try {
-          const resp = await client.post<{
-            choices?: Array<{ message?: { content?: string } }>
-            usage?: Record<string, number>
-          }>('/v1/chat/completions', {
+          if (args.venice_parameters && 'enable_e2ee' in args.venice_parameters) {
+            return fail('E2EE is not available from this server. venice_chat does not accept enable_e2ee.')
+          }
+
+          const body = {
             model: args.model ?? cfg.defaultChatModel,
             messages: args.messages,
             temperature: args.temperature,
             max_tokens: args.max_tokens,
+            max_completion_tokens: args.max_completion_tokens,
             top_p: args.top_p,
             stop: args.stop,
             verbosity: args.verbosity,
+            response_format: args.response_format,
+            tools: args.tools,
+            tool_choice: args.tool_choice,
+            parallel_tool_calls: args.parallel_tool_calls,
+            prompt_cache_key: args.prompt_cache_key,
+            prompt_cache_retention: args.prompt_cache_retention,
+            reasoning: args.reasoning,
+            reasoning_effort: args.reasoning_effort,
             venice_parameters: args.venice_parameters,
             stream: false,
-          })
-          const text = resp.choices?.[0]?.message?.content ?? ''
-          return ok(truncate(text), { usage: resp.usage })
+          }
+
+          const resp = await client.post<{
+            choices?: Array<{ message?: Record<string, unknown> & { content?: string | null } }>
+            usage?: Record<string, number>
+          }>('/v1/chat/completions', body, undefined, { timeoutMs: args.timeout_ms })
+          const message = resp.choices?.[0]?.message
+          const text = message?.content ?? JSON.stringify(message ?? resp, null, 2)
+          return ok(truncate(text), { message, usage: resp.usage })
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -402,17 +588,19 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_responses',
       title: 'Venice Responses API',
-      description: `OpenAI-compatible Responses API. Single-turn or multi-turn with tool support.${nsfwNote}${X402_OK}`,
+      description: `Alpha, stateless OpenAI-compatible Responses API for Venice text models. Supports text/image input and reasoning controls, but this MCP tool does not advertise tool calling because the endpoint does not reliably accept those fields. E2EE-capable models are not supported.${nsfwNote}${X402_OK}`,
       inputSchema: {
         input: z
           .union([
             z.string(),
-            z.array(z.object({ role: z.enum(['system', 'user', 'assistant']), content: z.string() })),
+            z.array(responsesMessageSchema),
           ])
-          .describe('Either a plain string or an array of role+content messages.'),
+          .describe('Plain text or an array of text/image message inputs.'),
         model: z.string().optional(),
         max_output_tokens: z.number().int().positive().max(32_000).optional(),
         temperature: z.number().min(0).max(2).optional(),
+        top_p: z.number().min(0).max(1).optional(),
+        reasoning: reasoningSchema.optional(),
         venice_parameters: responsesVeniceParametersSchema,
       },
       handler: async (args) => {
@@ -830,6 +1018,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                     ' Assume the media is still stored server-side and retry with venice_video_complete.',
                 }
               }
+              queueDownloadUrls.delete(args.queue_id)
               return { deleted: true, cleanupNote: ` ${successNote}` }
             } catch (cleanupError) {
               return {
@@ -841,6 +1030,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           if (response.kind === 'binary') {
             if (!response.contentType.toLowerCase().includes('video/mp4')) {
               return fail(`Venice returned unsupported video content type: ${response.contentType}`)
+            }
+            if (response.buffer.length === 0) {
+              return fail(
+                'Venice returned an empty video/mp4 body. The queued media was not deleted; retry venice_video_status with the same queue_id.',
+                { error: 'empty_video_response', retry_safe: true, queue_id: args.queue_id, server_media_deleted: false },
+              )
             }
             const blob = response.buffer.toString('base64')
             const { deleted, cleanupNote } = await cleanupAfterSuccess(
@@ -945,30 +1140,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               { server_media_deleted: false },
             )
           }
+          queueDownloadUrls.delete(args.queue_id)
           return ok(`Marked ${args.queue_id} complete; server-side media removed.`, {
             server_media_deleted: true,
           })
-        } catch (err) {
-          return fail(formatToolError(err))
-        }
-      },
-    },
-
-    {
-      name: 'venice_video_transcriptions',
-      title: 'Venice Video Transcriptions',
-      description: `Transcribe a YouTube video URL.${X402_OK}`,
-      inputSchema: {
-        url: z.string().url().describe('YouTube URL only (e.g. https://www.youtube.com/watch?v=...).'),
-        response_format: z.enum(['json', 'text']).optional(),
-      },
-      handler: async (args) => {
-        try {
-          const resp = await client.post<{ transcript?: string; lang?: string; text?: string }>(
-            '/v1/video/transcriptions',
-            args
-          )
-          return ok(truncate(resp.transcript ?? resp.text ?? JSON.stringify(resp)), { lang: resp.lang })
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1215,8 +1390,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: { queue_id: z.string().min(1), model: z.string().min(1) },
       handler: async (args) => {
         try {
-          await client.post('/v1/audio/complete', args)
-          return ok(`Marked music ${args.queue_id} complete.`)
+          const resp = await client.post<{ success?: boolean }>('/v1/audio/complete', args)
+          if (resp?.success !== true) {
+            return fail(`Venice did not confirm cleanup for music ${args.queue_id}; server-side media may still exist.`)
+          }
+          return ok(`Marked music ${args.queue_id} complete; server-side media removed.`, { server_media_deleted: true })
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1331,6 +1509,55 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     // ========================================================================
     // CATALOG — auth-free GETs (or API-key for characters)
     // ========================================================================
+
+    {
+      name: 'venice_tee_attestation',
+      title: 'Venice TEE Attestation',
+      description: `Fetch hardware-attestation evidence for a TEE-capable text model. The caller must supply a fresh 32-byte nonce and independently verify the echoed nonce, Intel TDX quote, optional NVIDIA evidence, debug-mode state, and signing-key binding before trusting the key. Fetching this evidence does not itself establish E2EE.${NO_AUTH}`,
+      inputSchema: {
+        model: z.string().min(1).describe('TEE-capable text model id; check supportsTeeAttestation in venice_list_models.'),
+        nonce: z
+          .string()
+          .regex(/^[0-9a-fA-F]{64}$/)
+          .describe('Caller-generated 32-byte freshness challenge encoded as exactly 64 hexadecimal characters.'),
+      },
+      handler: async ({ model, nonce }) => {
+        try {
+          const params = new URLSearchParams({ model, nonce })
+          const resp = await client.get<Record<string, unknown>>(
+            `/v1/tee/attestation?${params.toString()}`,
+            undefined,
+            { auth: 'none' },
+          )
+          return ok(JSON.stringify(resp, null, 2), resp)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
+
+    {
+      name: 'venice_tee_signature',
+      title: 'Venice TEE Response Signature',
+      description: `Fetch the enclave signature for a completed TEE text-model chat request. The caller must cryptographically verify it against the signing identity bound by a separately verified attestation; this tool only returns the provider payload.${NO_AUTH}`,
+      inputSchema: {
+        model: z.string().min(1).describe('Same TEE-capable text model used for the chat completion.'),
+        request_id: z.string().min(1).describe('Completion id returned by POST /v1/chat/completions.'),
+      },
+      handler: async ({ model, request_id }) => {
+        try {
+          const params = new URLSearchParams({ model, request_id })
+          const resp = await client.get<Record<string, unknown>>(
+            `/v1/tee/signature?${params.toString()}`,
+            undefined,
+            { auth: 'none' },
+          )
+          return ok(JSON.stringify(resp, null, 2), resp)
+        } catch (err) {
+          return fail(formatToolError(err))
+        }
+      },
+    },
 
     {
       name: 'venice_list_models',
@@ -1452,7 +1679,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             .filter((candidate): candidate is Record<string, unknown> =>
               typeof candidate === 'object' && candidate !== null
             )
-            .find((candidate) => candidate.id === model_id)
+            .find((candidate) => typeof candidate.id === 'string' && candidate.id.toLowerCase() === model_id.toLowerCase())
           if (!model) {
             return fail(
               `No model "${model_id}" in the "${type}" catalog. If the id is right, it may belong to another type ` +

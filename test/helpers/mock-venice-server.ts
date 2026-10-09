@@ -6,7 +6,7 @@ export interface MockRoute {
   match: string
   /**
    * Either a static response or a function that gets the parsed request and returns one.
-   * Return a plain object → 200 JSON. Return { __status, __body, __headers } → custom.
+   * Return a plain object → 200 JSON. Return { __status, __body, __rawBody, __headers } → custom.
    */
   reply:
     | unknown
@@ -82,6 +82,7 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
         const r = reply as {
           __status: number
           __body?: unknown
+          __rawBody?: string
           __headers?: Record<string, string>
           __stallBody?: boolean
         }
@@ -95,7 +96,9 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
           if (Buffer.isBuffer(r.__body) || typeof r.__body === 'string') res.write(r.__body)
           return
         }
-        if (Buffer.isBuffer(r.__body) || typeof r.__body === 'string') {
+        if (r.__rawBody !== undefined) {
+          res.end(r.__rawBody)
+        } else if (Buffer.isBuffer(r.__body) || typeof r.__body === 'string') {
           res.end(r.__body)
         } else {
           res.end(JSON.stringify(r.__body ?? {}))
