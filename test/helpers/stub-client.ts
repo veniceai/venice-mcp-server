@@ -10,6 +10,10 @@ export interface StubCall {
   multipart?: boolean
   /** Whether this call went through postBinary (binary response expected). */
   binary?: boolean
+  /** Whether this call expects an unparsed text/event-stream response. */
+  eventStream?: boolean
+  /** Per-call timeout override passed to post / postEventStream. */
+  timeoutMs?: number
   /** Response byte cap requested by the tool, if any. */
   maxBytes?: number
 }
@@ -33,7 +37,7 @@ export class StubClient {
       const out = await this.overrides[matchKey](call)
       return out as T
     }
-    return (defaultResponse(call.path, call.binary) as T) ?? ({} as T)
+    return (defaultResponse(call.path, call.binary, call.eventStream) as T) ?? ({} as T)
   }
 
   async get<T>(
@@ -41,11 +45,22 @@ export class StubClient {
     headers?: Record<string, string>,
     opts: {
       auth?: StubCall['auth']
+      timeoutMs?: number
       maxBytes?: number
+      maxResponseBytes?: number
+      responseType?: 'auto' | 'event-stream'
       onResponse?: (metadata: { status: number; headers: Record<string, string> }) => void
     } = {},
   ) {
-    const result = await this.dispatch<T>({ method: 'GET', path, headers, auth: opts.auth, maxBytes: opts.maxBytes })
+    const result = await this.dispatch<T>({
+      method: 'GET',
+      path,
+      headers,
+      auth: opts.auth,
+      timeoutMs: opts.timeoutMs,
+      maxBytes: opts.maxBytes ?? opts.maxResponseBytes,
+      eventStream: opts.responseType === 'event-stream' ? true : undefined,
+    })
     opts.onResponse?.({
       status: 200,
       headers: path.startsWith('/v1/billing/usage-history')
@@ -54,13 +69,31 @@ export class StubClient {
     })
     return result
   }
-  post<T>(
+  async post<T>(
     path: string,
     json: unknown,
     headers?: Record<string, string>,
-    opts: { auth?: StubCall['auth'] } = {},
+    opts: {
+      auth?: StubCall['auth']
+      timeoutMs?: number
+      maxBytes?: number
+      maxResponseBytes?: number
+      responseType?: 'auto' | 'event-stream'
+      onResponse?: (metadata: { status: number; headers: Record<string, string> }) => void
+    } = {},
   ) {
-    return this.dispatch<T>({ method: 'POST', path, body: json, headers, auth: opts.auth })
+    const result = await this.dispatch<T>({
+      method: 'POST',
+      path,
+      body: json,
+      headers,
+      auth: opts.auth,
+      timeoutMs: opts.timeoutMs,
+      maxBytes: opts.maxBytes ?? opts.maxResponseBytes,
+      eventStream: opts.responseType === 'event-stream' ? true : undefined,
+    })
+    opts.onResponse?.({ status: 200, headers: {} })
+    return result
   }
   async postWithMetadata<T>(
     path: string,
@@ -199,7 +232,7 @@ export class StubClient {
   }
 }
 
-function defaultResponse(path: string, _binary?: boolean): unknown {
+function defaultResponse(path: string, _binary?: boolean, _eventStream?: boolean): unknown {
   if (path.startsWith('/v1/chat/completions'))
     return { choices: [{ message: { content: 'reply' } }], usage: { prompt_tokens: 1, completion_tokens: 1 } }
   if (path.startsWith('/v1/responses')) return { output_text: 'response' }
@@ -258,10 +291,28 @@ function defaultResponse(path: string, _binary?: boolean): unknown {
     return {
       data: [
         { id: 'deepseek-v4-flash-0731', type: 'text' },
+        {
+          id: 'e2ee-qwen3-5-122b-a10b',
+          type: 'text',
+          model_spec: { capabilities: { supportsE2EE: true, supportsTeeAttestation: true } },
+        },
         { id: 'flux-2-pro', type: 'image' },
         { id: 'veo3.1-fast-text-to-video', type: 'video' },
       ],
     }
+  if (path.startsWith('/v1/tee/attestation'))
+    return {
+      verified: true,
+      nonce: '0'.repeat(64),
+      model: 'e2ee-model',
+      tee_provider: 'near-ai',
+      intel_quote: 'quote',
+      nvidia_payload: null,
+      signing_key: '04' + '1'.repeat(128),
+      signing_address: `0x${'2'.repeat(40)}`,
+    }
+  if (path.startsWith('/v1/tee/signature'))
+    return { model: 'e2ee-model', request_id: 'chatcmpl-test', signature: '0xsigned' }
   if (path.startsWith('/v1/characters')) return { data: [{ slug: 'sample', name: 'Sample' }] }
   if (path.startsWith('/v1/billing/balance'))
     return { canConsume: true, consumptionCurrency: 'USD', balances: { usd: 10, diem: null }, diemEpochAllocation: 0 }

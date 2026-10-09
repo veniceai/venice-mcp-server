@@ -6,10 +6,10 @@ export interface MockRoute {
   match: string
   /**
    * Either a static response or a function that gets the parsed request and returns one.
-   * Return a plain object → 200 JSON. Return { __status, __body, __headers } → custom.
+   * Return a plain object → 200 JSON. Return { __status, __body, __rawBody, __headers, __stallBody } → custom.
    * Use `__rawBody` instead of `__body` to write bytes verbatim, e.g. a truncated
    * JSON payload served with a JSON content-type.
-   * Use `__stallBody` to send the headers plus that partial body and then
+   * Use `__stallBody` to send the headers plus a partial body and then
    * never finish the response.
    */
   reply:
@@ -87,9 +87,8 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
           __status: number
           __body?: unknown
           __rawBody?: string
-          __stallBody?: string
+          __stallBody?: string | boolean
           __headers?: Record<string, string>
-          __stallBody?: boolean
         }
         res.statusCode = r.__status
         for (const [k, v] of Object.entries(r.__headers ?? {})) {
@@ -102,11 +101,9 @@ export async function startMockVenice(routes: MockRoute[]): Promise<MockVeniceSe
           else if (Buffer.isBuffer(r.__body) || typeof r.__body === 'string') res.write(r.__body)
           return
         }
-        if (typeof r.__rawBody === 'string') {
+        if (r.__rawBody !== undefined) {
           res.end(r.__rawBody)
-          return
-        }
-        if (Buffer.isBuffer(r.__body) || typeof r.__body === 'string') {
+        } else if (Buffer.isBuffer(r.__body) || typeof r.__body === 'string') {
           res.end(r.__body)
         } else {
           res.end(JSON.stringify(r.__body ?? {}))
