@@ -4,7 +4,7 @@
  * - Generates / loads a persistent test wallet (./.e2e-wallet.json)
  * - Fetches a fresh SIWE challenge from any 402 endpoint
  * - Signs it with EIP-191 personal_sign
- * - Builds the X-Sign-In-With-X base64 header
+ * - Builds the SIGN-IN-WITH-X base64 header
  * - Builds an EIP-3009 transferWithAuthorization for top-up
  */
 import * as fs from 'node:fs'
@@ -82,7 +82,7 @@ export function buildSiweMessage(challenge: SiweChallenge, address: string): str
 }
 
 /**
- * Sign a SIWE message and produce the base64-encoded X-Sign-In-With-X header value.
+ * Sign a SIWE message and produce the base64-encoded SIGN-IN-WITH-X header value.
  */
 export async function buildSiwxHeader(wallet: TestWallet, address?: string): Promise<string> {
   const account = privateKeyToAccount(wallet.privateKey)
@@ -129,7 +129,7 @@ export async function getUsdcBalance(address: `0x${string}`): Promise<bigint> {
 
 /**
  * Build an EIP-3009 transferWithAuthorization payload for USDC on Base
- * and return the base64 X-402-Payment header value to POST to /api/v1/x402/top-up.
+ * and return the base64 PAYMENT-SIGNATURE header value to POST to /api/v1/x402/top-up.
  *
  * The signature uses EIP-712 typed data over the TransferWithAuthorization struct,
  * which is what x402 'exact' scheme expects on Base USDC.
