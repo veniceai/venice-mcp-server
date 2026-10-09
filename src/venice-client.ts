@@ -62,7 +62,7 @@ export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
 /**
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
- * - Otherwise adds `X-Sign-In-With-X` when a SIWX token is configured.
+ * - Otherwise adds `SIGN-IN-WITH-X` when a SIWX token is configured.
  * - Surfaces 402 responses as `VeniceUpstreamError(isPaymentRequired)` so tools
  *   can format a helpful top-up message back to the MCP host.
  *
@@ -95,13 +95,13 @@ export class VeniceClient {
     if (auth === 'siwx') {
       delete headers.Authorization
       delete headers.authorization
-      if (this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
-        headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+      if (this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
+        headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
       }
     } else if (auth === 'default' && this.cfg.apiKey && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    } else if (auth === 'default' && this.cfg.siwxToken && !headers['X-Sign-In-With-X']) {
-      headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    } else if (auth === 'default' && this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
+      headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
     }
 
     const ac = new AbortController()
@@ -201,7 +201,7 @@ export class VeniceClient {
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
     }
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    else if (this.cfg.siwxToken) headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
     // NOTE: don't set Content-Type — fetch sets the boundary automatically.
 
     const ac = new AbortController()
@@ -236,7 +236,7 @@ export class VeniceClient {
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
     }
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    else if (this.cfg.siwxToken) headers['X-Sign-In-With-X'] = this.cfg.siwxToken
+    else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
 
     let body: any
     if ('form' in init) {

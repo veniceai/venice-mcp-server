@@ -126,7 +126,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
               message: {
                 content:
                   `auth=${headers.authorization ?? 'none'};` +
-                  `siwx=${headers['x-sign-in-with-x'] ?? 'none'};` +
+                  `siwx=${headers['sign-in-with-x'] ?? 'none'};` +
                   `model=${(body as { model?: string }).model};`,
               },
             },
@@ -475,9 +475,9 @@ describe('integration — x402-only mode (no API key)', () => {
       {
         match: 'POST /v1/chat/completions',
         reply: ({ headers }) =>
-          headers['x-sign-in-with-x']
+          headers['sign-in-with-x']
             ? {
-                choices: [{ message: { content: `siwx=${headers['x-sign-in-with-x']}` } }],
+                choices: [{ message: { content: `siwx=${headers['sign-in-with-x']}` } }],
               }
             : {
                 __status: 402,

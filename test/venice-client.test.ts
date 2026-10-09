@@ -42,8 +42,8 @@ describe('VeniceClient', () => {
       {
         match: 'POST /v1/needs-siwx',
         reply: ({ headers }) =>
-          headers['x-sign-in-with-x']
-            ? { ok: true, siwx: headers['x-sign-in-with-x'] }
+          headers['sign-in-with-x']
+            ? { ok: true, siwx: headers['sign-in-with-x'] }
             : { __status: 401, __body: { error: 'no auth' } },
       },
       {
@@ -264,7 +264,7 @@ describe('VeniceClient', () => {
     assert.equal(r.key, 'Bearer vk_abc')
   })
 
-  it('forwards X-Sign-In-With-X when only SIWX token set', async () => {
+  it('forwards SIGN-IN-WITH-X when only SIWX token set', async () => {
     const c = new VeniceClient(makeCfg({ siwxToken: 'siwx_token_xyz' }))
     const r = await c.post<{ ok: boolean; siwx: string }>('/v1/needs-siwx', {})
     assert.equal(r.ok, true)
@@ -282,10 +282,10 @@ describe('VeniceClient', () => {
         return true
       }
     )
-    // Verify on the wire: last request had Authorization but no X-Sign-In-With-X
+    // Verify on the wire: last request had Authorization but no SIGN-IN-WITH-X
     const last = server.calls[server.calls.length - 1]
     assert.ok(last.headers.authorization)
-    assert.equal(last.headers['x-sign-in-with-x'], undefined)
+    assert.equal(last.headers['sign-in-with-x'], undefined)
   })
 
   it('can force SIWX auth for endpoints that reject API keys', async () => {
@@ -293,7 +293,7 @@ describe('VeniceClient', () => {
     await c.get('/v1/models', undefined, { auth: 'siwx' })
     const last = server.calls[server.calls.length - 1]
     assert.equal(last.headers.authorization, undefined)
-    assert.equal(last.headers['x-sign-in-with-x'], 'siwx_token_xyz')
+    assert.equal(last.headers['sign-in-with-x'], 'siwx_token_xyz')
   })
 
   it('can suppress configured credentials for auth-free endpoints', async () => {

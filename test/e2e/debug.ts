@@ -32,7 +32,7 @@ const res = await fetch('https://api.venice.ai/api/v1/chat/completions', {
   method: 'POST',
   headers: {
     'Content-Type': 'application/json',
-    'X-Sign-In-With-X': token,
+    'SIGN-IN-WITH-X': token,
   },
   body: JSON.stringify({
     model: 'deepseek-v4-flash-0731',

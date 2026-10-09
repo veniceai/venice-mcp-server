@@ -1621,7 +1621,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       name: 'venice_x402_balance',
       title: 'Venice x402 Wallet Balance',
       description:
-        `Check the prepaid x402 credit balance for a wallet address. SIWX-ONLY: this endpoint rejects API key auth and requires X-Sign-In-With-X (forwarded from VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
+        `Check the prepaid x402 credit balance for a wallet address. SIWX-ONLY: this endpoint rejects API key auth and requires SIGN-IN-WITH-X (forwarded from VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
       inputSchema: {
         wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
       },
@@ -1667,7 +1667,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_x402_transactions',
       title: 'Venice x402 Transaction History',
-      description: `List recent x402 top-up + debit transactions for a wallet. SIWX-ONLY: rejects API key, requires X-Sign-In-With-X (VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
+      description: `List recent x402 top-up + debit transactions for a wallet. SIWX-ONLY: rejects API key, requires SIGN-IN-WITH-X (VENICE_SIWX_TOKEN). The wallet in the path must match the SIWX-authenticated wallet.`,
       inputSchema: {
         wallet_address: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
         limit: z.number().int().min(1).max(100).optional(),

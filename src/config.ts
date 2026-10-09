@@ -3,7 +3,7 @@
  *
  * Auth modes (mutually exclusive at request time; key beats SIWX when both set):
  *   - VENICE_API_KEY        → forwarded as `Authorization: Bearer`.
- *   - VENICE_SIWX_TOKEN     → forwarded as `X-Sign-In-With-X` (SIWE-proof token,
+ *   - VENICE_SIWX_TOKEN     → forwarded as `SIGN-IN-WITH-X` (SIWE-proof token,
  *                              base64-encoded JSON SIWE message).
  *                              Pre-generate this with the Venice x402 SDK or
  *                              `wallet.signMessage()` over a SIWE message.
@@ -15,7 +15,7 @@
  *   1. Client signs a SIWE message (Sign-In-With-X) once → SIWX token.
  *   2. Client tops up balance via `POST /api/v1/x402/top-up` with the
  *      `X-402-Payment` header (signed USDC authorization).
- *   3. Subsequent inference calls send `X-Sign-In-With-X` (NOT `X-402-Payment`).
+ *   3. Subsequent inference calls send `SIGN-IN-WITH-X` (NOT `X-402-Payment`).
  *      Venice debits the credit account on success.
  *
  * Therefore this MCP server NEVER sends `X-402-Payment` on inference routes —
@@ -29,7 +29,7 @@ export interface Config {
   /** Optional API key used for all upstream calls (forwarded as Bearer). */
   apiKey: string | undefined
   /**
-   * Optional pre-signed SIWX token (`X-Sign-In-With-X` header value).
+   * Optional pre-signed SIWX token (`SIGN-IN-WITH-X` header value).
    * Authenticates a wallet against an existing X402CreditAccount with prepaid balance.
    */
   siwxToken: string | undefined
