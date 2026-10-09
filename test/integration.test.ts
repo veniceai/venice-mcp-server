@@ -826,8 +826,8 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(resource?.mimeType, 'audio/mpeg')
     assert.equal(resource?.blob, Buffer.from('integration-mp3').toString('base64'))
     const text = result.content.find((item) => item.type === 'text')
-    assert.match(text?.text ?? '', /cleanup failed/)
-    assert.match(text?.text ?? '', /success=true/)
+    assert.match(text?.text ?? '', /cleanup was not confirmed.*venice_music_complete/)
+    assert.match(text?.text ?? '', /did not report success/)
   })
 
   it('venice_music_status bounds completed audio without deleting the queued media', async () => {

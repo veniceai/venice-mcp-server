@@ -165,7 +165,7 @@ export class VeniceClient {
       headersReceived = true
       contentType = res.headers.get('content-type') ?? ''
       const maxBytes = init.maxBytes ?? init.maxResponseBytes
-      if (!res.ok) throw await upstreamError(res, path, maxBytes)
+      if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status, maxBytes))
       let text: string
       try {
         text =
@@ -518,8 +518,9 @@ function firstSseErrorEnvelope(dataEvents: readonly string[]): unknown | undefin
  * an unreadable, oversized, or aborted error body degrades to an empty body
  * rather than turning the failure into a timeout or size-limit error.
  */
-function errorBodyLimit(status: number): number {
-  return status === 402 ? MAX_PAYMENT_REQUIRED_RESPONSE_BYTES : MAX_UPSTREAM_ERROR_RESPONSE_BYTES
+function errorBodyLimit(status: number, maxBytes?: number): number {
+  if (status === 402) return MAX_PAYMENT_REQUIRED_RESPONSE_BYTES
+  return Math.min(maxBytes ?? MAX_UPSTREAM_ERROR_RESPONSE_BYTES, MAX_UPSTREAM_ERROR_RESPONSE_BYTES)
 }
 
 async function upstreamError(res: Response, path: string, maxBytes?: number): Promise<VeniceUpstreamError> {
@@ -576,7 +577,7 @@ function responseHeaders(res: Response): Record<string, string> {
  * Handles JSON vs text content, surfaces 402 / 4xx / 5xx as VeniceUpstreamError.
  */
 async function parseResponse<T>(res: Response, path: string, maxBytes?: number): Promise<T> {
-  if (!res.ok) throw await upstreamError(res, path, maxBytes)
+  if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status, maxBytes))
   const text = (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
   return (isJsonContentType(res.headers.get('content-type') ?? '') ? parseSuccessJson(text, path) : text) as T
 }

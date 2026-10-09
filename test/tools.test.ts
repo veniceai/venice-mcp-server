@@ -2777,8 +2777,75 @@ describe('tool output shaping', () => {
     assert.equal(stub.callsTo('/v1/audio/complete').length, 1)
     assert.equal((r.structuredContent as { server_media_deleted: boolean }).server_media_deleted, false)
     const text = r.content.find((item) => item.type === 'text') as { text: string }
-    assert.match(text.text, /cleanup failed/)
-    assert.match(text.text, /success=true/)
+    assert.match(text.text, /cleanup was not confirmed.*venice_music_complete/)
+    assert.match(text.text, /did not report success/)
+  })
+
+  it('venice_music_status keeps the media behind a download_url until the caller downloads it', async () => {
+    const url = 'https://outerface.venice.ai/music/result.flac'
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({ status: 'COMPLETED', download_url: url }),
+      '/v1/audio/complete': () => ({ success: true }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'music-url',
+      model: 'music-model',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, undefined)
+    assert.equal(stub.callsTo('/v1/audio/complete').length, 0)
+    assert.deepEqual(r.structuredContent, {
+      status: 'COMPLETED',
+      url,
+      representation: 'download_url resource link',
+      server_media_deleted: false,
+      next_step: 'Download url, then call venice_music_complete with the same queue_id and model.',
+    })
+    assert.deepEqual(r.content[0], { type: 'resource_link', uri: url, name: 'music', mimeType: 'audio/flac' })
+    assert.match((r.content[1] as { text: string }).text, /NOT deleted.*venice_music_complete/)
+  })
+
+  it('venice_music_status omits the mime type for a download_url without a known audio extension', async () => {
+    const url = 'https://outerface.venice.ai/music/result'
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({ status: 'COMPLETED', download_url: url }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'music-url',
+      model: 'music-model',
+    } as never)
+
+    assert.deepEqual(r.content[0], { type: 'resource_link', uri: url, name: 'music' })
+    assert.equal((r.structuredContent as { next_step?: string }).next_step, undefined)
+  })
+
+  it('venice_music_status rejects an empty audio body as retry-safe without deleting it', async () => {
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({
+        kind: 'binary',
+        buffer: Buffer.alloc(0),
+        contentType: 'audio/mpeg',
+      }),
+      '/v1/audio/complete': () => ({ success: true }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'empty-music',
+      model: 'music-model',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal(stub.callsTo('/v1/audio/complete').length, 0)
+    assert.deepEqual(r.structuredContent, {
+      error: 'empty_audio_response',
+      retry_safe: true,
+      queue_id: 'empty-music',
+      server_media_deleted: false,
+    })
   })
 
   it('venice_music_status rejects unsupported completed content without deleting it', async () => {

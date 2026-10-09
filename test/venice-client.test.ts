@@ -743,6 +743,19 @@ describe('VeniceClient', () => {
     )
   })
 
+  it('post keeps payment instructions from a 402 body larger than the caller limit', async () => {
+    const c = new VeniceClient(makeCfg())
+    await assert.rejects(
+      () => c.post('/v1/oversized-payment', {}, undefined, { maxBytes: 8 }),
+      (err: unknown) => {
+        assert.ok(err instanceof VeniceUpstreamError)
+        assert.equal(err.status, 402)
+        assert.equal((err.body as { currentBalanceUsd: number }).currentBalanceUsd, 0.01)
+        return true
+      },
+    )
+  })
+
   it('postMixed preserves 402 semantics while bounding a huge error body', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(
