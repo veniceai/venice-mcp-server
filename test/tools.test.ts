@@ -2617,7 +2617,13 @@ describe('tool output shaping', () => {
     } as never)
 
     assert.equal(r.isError, true)
-    assert.equal(r.structuredContent, undefined)
+    assert.deepEqual(r.structuredContent, {
+      error: 'status_response_too_large',
+      max_bytes: 1024 * 1024,
+      retry_safe: true,
+      queue_id: 'oversized-json',
+      server_media_deleted: false,
+    })
     const text = (r.content[0] as { text: string }).text
     assert.match(text, /JSON response/)
     assert.doesNotMatch(text, /Completed music|audio_response_too_large/)
@@ -2820,6 +2826,27 @@ describe('tool output shaping', () => {
 
     assert.deepEqual(r.content[0], { type: 'resource_link', uri: url, name: 'music' })
     assert.equal((r.structuredContent as { next_step?: string }).next_step, undefined)
+  })
+
+  it('venice_music_status fails a COMPLETED status that has neither audio nor a download_url', async () => {
+    const stub = new StubClient({
+      '/v1/audio/retrieve': () => ({ status: 'COMPLETED' }),
+    })
+    const tools = buildTools(stub.asClient(), cfg)
+    const r = await tools.find((t) => t.name === 'venice_music_status')!.handler({
+      queue_id: 'music-no-output',
+      model: 'music-model',
+      delete_media_on_completion: true,
+    } as never)
+
+    assert.equal(r.isError, true)
+    assert.equal(stub.callsTo('/v1/audio/complete').length, 0)
+    assert.deepEqual(r.structuredContent, {
+      status: 'COMPLETED',
+      server_media_deleted: false,
+      queue_id: 'music-no-output',
+    })
+    assert.match((r.content[0] as { text: string }).text, /neither an audio\/\* body nor a download_url/)
   })
 
   it('venice_music_status rejects an empty audio body as retry-safe without deleting it', async () => {

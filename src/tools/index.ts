@@ -30,7 +30,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import type { VeniceClient } from '../venice-client.js'
-import { VeniceResponseTooLargeError } from '../venice-client.js'
+import { VeniceJsonResponseTooLargeError, VeniceResponseTooLargeError } from '../venice-client.js'
 import type { Config } from '../config.js'
 import { shapeTtsVoiceCatalog, VeniceUpstreamError, type ModelCatalogItem, type ModelCatalogResponse } from '../types.js'
 import {
@@ -117,7 +117,6 @@ const fail = (text: string, structured?: Record<string, unknown>): ToolResult =>
   ...(structured ? { structuredContent: structured } : {}),
 })
 
-/** Venice answers HTTP 200 with `{ success: false }` when storage deletion fails. */
 const AUDIO_EXTENSION_MIME_TYPES: Record<string, string> = {
   mp3: 'audio/mpeg',
   flac: 'audio/flac',
@@ -137,6 +136,7 @@ function audioMimeTypeFromUrl(url: string): string | undefined {
   }
 }
 
+/** Venice answers HTTP 200 with `{ success: false }` when storage deletion fails. */
 function videoCleanupSucceeded(body: { success?: boolean } | null | undefined): boolean {
   return body?.success === true
 }
@@ -1680,6 +1680,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               },
             }
           }
+          if (resp.status === 'COMPLETED') {
+            return fail('Music completed but Venice returned neither an audio/* body nor a download_url.', {
+              status: 'COMPLETED',
+              server_media_deleted: false,
+              queue_id: args.queue_id,
+            })
+          }
           const eta = resp.average_execution_time ? `${Math.round(resp.average_execution_time / 1000)}s ETA` : ''
           const dur = resp.execution_duration ? `${Math.round(resp.execution_duration / 1000)}s elapsed` : ''
           return ok(`Status: ${resp.status ?? 'unknown'} ${dur} ${eta}`.trim(), {
@@ -1702,6 +1709,18 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               },
             )
           }
+          if (err instanceof VeniceJsonResponseTooLargeError) {
+            return fail(
+              `${formatToolError(err)}. The queued media was not deleted; retry venice_music_status with the same queue_id.`,
+              {
+                error: 'status_response_too_large',
+                max_bytes: err.maxBytes,
+                retry_safe: true,
+                queue_id: args.queue_id,
+                server_media_deleted: false,
+              },
+            )
+          }
           return fail(formatToolError(err))
         }
       },
@@ -1710,7 +1729,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_music_complete',
       title: 'Venice Music Complete (cleanup)',
-      description: `Mark a completed music job as downloaded.${X402_OK}`,
+      description: `Mark a completed music job as downloaded and delete server-side media. Reports removal only when Venice confirms success.${X402_OK}`,
       inputSchema: { queue_id: z.string().min(1), model: z.string().min(1) },
       handler: async (args) => {
         try {

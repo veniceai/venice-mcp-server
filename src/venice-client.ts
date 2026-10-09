@@ -513,16 +513,17 @@ function firstSseErrorEnvelope(dataEvents: readonly string[]): unknown | undefin
   return undefined
 }
 
-/**
- * Build the error for a non-2xx response. The HTTP status is authoritative:
- * an unreadable, oversized, or aborted error body degrades to an empty body
- * rather than turning the failure into a timeout or size-limit error.
- */
 function errorBodyLimit(status: number, maxBytes?: number): number {
   if (status === 402) return MAX_PAYMENT_REQUIRED_RESPONSE_BYTES
   return Math.min(maxBytes ?? MAX_UPSTREAM_ERROR_RESPONSE_BYTES, MAX_UPSTREAM_ERROR_RESPONSE_BYTES)
 }
 
+/**
+ * Build the error for a non-2xx response. The HTTP status is authoritative:
+ * an oversized error body becomes an `upstream_error_body_truncated` marker, and
+ * an unreadable or aborted one degrades to an empty body, rather than turning the
+ * failure into a timeout or size-limit error.
+ */
 async function upstreamError(res: Response, path: string, maxBytes?: number): Promise<VeniceUpstreamError> {
   const json = isJsonContentType(res.headers.get('content-type') ?? '')
   let body: unknown = json ? {} : ''
