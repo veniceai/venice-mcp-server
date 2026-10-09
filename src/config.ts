@@ -50,6 +50,12 @@ export interface Config {
   maxAudioResponseBytes: number
   /** Whether to advertise NSFW capability in tool descriptions. */
   enableNsfw: boolean
+  /** `full` exposes every tool; `hosted` is the curated, safe-by-default set for shared deployments. */
+  profile: ToolProfile
+  /** How long status tools wait for a queued job to finish before returning (0 = return immediately). */
+  statusWaitMs: number
+  /** Largest inline media payload (base64 characters) a tool result may carry; 0 = unlimited. */
+  maxInlineMediaChars: number
   /** Server name advertised to MCP clients. */
   serverName: string
   /** Server version advertised. */
@@ -62,6 +68,25 @@ const DEFAULT_TIMEOUT_MS = 60_000
 const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 25 * 1024 * 1024
 const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 const DEFAULT_MAX_AUDIO_RESPONSE_BYTES = 32 * 1024 * 1024
+// Stays under ChatGPT's ~60 s tool-call limit.
+const HOSTED_STATUS_WAIT_MS = 45_000
+const MAX_STATUS_WAIT_MS = 55_000
+// Claude caps a tool result at ~150k characters; leave room for the text around it.
+const HOSTED_MAX_INLINE_MEDIA_CHARS = 100_000
+
+export type ToolProfile = 'full' | 'hosted'
+
+export function parseToolProfile(value: string | undefined): ToolProfile {
+  const profile = (value ?? 'full').trim().toLowerCase()
+  if (profile === 'full' || profile === 'hosted') return profile
+  throw new Error(`Unknown VENICE_MCP_PROFILE "${value}". Use "full" or "hosted".`)
+}
+
+function parseNonNegativeInt(value: string | undefined, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
+  if (value === undefined || value.trim() === '') return fallback
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? Math.min(parsed, max) : fallback
+}
 
 function parsePositiveNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value ?? fallback)
@@ -74,6 +99,8 @@ function parsePositiveInteger(value: string | undefined, fallback: number): numb
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const profile = parseToolProfile(env.VENICE_MCP_PROFILE)
+  const hosted = profile === 'hosted'
   return {
     // VENICE_TEST_BASE_URL is an internal test-only escape hatch — never documented publicly.
     baseUrl: env.VENICE_TEST_BASE_URL?.trim() || 'https://api.venice.ai/api',
@@ -96,7 +123,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       env.VENICE_MAX_AUDIO_RESPONSE_BYTES,
       DEFAULT_MAX_AUDIO_RESPONSE_BYTES,
     ),
-    enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
+    enableNsfw: !hosted && env.VENICE_DISABLE_NSFW !== '1',
+    profile,
+    statusWaitMs: parseNonNegativeInt(env.VENICE_MCP_STATUS_WAIT_MS, hosted ? HOSTED_STATUS_WAIT_MS : 0, MAX_STATUS_WAIT_MS),
+    maxInlineMediaChars: parseNonNegativeInt(env.VENICE_MCP_MAX_INLINE_MEDIA_CHARS, hosted ? HOSTED_MAX_INLINE_MEDIA_CHARS : 0),
     serverName: '@veniceai/mcp-server',
     serverVersion: PACKAGE_VERSION,
   }
