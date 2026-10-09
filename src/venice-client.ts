@@ -11,6 +11,10 @@ export interface RequestInitJSON {
   timeoutMs?: number
   /** Override default API-key-first auth behavior for endpoint-specific requirements. */
   auth?: 'default' | 'siwx' | 'none'
+  /** Require and return an upstream SSE response as one unmodified UTF-8 string. */
+  responseType?: 'auto' | 'event-stream'
+  /** Reject the response once its body exceeds this many bytes. */
+  maxResponseBytes?: number
   /** Reject a successful response body larger than this many bytes. */
   maxBytes?: number
 }
@@ -52,6 +56,9 @@ export class VeniceMalformedResponseError extends Error {
   }
 }
 
+/** Cap on a buffered SSE body; the whole stream is held in memory and returned as one MCP text block. */
+export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
+
 /**
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
@@ -79,7 +86,7 @@ export class VeniceClient {
   ): Promise<VeniceResponse<T>> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
-      Accept: 'application/json',
+      Accept: init.responseType === 'event-stream' ? 'text/event-stream' : 'application/json',
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
       ...(init.headers ?? {}),
     }
@@ -104,6 +111,7 @@ export class VeniceClient {
     let res: Response
     let contentType: string
     let body: unknown
+    let headersReceived = false
     try {
       res = await fetch(url, {
         method: init.method ?? (init.json !== undefined ? 'POST' : 'GET'),
@@ -111,16 +119,32 @@ export class VeniceClient {
         body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
         signal: ac.signal,
       })
+      headersReceived = true
       contentType = res.headers.get('content-type') ?? ''
-      if (!res.ok) throw await upstreamError(res, path, init.maxBytes)
+      const maxBytes = init.maxBytes ?? init.maxResponseBytes
+      if (!res.ok) throw await upstreamError(res, path, maxBytes)
       const text =
-        init.maxBytes !== undefined
-          ? (await readBoundedResponseBuffer(res, path, init.maxBytes)).toString('utf8')
+        maxBytes !== undefined
+          ? (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
           : await res.text()
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
-      body = isJsonContentType(contentType) ? parseSuccessJson(text, path) : text
+      if (init.responseType === 'event-stream') {
+        assertCompleteEventStream(text, contentType, path)
+        body = text
+      } else {
+        body = isJsonContentType(contentType) ? parseSuccessJson(text, path) : text
+      }
     } catch (err) {
-      throw classifyRequestError(err, ac.signal, timeoutMs)
+      const classified = classifyRequestError(err, ac.signal, timeoutMs)
+      // A body that breaks after the headers must fail cleanly rather than surface a raw socket error.
+      if (classified === err && headersReceived && !isClassifiedClientError(err)) {
+        throw new VeniceUpstreamError({
+          message: `Failed to read Venice response body on ${path}`,
+          status: 502,
+          body: { error: 'response_body_read_failed' },
+        })
+      }
+      throw classified
     } finally {
       clearTimeout(timeout)
     }
@@ -143,8 +167,13 @@ export class VeniceClient {
   }
 
   /** POST request with JSON body. */
-  post<T = unknown>(path: string, json: unknown, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>(path, { method: 'POST', json, headers })
+  post<T = unknown>(
+    path: string,
+    json: unknown,
+    headers?: Record<string, string>,
+    opts: Pick<RequestInitJSON, 'auth' | 'timeoutMs'> = {},
+  ): Promise<T> {
+    return this.request<T>(path, { method: 'POST', json, headers, ...opts })
   }
 
   /** POST JSON while retaining response metadata such as Venice extension headers. */
@@ -321,6 +350,92 @@ function isJsonContentType(contentType: string): boolean {
   return contentType.toLowerCase().includes('application/json')
 }
 
+function normalizeMediaType(contentType: string): string {
+  return contentType.split(';', 1)[0].trim().toLowerCase()
+}
+
+/** Successful SSE responses must be `text/event-stream`, error-free, and end with `data: [DONE]`. */
+function assertCompleteEventStream(text: string, contentType: string, path: string): void {
+  if (normalizeMediaType(contentType) !== 'text/event-stream') {
+    throw new VeniceUpstreamError({
+      message: `Venice returned ${contentType || 'an unknown content type'} instead of text/event-stream on ${path}`,
+      status: 502,
+      body: text,
+    })
+  }
+  const dataEvents = collectSseDataEvents(text)
+  const errorEnvelope = firstSseErrorEnvelope(dataEvents)
+  if (errorEnvelope !== undefined) {
+    throw new VeniceUpstreamError({
+      message: `Venice E2EE stream contained an error envelope on ${path}`,
+      status: 502,
+      body: errorEnvelope,
+    })
+  }
+  if (!hasTerminalDoneEvent(dataEvents)) {
+    throw new VeniceUpstreamError({
+      message: `Venice E2EE stream ended without a terminal "data: [DONE]" event on ${path}; the encrypted response may be incomplete`,
+      status: 502,
+      body: { error: 'incomplete_event_stream' },
+    })
+  }
+}
+
+/**
+ * Parse SSE data payloads from a copy. The original stream string is never mutated.
+ * SSE recognizes CRLF, CR, and LF as line endings. A trailing unterminated block
+ * is ignored, matching the previous completeness check.
+ */
+export function collectSseDataEvents(rawSse: string): string[] {
+  const normalized = rawSse.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+  const boundary = /\n\n+/g
+  const events: string[] = []
+  let start = 0
+  let match: RegExpExecArray | null
+  while ((match = boundary.exec(normalized)) !== null) {
+    const block = normalized.slice(start, match.index)
+    start = boundary.lastIndex
+    const data = dataFieldFromSseBlock(block)
+    if (data !== undefined) events.push(data)
+  }
+  return events
+}
+
+function dataFieldFromSseBlock(block: string): string | undefined {
+  const dataLines: string[] = []
+  for (const line of block.split('\n')) {
+    if (line.startsWith(':')) continue
+    const colon = line.indexOf(':')
+    const field = colon === -1 ? line : line.slice(0, colon)
+    if (field !== 'data') continue
+    let value = colon === -1 ? '' : line.slice(colon + 1)
+    if (value.startsWith(' ')) value = value.slice(1)
+    dataLines.push(value)
+  }
+  return dataLines.length > 0 ? dataLines.join('\n') : undefined
+}
+
+function hasTerminalDoneEvent(dataEvents: readonly string[]): boolean {
+  return dataEvents[dataEvents.length - 1] === '[DONE]'
+}
+
+function firstSseErrorEnvelope(dataEvents: readonly string[]): unknown | undefined {
+  for (const data of dataEvents) {
+    if (data === '[DONE]') continue
+    try {
+      const parsed = JSON.parse(data) as unknown
+      if (parsed && typeof parsed === 'object') {
+        const record = parsed as { error?: unknown; type?: unknown }
+        if (record.error != null) return parsed
+        if (typeof record.type === 'string' && record.type.endsWith('_error')) return parsed
+      }
+    } catch {
+      // Non-JSON data events are left for the caller; they are not error envelopes.
+    }
+  }
+  return undefined
+}
+
 /**
  * Build the error for a non-2xx response. The HTTP status is authoritative:
  * an unreadable, oversized, or aborted error body degrades to an empty body
@@ -343,6 +458,14 @@ async function upstreamError(res: Response, path: string, maxBytes?: number): Pr
 }
 
 /** Errors this client already classified pass through unchanged; only an unclassified abort becomes a timeout. */
+function isClassifiedClientError(err: unknown): boolean {
+  return (
+    err instanceof VeniceUpstreamError ||
+    err instanceof VeniceMalformedResponseError ||
+    err instanceof VeniceResponseTooLargeError
+  )
+}
+
 function classifyRequestError(err: unknown, signal: AbortSignal, timeoutMs: number): unknown {
   if (
     err instanceof VeniceUpstreamError ||

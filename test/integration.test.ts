@@ -81,7 +81,19 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
 
   before(async () => {
     venice = await startMockVenice([
-      { match: 'GET /v1/models', reply: { data: [{ id: 'deepseek-v4-flash-0731', type: 'text' }] } },
+      {
+        match: 'GET /v1/models',
+        reply: {
+          data: [
+            { id: 'deepseek-v4-flash-0731', type: 'text' },
+            {
+              id: 'e2ee-qwen3-5-122b-a10b',
+              type: 'text',
+              model_spec: { capabilities: { supportsE2EE: true, supportsTeeAttestation: true } },
+            },
+          ],
+        },
+      },
       {
         match: 'GET /v1/models?type=image',
         reply: {
@@ -148,6 +160,22 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
                   __body: Buffer.from('integration-mp4'),
                   __headers: { 'content-type': 'video/mp4' },
                 },
+      },
+      {
+        match: 'GET /v1/tee/attestation*',
+        reply: {
+          verified: true,
+          nonce: 'a'.repeat(64),
+          model: 'e2ee-model',
+          tee_provider: 'near-ai',
+          intel_quote: 'quote',
+          signing_key: `04${'1'.repeat(128)}`,
+          signing_address: `0x${'2'.repeat(40)}`,
+        },
+      },
+      {
+        match: 'GET /v1/tee/signature*',
+        reply: { model: 'e2ee-model', request_id: 'chatcmpl-test', signature: '0xsigned' },
       },
       {
         match: 'POST /v1/insufficient',
@@ -218,16 +246,18 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(Array.isArray((tools.result as { tools: unknown[] }).tools))
   })
 
-  it('lists 31 tools over JSON-RPC', async () => {
+  it('lists 33 tools over JSON-RPC', async () => {
     const r = (await rpc.request('tools/list')) as RpcResult
     const list = (r.result as { tools: Array<{ name: string }> }).tools
-    assert.equal(list.length, 31)
+    assert.equal(list.length, 33)
     // Spot-check a few
     const names = list.map((t) => t.name)
     assert.ok(names.includes('venice_chat'))
     assert.ok(names.includes('venice_model_details'))
     assert.ok(names.includes('venice_video_status'))
     assert.ok(names.includes('venice_x402_balance'))
+    assert.ok(names.includes('venice_tee_attestation'))
+    assert.ok(names.includes('venice_tee_signature'))
   })
 
   it('advertises all four annotation hints on every tool', async () => {
@@ -265,6 +295,71 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     const text = (r.result as { content: Array<{ text: string }> }).content[0].text
     assert.match(text, /auth=Bearer vk_integration/)
     assert.match(text, /model=deepseek-v4-flash-0731/)
+    const call = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').at(-1)!
+    assert.equal((call.body as { stream: boolean }).stream, false)
+    assert.equal(call.headers.accept, 'application/json')
+  })
+
+  it('forwards tool-call thought signatures through MCP input validation', async () => {
+    const messages = [
+      { role: 'user', content: 'Check the weather' },
+      {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_weather',
+          type: 'function',
+          thought_signature: 'original-signature+/=',
+          function: { name: 'weather', arguments: '{}' },
+        }],
+      },
+      { role: 'tool', tool_call_id: 'call_weather', content: 'Sunny' },
+    ]
+    const r = (await rpc.request('tools/call', { name: 'venice_chat', arguments: { messages } })) as RpcResult
+    assert.equal(r.error, undefined)
+    assert.equal((r.result as { isError?: boolean }).isError, undefined)
+    const call = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').at(-1)!
+    assert.deepEqual((call.body as { messages: unknown[] }).messages, messages)
+  })
+
+  it('rejects enable_e2ee over MCP without contacting chat completions', async () => {
+    const beforeCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
+    const r = (await rpc.request('tools/call', {
+      name: 'venice_chat',
+      arguments: {
+        messages: [{ role: 'user', content: 'hello' }],
+        venice_parameters: { enable_e2ee: true },
+      },
+    })) as RpcResult
+    assert.equal(r.error, undefined)
+    const result = r.result as { isError?: boolean; content: Array<{ text: string }> }
+    assert.equal(result.isError, true)
+    assert.match(result.content[0].text, /enable_e2ee/)
+    const afterCalls = venice.calls.filter((candidate) => candidate.path === '/v1/chat/completions').length
+    assert.equal(afterCalls, beforeCalls)
+  })
+
+  it('calls auth-free TEE endpoints with exact query fields', async () => {
+    const attestation = (await rpc.request('tools/call', {
+      name: 'venice_tee_attestation',
+      arguments: { model: 'e2ee-model', nonce: 'a'.repeat(64) },
+    })) as RpcResult
+    assert.equal(attestation.error, undefined)
+    const attestationCall = venice.calls.find((candidate) => candidate.path.startsWith('/v1/tee/attestation?'))!
+    assert.match(attestationCall.path, /model=e2ee-model/)
+    assert.match(attestationCall.path, new RegExp(`nonce=${'a'.repeat(64)}`))
+    assert.equal(attestationCall.headers.authorization, undefined)
+    assert.equal(attestationCall.headers['x-sign-in-with-x'], undefined)
+
+    const signature = (await rpc.request('tools/call', {
+      name: 'venice_tee_signature',
+      arguments: { model: 'e2ee-model', request_id: 'chatcmpl-test' },
+    })) as RpcResult
+    assert.equal(signature.error, undefined)
+    const signatureCall = venice.calls.find((candidate) => candidate.path.startsWith('/v1/tee/signature?'))!
+    assert.match(signatureCall.path, /model=e2ee-model/)
+    assert.match(signatureCall.path, /request_id=chatcmpl-test/)
+    assert.equal(signatureCall.headers.authorization, undefined)
   })
 
   it('venice_image_generate returns base64 image content', async () => {
