@@ -5,12 +5,15 @@ import type { Server } from 'node:http'
 import { isIP } from 'node:net'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest, isJSONRPCRequest } from '@modelcontextprotocol/sdk/types.js'
-import { buildServer } from '../server.js'
+import { buildServer, type BuildOptions } from '../server.js'
 import { loadConfig, type Config } from '../config.js'
+import { VeniceClient, VeniceResponseTooLargeError } from '../venice-client.js'
+import { VeniceUpstreamError } from '../types.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
 const MIN_EXPOSED_AUTH_TOKEN_LENGTH = 16
+const DEFAULT_MAX_CONCURRENT_REQUESTS = 8
 
 /**
  * - `token`: one shared `VENICE_MCP_AUTH_TOKEN` gates the server, and every session uses the
@@ -76,7 +79,7 @@ export function isLoopbackHost(host: string): boolean {
 
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value)
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 export function validateHttpAuthConfig(
@@ -178,6 +181,8 @@ export interface HttpAppOptions {
   allowedOrigins?: Set<string>
   maxSessions?: number
   sessionTtlMs?: number
+  /** Active user-key requests, including work continuing after a disconnect. */
+  maxConcurrentRequests?: number
   serverFactory?: ServerFactory
 }
 
@@ -187,6 +192,10 @@ function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () =
   const serverFactory = opts.serverFactory ?? buildServer
   const maxSessions = opts.maxSessions ?? DEFAULT_MAX_HTTP_SESSIONS
   const sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS
+  const maxConcurrentRequests = opts.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS
+  if (!Number.isSafeInteger(maxConcurrentRequests) || maxConcurrentRequests < 1) {
+    throw new Error('maxConcurrentRequests must be a positive safe integer')
+  }
   const app = express()
   const parseJson = express.json({ limit: '10mb' })
 
@@ -228,6 +237,35 @@ function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () =
   }
 
   if (authMode === 'user-key') {
+    const operations = new WeakMap<Response, (operation: Promise<unknown>) => void>()
+    let activeRequests = 0
+    app.use('/mcp', (_req, res, next) => {
+      if (activeRequests >= maxConcurrentRequests) {
+        res.setHeader('Retry-After', '1')
+        res.setHeader('Connection', 'close')
+        res.status(503).json({ error: 'too many active MCP requests' })
+        return
+      }
+      activeRequests++
+      let pending = 0
+      let closed = false
+      let released = false
+      const release = () => {
+        if (closed && pending === 0 && !released) {
+          released = true
+          activeRequests--
+          operations.delete(res)
+        }
+      }
+      operations.set(res, (operation) => {
+        pending++
+        const finish = () => { pending--; release() }
+        void operation.then(finish, finish)
+      })
+      res.once('close', () => { closed = true; release() })
+      next()
+    })
+
     app.all('/mcp', (req, res, next) => {
       if (req.method !== 'POST') {
         res.setHeader('Allow', 'POST')
@@ -241,8 +279,48 @@ function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () =
       }
       next()
     }, parseBody, async (req, res) => {
+      // One admission must not fan out into multiple downloads, even with older MCP versions.
+      if (Array.isArray(req.body)) {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32600, message: 'JSON-RPC batches are not supported in user-key mode' },
+        })
+        return
+      }
+      if (res.destroyed) return
       const credentials = credentialsFromHeaders((name) => req.header(name))
-      await handleStateless(req, res, { ...baseConfig, apiKey: credentials?.apiKey, siwxToken: credentials?.siwxToken }, serverFactory)
+      const config = { ...baseConfig, apiKey: credentials?.apiKey, siwxToken: credentials?.siwxToken }
+      const client = new VeniceClient(config)
+      await handleStateless(req, res, config, serverFactory, {
+        stateless: true,
+        client,
+        trackOperation: operations.get(res),
+        beforeUpload: async () => {
+          if (!config.apiKey) {
+            throw new Error(
+              'An API key is required for tools that download upload sources in HTTP user-key mode. ' +
+              'Send Authorization: Bearer <Venice API key>. Wallet proofs cannot be pre-validated without consuming their single-use nonce.',
+            )
+          }
+          const validation = await client.get<{ data?: { accessPermitted?: boolean } }>(
+            '/v1/api_keys/rate_limits', undefined, { auth: 'apiKey', maxBytes: 1024 * 1024 },
+          ).catch((err: unknown) => {
+            if (err instanceof VeniceResponseTooLargeError) {
+              throw new Error('API key validation response exceeds 1 MiB. No source was downloaded or inference submitted.')
+            }
+            throw err
+          })
+          if (validation?.data?.accessPermitted !== true) {
+            throw new VeniceUpstreamError({
+              status: 403,
+              message: 'Venice has not permitted inference for this API key.',
+              body: { error: 'API key access is not permitted; check its balance and permissions before uploading.' },
+            })
+          }
+          if (res.destroyed) throw new Error('MCP request disconnected before the upload started.')
+        },
+      })
     })
     return { app, closeSessions: () => {} }
   }
@@ -356,16 +434,24 @@ export function createHttpApp(opts: HttpAppOptions = {}): Express {
 }
 
 /** One server and transport per request, discarded when the response closes. */
-async function handleStateless(req: Request, res: Response, config: Config, serverFactory: ServerFactory): Promise<void> {
+async function handleStateless(
+  req: Request,
+  res: Response,
+  config: Config,
+  serverFactory: ServerFactory,
+  options: Omit<BuildOptions, 'config'>,
+): Promise<void> {
   try {
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
-    const server = serverFactory({ config })
-    res.on('close', () => {
-      void transport.close()
-      void server.close()
+    const server = serverFactory({ config, ...options })
+    const closed = new Promise<void>((resolve) => {
+      res.once('close', () => {
+        void server.close()
+        resolve()
+      })
     })
     await server.connect(transport)
-    await transport.handleRequest(req, res, req.body)
+    await Promise.race([transport.handleRequest(req, res, req.body), closed])
   } catch (err) {
     // eslint-disable-next-line no-console
     console.error('[venice-mcp] /mcp error', err)
@@ -399,6 +485,7 @@ export async function runHttp(opts: {
     allowedOrigins: parseAllowlist(env, 'VENICE_MCP_ALLOWED_ORIGINS', normalizeOrigin),
     maxSessions: parsePositiveInt(env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS),
     sessionTtlMs: parsePositiveInt(env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS),
+    maxConcurrentRequests: parsePositiveInt(env.VENICE_MCP_MAX_CONCURRENT_REQUESTS, DEFAULT_MAX_CONCURRENT_REQUESTS),
     serverFactory: opts.serverFactory,
   })
 
