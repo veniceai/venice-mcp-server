@@ -180,15 +180,16 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
 | `VENICE_MCP_AUTH` | `token` | HTTP-mode auth. `token`: one shared `VENICE_MCP_AUTH_TOKEN` and the server's own Venice credentials. `user-key`: every caller sends their own Venice API key (or `SIGN-IN-WITH-X` proof); stateless, and the server's credentials are never used. |
-| `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Bearer token required by `/mcp` whenever HTTP mode binds outside loopback. Use a long random value. |
-| `VENICE_MCP_ALLOWED_ORIGINS` | _(none)_ | Comma-separated browser origins allowed to call `/mcp`. Requests without an `Origin` header (MCP clients) always pass; with no list set, a loopback-bound server only accepts loopback origins. |
+| `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Shared bearer token for `token` mode; required when that mode binds outside loopback. Ignored in `user-key` mode, where the bearer is the caller's Venice API key. Use a long random value. |
+| `VENICE_MCP_ALLOWED_ORIGINS` | _(none)_ | Comma-separated origins accepted by the `/mcp` origin guard. Requests without an `Origin` header pass this guard; with no list set, a loopback-bound server only accepts loopback origins. This does not enable browser CORS access. |
 | `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `0` | Emergency escape hatch for unauthenticated exposed HTTP mode. Use only behind a trusted authenticated proxy. |
 | `VENICE_MCP_MAX_SESSIONS` | `100` | Maximum active Streamable HTTP sessions. |
 | `VENICE_MCP_SESSION_TTL_MS` | `1800000` | Idle Streamable HTTP session lifetime before cleanup. |
+| `VENICE_MCP_MAX_CONCURRENT_REQUESTS` | `8` | Maximum active requests per process in `user-key` mode, shared by all callers. Excess requests return HTTP 503 with `Retry-After: 1`. Disconnected calls retain a slot until their work finishes. |
 
 ## Self-hosting (Streamable HTTP)
 
-`/mcp` is a credential-backed tool execution endpoint: callers can spend the configured Venice API key or x402 balance. When HTTP mode binds outside loopback, startup fails unless `VENICE_MCP_AUTH_TOKEN` is set, or `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1` is explicitly set behind a trusted authenticated proxy.
+`/mcp` is a credential-backed tool execution endpoint. In the default `token` mode, callers can spend the configured Venice API key or x402 balance. When that mode binds outside loopback, startup fails unless `VENICE_MCP_AUTH_TOKEN` is set, or `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1` is explicitly set behind a trusted authenticated proxy.
 
 ```bash
 docker run -p 3333:3333 \
@@ -212,6 +213,13 @@ docker run -p 3333:3333 \
 ```
 
 Each request must send `Authorization: Bearer <the caller's Venice API key>` (or a `SIGN-IN-WITH-X` wallet proof). The key is only forwarded to the Venice API for that request. The server is stateless: no `mcp-session-id`, a fresh server per request, so it scales horizontally. This works with clients that let you set a static bearer token, such as the xAI API remote MCP tool and Composio.
+
+In this mode:
+
+- ASR, image upscaling, voice cloning (`action=create`), and document parsing require a Venice API key. Before downloading a caller-supplied source, the server checks the key and inference access through the non-billable `/v1/api_keys/rate_limits` endpoint. Failed validation prevents the download. Wallet-only callers cannot use these four upload operations: a wallet proof is single-use, so an upstream pre-check would consume it before inference. Other wallet-backed operations still forward the caller's proof once per upstream call.
+- Video generation includes the queue-time `download_url` in both text and structured output. Preserve it and pass it on every `venice_video_status` call when present. No queue URL is retained between requests.
+- ASR returns the complete result in one response, including all transcript text and timestamps, subject to the 1 MiB upstream response cap. There are no retained result handles or pages. Continuation handles and nonzero offsets are rejected before another transcription is submitted; `timestamp_limit` is ignored.
+- Requests are bounded by `VENICE_MCP_MAX_CONCURRENT_REQUESTS`; JSON-RPC batches are rejected. The limit is per process, not per caller. Public deployments should also apply rate limits at their proxy for fairness between callers.
 
 Or run from source — see [Development](#development) below.
 
