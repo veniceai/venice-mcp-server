@@ -84,6 +84,17 @@ const billingRows = Array.from({ length: 23 }, (_, i) => ({
 const billingCsv = (rows: typeof billingRows) =>
   `timestamp,amount,sku,notes\r\n${rows.map((r) => `${r.timestamp},${r.amount},${r.sku},"line one\n${r.notes}"`).join('\r\n')}`
 
+const textModelCatalog = {
+  data: [
+    { id: 'deepseek-v4-flash-0731', type: 'text' },
+    {
+      id: 'e2ee-qwen3-5-122b-a10b',
+      type: 'text',
+      model_spec: { capabilities: { supportsE2EE: true, supportsTeeAttestation: true } },
+    },
+  ],
+}
+
 describe('integration — JSON-RPC over stdio with mock Venice', () => {
   let venice: MockVeniceServer
   let mcp: ChildProcessWithoutNullStreams
@@ -91,19 +102,8 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
 
   before(async () => {
     venice = await startMockVenice([
-      {
-        match: 'GET /v1/models',
-        reply: {
-          data: [
-            { id: 'deepseek-v4-flash-0731', type: 'text' },
-            {
-              id: 'e2ee-qwen3-5-122b-a10b',
-              type: 'text',
-              model_spec: { capabilities: { supportsE2EE: true, supportsTeeAttestation: true } },
-            },
-          ],
-        },
-      },
+      { match: 'GET /v1/models', reply: textModelCatalog },
+      { match: 'GET /v1/models?type=all', reply: textModelCatalog },
       {
         match: 'GET /v1/crypto/rpc/networks',
         reply: ({ headers }) => ({
@@ -907,6 +907,7 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.equal(r.error, undefined)
     const text = (r.result as { contents: Array<{ text: string }> }).contents[0].text
     assert.match(text, /deepseek-v4-flash-0731/)
+    assert.ok(venice.calls.some((call) => call.method === 'GET' && call.path === '/v1/models?type=all'))
   })
 
   it('reads venice://voices from live TTS model metadata', async () => {

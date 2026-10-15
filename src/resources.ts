@@ -19,15 +19,17 @@ export function buildResources(client: VeniceClient): ResourceDef[] {
     {
       uri: 'venice://models',
       name: 'Venice model catalog',
-      description: 'Live catalog with prices and capability flags. Auth-free.',
+      description: 'Live catalog of every model type (text, image, video, audio, embeddings, and more) with prices and capability flags. Auth-free.',
       mimeType: 'application/json',
       read: async () => {
         try {
-          const data = await client.get<unknown>('/v1/models')
+          // Without a type, Venice returns only text models.
+          const data = await client.get<unknown>('/v1/models?type=all')
           return {
             uri: 'venice://models',
             mimeType: 'application/json',
-            text: JSON.stringify(data, null, 2),
+            // Compact JSON: the full catalog is several hundred KB.
+            text: JSON.stringify(data),
           }
         } catch (err) {
           return {
