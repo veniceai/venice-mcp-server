@@ -8,7 +8,6 @@ import { isInitializeRequest, isJSONRPCRequest } from '@modelcontextprotocol/sdk
 import { buildServer, type BuildOptions } from '../server.js'
 import { loadConfig, type Config } from '../config.js'
 import { VeniceClient, VeniceResponseTooLargeError } from '../venice-client.js'
-import { VeniceUpstreamError } from '../types.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
@@ -312,11 +311,9 @@ function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () =
             throw err
           })
           if (validation?.data?.accessPermitted !== true) {
-            throw new VeniceUpstreamError({
-              status: 403,
-              message: 'Venice has not permitted inference for this API key.',
-              body: { error: 'API key access is not permitted; check its balance and permissions before uploading.' },
-            })
+            throw new Error(
+              'API key access is not permitted; check its balance and permissions. No source was downloaded or inference submitted.',
+            )
           }
           if (res.destroyed) throw new Error('MCP request disconnected before the upload started.')
         },

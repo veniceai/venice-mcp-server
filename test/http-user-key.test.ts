@@ -131,8 +131,40 @@ it('fails closed on validation errors, oversized responses, and timeouts without
       assert.match(body.result.content[0].text, /No source was downloaded or inference submitted/)
     }
     if (scenario === 'status') assert.match(body.result.content[0].text, /503/)
+    if (scenario === 'denied' || scenario === 'malformed') {
+      assert.match(body.result.content[0].text, /API key access is not permitted; check its balance and permissions/)
+      assert.match(body.result.content[0].text, /No source was downloaded or inference submitted/)
+    }
   }
   assert.equal(downloads, 0)
+})
+
+it('does not download or transcribe after the caller disconnects during credential validation', async (t) => {
+  let release!: () => void
+  let started!: () => void
+  const pending = new Promise<void>((resolve) => { release = resolve })
+  const entered = new Promise<void>((resolve) => { started = resolve })
+  t.after(() => release())
+  let downloads = 0
+  interceptSource(t, () => downloads++)
+  const { post, upstream } = await fixture(t, [
+    { match: 'GET /v1/api_keys/rate_limits', reply: async () => {
+      started()
+      await pending
+      return { data: { accessPermitted: true } }
+    } },
+    { match: 'GET /v1/models*', reply: { data: [] } },
+  ])
+  const controller = new AbortController()
+  const request = post(call('venice_asr', { audio_url: sourceUrl }), {}, controller.signal).catch(() => undefined)
+  await entered
+  controller.abort()
+  await request
+  await delay(20)
+  release()
+  await waitForCapacity(post)
+  assert.equal(downloads, 0)
+  assert.deepEqual(upstream.calls.map((item) => item.path), ['/v1/api_keys/rate_limits', '/v1/models?type=all'])
 })
 
 it('rejects wallet uploads before any upstream request and forwards other wallet calls exactly once', async (t) => {
