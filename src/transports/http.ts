@@ -1,17 +1,39 @@
 import express from 'express'
-import type { Request, Response } from 'express'
+import type { Express, Request, Response } from 'express'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { isIP } from 'node:net'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
-import { buildServer } from '../server.js'
+import { buildServer, type BuildOptions } from '../server.js'
+import { loadConfig, type Config } from '../config.js'
+import { VeniceClient, VeniceResponseTooLargeError } from '../venice-client.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
 const MIN_EXPOSED_AUTH_TOKEN_LENGTH = 16
+const DEFAULT_MAX_CONCURRENT_REQUESTS = 8
+
+/**
+ * - `token`: one shared `VENICE_MCP_AUTH_TOKEN` gates the server, and every session uses the
+ *   operator's `VENICE_API_KEY` / `VENICE_SIWX_TOKEN`. Sessionful.
+ * - `user-key`: each request carries the caller's own Venice credentials (`Authorization: Bearer
+ *   <Venice API key>` or a `SIGN-IN-WITH-X` proof), and the server never uses its own. Stateless.
+ */
+export type HttpAuthMode = 'token' | 'user-key'
+
+export interface UpstreamCredentials {
+  apiKey?: string
+  siwxToken?: string
+}
 
 interface SessionEntry {
   transport: StreamableHTTPServerTransport
   lastSeen: number
+}
+
+export function parseHttpAuthMode(value: string | undefined): HttpAuthMode {
+  const mode = (value ?? 'token').trim().toLowerCase()
+  if (mode === 'token' || mode === 'user-key') return mode
+  throw new Error(`Unknown VENICE_MCP_AUTH "${value}". Use "token" or "user-key".`)
 }
 
 export function isAuthorizedBearerHeader(header: string | undefined, expectedToken: string | undefined): boolean {
@@ -20,6 +42,18 @@ export function isAuthorizedBearerHeader(header: string | undefined, expectedTok
   const actual = Buffer.from(header.slice('Bearer '.length))
   const expected = Buffer.from(expectedToken)
   return actual.length === expected.length && timingSafeEqual(actual, expected)
+}
+
+/** Caller-supplied Venice credentials for `user-key` mode. An API key wins over a wallet proof. */
+export function credentialsFromHeaders(header: (name: string) => string | undefined): UpstreamCredentials | undefined {
+  const authorization = header('authorization')
+  if (authorization?.startsWith('Bearer ')) {
+    const apiKey = authorization.slice('Bearer '.length).trim()
+    if (apiKey) return { apiKey }
+  }
+  const siwxToken = (header('sign-in-with-x') ?? header('x-sign-in-with-x'))?.trim()
+  if (siwxToken) return { siwxToken }
+  return undefined
 }
 
 export function isLoopbackHost(host: string): boolean {
@@ -38,16 +72,41 @@ export function isLoopbackHost(host: string): boolean {
   return false
 }
 
+export function parseAllowedOrigins(value: string | undefined): string[] {
+  return (value ?? '')
+    .split(',')
+    .map((origin) => origin.trim().replace(/\/+$/, '').toLowerCase())
+    .filter(Boolean)
+}
+
+/**
+ * Blocks DNS-rebinding style requests from browsers. Requests without an `Origin` header
+ * (MCP clients, curl, servers) are not browser requests and pass.
+ */
+export function isAllowedOrigin(origin: string | undefined, allowedOrigins: string[], boundToLoopback: boolean): boolean {
+  if (!origin) return true
+  const normalized = origin.trim().replace(/\/+$/, '').toLowerCase()
+  if (allowedOrigins.length > 0) return allowedOrigins.includes(normalized)
+  if (!boundToLoopback) return true
+  try {
+    return isLoopbackHost(new URL(normalized).hostname)
+  } catch {
+    return false
+  }
+}
+
 function parsePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number(value)
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback
 }
 
 export function validateHttpAuthConfig(
   host: string,
   authToken: string | undefined,
   allowUnauthenticated = process.env.VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP === '1',
+  mode: HttpAuthMode = 'token',
 ): void {
+  if (mode === 'user-key') return
   if (isLoopbackHost(host)) return
   if (allowUnauthenticated) return
 
@@ -55,7 +114,8 @@ export function validateHttpAuthConfig(
   if (!token) {
     throw new Error(
       'VENICE_MCP_AUTH_TOKEN is required when HTTP mode binds to a non-loopback host. ' +
-        'Set VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1 only behind a trusted authenticated proxy.'
+        'Set VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1 only behind a trusted authenticated proxy, ' +
+        'or use VENICE_MCP_AUTH=user-key so each caller brings their own Venice key.'
     )
   }
   if (token.length < MIN_EXPOSED_AUTH_TOKEN_LENGTH) {
@@ -72,17 +132,137 @@ function closeTransport(transport: StreamableHTTPServerTransport): void {
   if (typeof close === 'function') void close.call(transport)
 }
 
+export interface HttpAppOptions {
+  authMode?: HttpAuthMode
+  /** Shared bearer token for `token` mode. */
+  authToken?: string
+  /** Base configuration; `user-key` mode replaces its credentials per request. */
+  config?: Config
+  host?: string
+  allowedOrigins?: string[]
+  maxSessions?: number
+  sessionTtlMs?: number
+  /** Active user-key requests, including work continuing after a disconnect. */
+  maxConcurrentRequests?: number
+}
+
 /**
- * Run the server over Streamable HTTP for hosted deployments
- * (Smithery, internal Cloud Run, etc.). Sessionful.
+ * Build the Streamable HTTP app for hosted deployments (Smithery, internal Cloud Run, etc.).
+ * Exported separately from `runHttp` so tests can bind it to an ephemeral port.
  */
-export async function runHttp(opts: { port?: number; host?: string } = {}): Promise<void> {
+export function createHttpApp(opts: HttpAppOptions = {}): Express {
+  const authMode = opts.authMode ?? 'token'
+  const baseConfig = opts.config ?? loadConfig()
+  const boundToLoopback = isLoopbackHost(opts.host ?? '127.0.0.1')
+  const allowedOrigins = opts.allowedOrigins ?? []
+  const maxConcurrentRequests = opts.maxConcurrentRequests ?? DEFAULT_MAX_CONCURRENT_REQUESTS
+  if (!Number.isSafeInteger(maxConcurrentRequests) || maxConcurrentRequests < 1) {
+    throw new Error('maxConcurrentRequests must be a positive safe integer')
+  }
+
   const app = express()
+
+  app.get('/healthz', (_req, res) => res.json({ ok: true, name: '@veniceai/mcp-server' }))
+
+  app.use('/mcp', (req, res, next) => {
+    if (!isAllowedOrigin(req.header('origin'), allowedOrigins, boundToLoopback)) {
+      res.status(403).json({ error: 'origin not allowed' })
+      return
+    }
+    next()
+  })
+
+  const operations = new WeakMap<Response, (operation: Promise<unknown>) => void>()
+  if (authMode === 'user-key') {
+    let activeRequests = 0
+    app.use('/mcp', (_req, res, next) => {
+      if (activeRequests >= maxConcurrentRequests) {
+        res.setHeader('Retry-After', '1')
+        res.setHeader('Connection', 'close')
+        res.status(503).json({ error: 'too many active MCP requests' })
+        return
+      }
+      activeRequests++
+      let pending = 0
+      let closed = false
+      let released = false
+      const release = () => {
+        if (closed && pending === 0 && !released) {
+          released = true
+          activeRequests--
+          operations.delete(res)
+        }
+      }
+      operations.set(res, (operation) => {
+        pending++
+        const finish = () => { pending--; release() }
+        void operation.then(finish, finish)
+      })
+      res.once('close', () => { closed = true; release() })
+      next()
+    })
+  }
   app.use(express.json({ limit: '10mb' }))
 
+  if (authMode === 'user-key') {
+    app.all('/mcp', async (req, res) => {
+      if (req.method !== 'POST') {
+        res.setHeader('Allow', 'POST')
+        res.status(405).json({ error: 'stateless server: send JSON-RPC requests with POST' })
+        return
+      }
+      const credentials = credentialsFromHeaders((name) => req.header(name))
+      if (!credentials) {
+        res.setHeader('WWW-Authenticate', 'Bearer realm="venice", error="invalid_request", error_description="Send your Venice API key as a Bearer token"')
+        res.status(401).json({ error: 'missing Venice credentials: send Authorization: Bearer <Venice API key>' })
+        return
+      }
+      // One admission must not fan out into multiple downloads, even with older MCP versions.
+      if (Array.isArray(req.body)) {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          id: null,
+          error: { code: -32600, message: 'JSON-RPC batches are not supported in user-key mode' },
+        })
+        return
+      }
+      if (res.destroyed) return
+      const config = { ...baseConfig, apiKey: credentials.apiKey, siwxToken: credentials.siwxToken }
+      const client = new VeniceClient(config)
+      await handleStateless(req, res, config, {
+        stateless: true,
+        client,
+        trackOperation: operations.get(res),
+        beforeUpload: async () => {
+          if (!config.apiKey) {
+            throw new Error(
+              'An API key is required for tools that download upload sources in HTTP user-key mode. ' +
+              'Send Authorization: Bearer <Venice API key>. Wallet proofs cannot be pre-validated without consuming their single-use nonce.',
+            )
+          }
+          const validation = await client.get<{ data?: { accessPermitted?: boolean } }>(
+            '/v1/api_keys/rate_limits', undefined, { auth: 'apiKey', maxBytes: 1024 * 1024 },
+          ).catch((err: unknown) => {
+            if (err instanceof VeniceResponseTooLargeError) {
+              throw new Error('API key validation response exceeds 1 MiB. No source was downloaded or inference submitted.')
+            }
+            throw err
+          })
+          if (validation?.data?.accessPermitted !== true) {
+            throw new Error(
+              'API key access is not permitted; check its balance and permissions. No source was downloaded or inference submitted.',
+            )
+          }
+          if (res.destroyed) throw new Error('MCP request disconnected before the upload started.')
+        },
+      })
+    })
+    return app
+  }
+
   const sessions = new Map<string, SessionEntry>()
-  const maxSessions = parsePositiveInt(process.env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS)
-  const sessionTtlMs = parsePositiveInt(process.env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS)
+  const maxSessions = opts.maxSessions ?? DEFAULT_MAX_HTTP_SESSIONS
+  const sessionTtlMs = opts.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS
 
   const cleanupExpiredSessions = () => {
     const now = Date.now()
@@ -94,12 +274,9 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
     }
   }
 
-  app.get('/healthz', (_req, res) => res.json({ ok: true, name: '@veniceai/mcp-server' }))
-
   app.all('/mcp', async (req, res) => {
     try {
-      const authToken = process.env.VENICE_MCP_AUTH_TOKEN
-      if (!isAuthorizedBearerHeader(req.header('authorization'), authToken)) {
+      if (!isAuthorizedBearerHeader(req.header('authorization'), opts.authToken)) {
         res.setHeader('WWW-Authenticate', 'Bearer')
         res.status(401).json({ error: 'unauthorized' })
         return
@@ -135,7 +312,7 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
         newTransport.onclose = () => {
           sessions.delete(sessionId)
         }
-        const server = buildServer()
+        const server = buildServer({ config: baseConfig })
         await server.connect(newTransport)
         entry = { transport: newTransport, lastSeen: Date.now() }
       }
@@ -151,19 +328,58 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
     }
   })
 
+  return app
+}
+
+/** One server and transport per request, discarded when the response closes. */
+async function handleStateless(req: Request, res: Response, config: Config, options: Omit<BuildOptions, 'config'>): Promise<void> {
+  try {
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
+    const server = buildServer({ config, ...options })
+    const closed = new Promise<void>((resolve) => {
+      res.once('close', () => {
+        void server.close()
+        resolve()
+      })
+    })
+    await server.connect(transport)
+    await Promise.race([transport.handleRequest(req, res, req.body), closed])
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error('[venice-mcp] /mcp error', err)
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'internal' })
+    }
+  }
+}
+
+export async function runHttp(opts: { port?: number; host?: string } = {}): Promise<void> {
+  const authMode = parseHttpAuthMode(process.env.VENICE_MCP_AUTH)
+  const authToken = process.env.VENICE_MCP_AUTH_TOKEN
   const port = opts.port ?? Number(process.env.PORT ?? 3333)
   // Default to loopback-only for safety. Opt in to all-interfaces via VENICE_MCP_HOST=0.0.0.0
   // (useful for Docker containers and intentional LAN exposure).
   const host = opts.host ?? process.env.VENICE_MCP_HOST ?? '127.0.0.1'
-  validateHttpAuthConfig(host, process.env.VENICE_MCP_AUTH_TOKEN)
+  validateHttpAuthConfig(host, authToken, undefined, authMode)
+
+  const app = createHttpApp({
+    authMode,
+    authToken,
+    host,
+    allowedOrigins: parseAllowedOrigins(process.env.VENICE_MCP_ALLOWED_ORIGINS),
+    maxSessions: parsePositiveInt(process.env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS),
+    sessionTtlMs: parsePositiveInt(process.env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS),
+    maxConcurrentRequests: parsePositiveInt(process.env.VENICE_MCP_MAX_CONCURRENT_REQUESTS, DEFAULT_MAX_CONCURRENT_REQUESTS),
+  })
+
   await new Promise<void>((resolve, reject) => {
     const listener = app.listen(port, host)
     listener.once('listening', () => resolve())
     listener.once('error', reject)
   })
   // eslint-disable-next-line no-console
-  console.error(`[venice-mcp] listening on http://${host}:${port}/mcp`)
-  if (!isLoopbackHost(host)) {
+  console.error(`[venice-mcp] listening on http://${host}:${port}/mcp (auth: ${authMode})`)
+  if (!isLoopbackHost(host) && authMode === 'token') {
     // eslint-disable-next-line no-console
     console.error(`[venice-mcp] WARNING: bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`)
   }
