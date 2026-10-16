@@ -1,4 +1,4 @@
-import { after, before, describe, it } from 'node:test'
+import { after, before, describe, it, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -17,6 +17,19 @@ import { createHttpApp } from '../src/transports/http.js'
 import { startMockVenice, type MockVeniceServer } from './helpers/mock-venice-server.js'
 
 const RESOURCE = 'https://mcp.venice.test/mcp'
+const SOURCE_URL = 'https://93.184.216.34/source.wav'
+const LONG_TRANSCRIPT = 'long transcript '.repeat(1000)
+
+function interceptSource(t: TestContext, onFetch: () => void) {
+  const realFetch = globalThis.fetch
+  t.mock.method(globalThis, 'fetch', async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    if (String(input) === SOURCE_URL) {
+      onFetch()
+      return new Response('RIFFmock audio', { headers: { 'content-type': 'audio/wav' } })
+    }
+    return realFetch(input, init)
+  })
+}
 
 function settings(overrides: Partial<OAuthSettings> = {}): OAuthSettings {
   return {
@@ -183,6 +196,13 @@ describe('http oauth mode', () => {
             ? { __status: 401, __body: { error: 'Invalid API key' } }
             : { data: [{ id: 'deepseek-v4-flash-0731', type: 'text' }] },
       },
+      {
+        match: 'GET /v1/api_keys/rate_limits',
+        reply: (req: { headers: Record<string, string> }) => ({
+          data: { accessPermitted: req.headers.authorization === 'Bearer vk_user_123' },
+        }),
+      },
+      { match: 'POST /v1/audio/transcriptions', reply: { text: LONG_TRANSCRIPT } },
     ])
     const config = { ...loadConfig({}), baseUrl: upstream.url, apiKey: 'server-operator-key' }
     const oauth = settings({ introspectionUrl: `${upstream.url}/oauth/token_info` })
@@ -235,6 +255,43 @@ describe('http oauth mode', () => {
     const who = await rpc({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'venice_get_profile', arguments: {} } }, 'good-token')
     const result = ((await who.json()) as { result: { structuredContent: Record<string, string> } }).result
     assert.deepEqual(result.structuredContent, { id: 'user_123', email: 'sabrina@venice.test' })
+  })
+
+  it('rejects JSON-RPC batches', async () => {
+    const res = await rpc([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }, { jsonrpc: '2.0', id: 2, method: 'tools/list' }], 'good-token')
+    assert.equal(res.status, 400)
+    const body = (await res.json()) as { error: { code: number; message: string } }
+    assert.equal(body.error.code, -32600)
+    assert.match(body.error.message, /not supported in oauth mode/)
+  })
+
+  it('checks the user’s Venice key before downloading an upload source', async (t) => {
+    let downloads = 0
+    interceptSource(t, () => downloads++)
+    const res = await rpc(
+      { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'venice_asr', arguments: { audio_url: SOURCE_URL } } },
+      'revoked-key-token',
+    )
+    const result = ((await res.json()) as { result: { isError?: boolean; content: Array<{ text: string }> } }).result
+    assert.equal(result.isError, true)
+    assert.match(result.content[0].text, /API key access is not permitted/)
+    assert.equal(downloads, 0)
+    const validation = upstream.calls.findLast((c) => c.path === '/v1/api_keys/rate_limits')
+    assert.equal(validation?.headers.authorization, 'Bearer vk_revoked')
+  })
+
+  it('runs tools statelessly, returning the full result instead of a retained handle', async (t) => {
+    let downloads = 0
+    interceptSource(t, () => downloads++)
+    const res = await rpc(
+      { jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'venice_asr', arguments: { audio_url: SOURCE_URL } } },
+      'good-token',
+    )
+    const result = ((await res.json()) as { result: { isError?: boolean; structuredContent: Record<string, unknown> } }).result
+    assert.notEqual(result.isError, true)
+    assert.equal(downloads, 1)
+    assert.equal(result.structuredContent.text, LONG_TRANSCRIPT)
+    assert.equal(result.structuredContent.result_handle, undefined)
   })
 
   it('asks the host to reconnect when the Venice key behind a token is revoked', async () => {

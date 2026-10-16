@@ -188,7 +188,7 @@ export function createHttpApp(opts: HttpAppOptions = {}): Express {
   })
 
   const operations = new WeakMap<Response, (operation: Promise<unknown>) => void>()
-  if (authMode === 'user-key') {
+  if (authMode === 'user-key' || authMode === 'oauth') {
     let activeRequests = 0
     app.use('/mcp', (_req, res, next) => {
       if (activeRequests >= maxConcurrentRequests) {
@@ -260,7 +260,15 @@ export function createHttpApp(opts: HttpAppOptions = {}): Express {
         res.status(401).json({ error: 'invalid_token' })
         return
       }
-      await handleStateless(req, res, { ...baseConfig, apiKey: identity.veniceApiKey, siwxToken: undefined }, {
+      if (rejectBatch(req, res, 'oauth')) return
+      if (res.destroyed) return
+      const config = { ...baseConfig, apiKey: identity.veniceApiKey, siwxToken: undefined }
+      const client = new VeniceClient(config)
+      await handleStateless(req, res, config, {
+        stateless: true,
+        client,
+        trackOperation: operations.get(res),
+        beforeUpload: uploadKeyValidator(client, config, res),
         auth: {
           scopes: settings.requiredScopes,
           token: identity.token,
@@ -287,15 +295,7 @@ export function createHttpApp(opts: HttpAppOptions = {}): Express {
         res.status(401).json({ error: 'missing Venice credentials: send Authorization: Bearer <Venice API key>' })
         return
       }
-      // One admission must not fan out into multiple downloads, even with older MCP versions.
-      if (Array.isArray(req.body)) {
-        res.status(400).json({
-          jsonrpc: '2.0',
-          id: null,
-          error: { code: -32600, message: 'JSON-RPC batches are not supported in user-key mode' },
-        })
-        return
-      }
+      if (rejectBatch(req, res, 'user-key')) return
       if (res.destroyed) return
       const config = { ...baseConfig, apiKey: credentials.apiKey, siwxToken: credentials.siwxToken }
       const client = new VeniceClient(config)
@@ -303,28 +303,7 @@ export function createHttpApp(opts: HttpAppOptions = {}): Express {
         stateless: true,
         client,
         trackOperation: operations.get(res),
-        beforeUpload: async () => {
-          if (!config.apiKey) {
-            throw new Error(
-              'An API key is required for tools that download upload sources in HTTP user-key mode. ' +
-              'Send Authorization: Bearer <Venice API key>. Wallet proofs cannot be pre-validated without consuming their single-use nonce.',
-            )
-          }
-          const validation = await client.get<{ data?: { accessPermitted?: boolean } }>(
-            '/v1/api_keys/rate_limits', undefined, { auth: 'apiKey', maxBytes: 1024 * 1024 },
-          ).catch((err: unknown) => {
-            if (err instanceof VeniceResponseTooLargeError) {
-              throw new Error('API key validation response exceeds 1 MiB. No source was downloaded or inference submitted.')
-            }
-            throw err
-          })
-          if (validation?.data?.accessPermitted !== true) {
-            throw new Error(
-              'API key access is not permitted; check its balance and permissions. No source was downloaded or inference submitted.',
-            )
-          }
-          if (res.destroyed) throw new Error('MCP request disconnected before the upload started.')
-        },
+        beforeUpload: uploadKeyValidator(client, config, res),
       })
     })
     return app
@@ -399,6 +378,43 @@ export function createHttpApp(opts: HttpAppOptions = {}): Express {
   })
 
   return app
+}
+
+/** One admission must not fan out into multiple downloads, even with older MCP versions. */
+function rejectBatch(req: Request, res: Response, mode: HttpAuthMode): boolean {
+  if (!Array.isArray(req.body)) return false
+  res.status(400).json({
+    jsonrpc: '2.0',
+    id: null,
+    error: { code: -32600, message: `JSON-RPC batches are not supported in ${mode} mode` },
+  })
+  return true
+}
+
+/** Checks the caller's key with Venice before a tool downloads a caller-supplied source. */
+function uploadKeyValidator(client: VeniceClient, config: Config, res: Response): () => Promise<void> {
+  return async () => {
+    if (!config.apiKey) {
+      throw new Error(
+        'An API key is required for tools that download upload sources in HTTP user-key mode. ' +
+        'Send Authorization: Bearer <Venice API key>. Wallet proofs cannot be pre-validated without consuming their single-use nonce.',
+      )
+    }
+    const validation = await client.get<{ data?: { accessPermitted?: boolean } }>(
+      '/v1/api_keys/rate_limits', undefined, { auth: 'apiKey', maxBytes: 1024 * 1024 },
+    ).catch((err: unknown) => {
+      if (err instanceof VeniceResponseTooLargeError) {
+        throw new Error('API key validation response exceeds 1 MiB. No source was downloaded or inference submitted.')
+      }
+      throw err
+    })
+    if (validation?.data?.accessPermitted !== true) {
+      throw new Error(
+        'API key access is not permitted; check its balance and permissions. No source was downloaded or inference submitted.',
+      )
+    }
+    if (res.destroyed) throw new Error('MCP request disconnected before the upload started.')
+  }
 }
 
 /** One server and transport per request, discarded when the response closes. */
