@@ -9,135 +9,138 @@ concurrency:
   group: npm-publish-${{ github.event.release.tag_name }}
   cancel-in-progress: false
 
-permissions:
-  contents: write
-  id-token: write
+permissions: {}
+
+env:
+  REGISTRY_URL: https://registry.npmjs.org
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  publish:
-    name: Publish package
+  build:
+    name: Verify, test and pack release
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: read
     env:
-      REGISTRY_URL: https://registry.npmjs.org
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      RELEASE_SHA: ${{ github.sha }}
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      tarball_sha256: ${{ steps.pack.outputs.tarball_sha256 }}
+      publish_tag: ${{ steps.release.outputs.publish_tag }}
+      already_published: ${{ steps.npm_status.outputs.exists }}
     steps:
-      - name: Check out release target
+      - name: Check out release tag
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ github.event.release.target_commitish }}
-          fetch-depth: 0
+          ref: refs/tags/${{ github.event.release.tag_name }}
+          persist-credentials: false
 
-      - name: Verify release target branch
-        id: target
+      - name: Verify immutable release commit before running repository code
         shell: bash
-        env:
-          RELEASE_TARGET: ${{ github.event.release.target_commitish }}
         run: |
           set -euo pipefail
-
-          target="$RELEASE_TARGET"
-          if ! git ls-remote --exit-code --heads origin "$target" >/dev/null; then
-            echo "::error::Release target '${target}' is not a branch. Refusing to publish because the version bump cannot be committed back safely."
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid release event SHA" >&2; exit 1; }
+          head_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          [[ "$head_commit" == "$RELEASE_SHA" && "$tag_commit" == "$RELEASE_SHA" ]] || {
+            echo "Release HEAD and peeled tag must match the immutable release event SHA" >&2
             exit 1
-          fi
-
-          echo "branch=${target}" >> "$GITHUB_OUTPUT"
+          }
 
       - name: Set up Node.js
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 24
-          registry-url: ${{ env.REGISTRY_URL }}
+          package-manager-cache: false
 
-      - name: Set package version
-        id: version
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: |
-          set -euo pipefail
-
-          release_tag="$RELEASE_TAG"
-          semver_pattern='^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
-
-          if [[ "$release_tag" =~ $semver_pattern ]]; then
-            package_version="${release_tag#v}"
-            npm version "$package_version" --no-git-tag-version --allow-same-version
-            version_source="release tag"
-          else
-            package_version="$(npm version patch --no-git-tag-version)"
-            package_version="${package_version#v}"
-            version_source="patch bump"
-          fi
-
-          package_name="$(node -p "require('./package.json').name")"
-          publish_tag="latest"
-          if [[ "$package_version" == *-* ]]; then
-            prerelease="${package_version#*-}"
-            prerelease="${prerelease%%+*}"
-            publish_tag="${prerelease%%.*}"
-
-            if [[ "$publish_tag" =~ ^v?[0-9] ]]; then
-              publish_tag="next"
-            fi
-          fi
-
-          echo "Using ${package_name}@${package_version} from ${version_source} with npm dist-tag '${publish_tag}'."
-          echo "package_name=${package_name}" >> "$GITHUB_OUTPUT"
-          echo "package_version=${package_version}" >> "$GITHUB_OUTPUT"
-          echo "publish_tag=${publish_tag}" >> "$GITHUB_OUTPUT"
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build and test
-        run: npm test
+      - name: Verify release commit and versions
+        id: release
+        run: node scripts/release-integrity.mjs guard
 
       - name: Check npm package version
         id: npm_status
-        shell: bash
+        run: node scripts/release-integrity.mjs registry
+
+      - name: Install dependencies without lifecycle scripts
+        run: npm ci --ignore-scripts
+
+      - name: Build and test
+        run: npm test --ignore-scripts
+
+      - name: Pack tested release without lifecycle scripts
+        id: pack
         env:
-          PACKAGE_NAME: ${{ steps.version.outputs.package_name }}
-          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
+          RELEASE_DIRECTORY: ${{ runner.temp }}/npm-release
+        run: node scripts/release-integrity.mjs pack
+
+      - name: Upload exact release archive
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/npm-release/release.tgz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish verified archive
+    needs: build
+    if: needs.build.outputs.already_published == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up Node.js for trusted publishing
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          registry-url: ${{ env.REGISTRY_URL }}
+          package-manager-cache: false
+
+      - name: Verify trusted publishing npm support
+        shell: bash
         run: |
           set -euo pipefail
+          npm_version="$(npm --version)"
+          node -e '
+            const version = process.argv[1];
+            if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error("Unexpected npm version");
+            const [major, minor, patch] = version.split(".").map(Number);
+            if (major < 11 || (major === 11 && (minor < 5 || (minor === 5 && patch < 1)))) {
+              throw new Error("Trusted publishing requires npm >=11.5.1");
+            }
+          ' "$npm_version"
 
-          package_name="$PACKAGE_NAME"
-          package_version="$PACKAGE_VERSION"
-
-          if npm view "${package_name}@${package_version}" version --registry "$REGISTRY_URL" >/dev/null 2>&1; then
-            echo "${package_name}@${package_version} already exists on npm; skipping publish."
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "${package_name}@${package_version} is not published yet."
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to npm
-        if: steps.npm_status.outputs.exists != 'true'
-        env:
-          PUBLISH_TAG: ${{ steps.version.outputs.publish_tag }}
-        run: npm publish --access public --tag "$PUBLISH_TAG" --provenance
-
-      - name: Commit version bump
+      - name: Require immutable artifact identity
         shell: bash
         env:
-          PACKAGE_VERSION: ${{ steps.version.outputs.package_version }}
-          TARGET_BRANCH: ${{ steps.target.outputs.branch }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
         run: |
           set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid release artifact ID" >&2; exit 1; }
 
-          if git diff --quiet -- package.json package-lock.json; then
-            echo "No version changes to commit."
-            exit 0
-          fi
+      - name: Download exact release artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: ${{ runner.temp }}/npm-release
+          merge-multiple: true
+          digest-mismatch: error
 
-          package_version="$PACKAGE_VERSION"
-
-          git add package.json package-lock.json
-          git -c user.name="github-actions[bot]" \
-            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit -m "chore: release v${package_version} [skip ci]"
-          git push origin "HEAD:${TARGET_BRANCH}"
+      - name: Verify and publish exact archive
+        shell: bash
+        env:
+          EXPECTED_SHA256: ${{ needs.build.outputs.tarball_sha256 }}
+          PUBLISH_TAG: ${{ needs.build.outputs.publish_tag }}
+          RELEASE_DIRECTORY: ${{ runner.temp }}/npm-release
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "Invalid release digest" >&2; exit 1; }
+          [[ "$PUBLISH_TAG" =~ ^[A-Za-z][0-9A-Za-z-]*$ ]] || { echo "Invalid publish tag" >&2; exit 1; }
+          archive="$RELEASE_DIRECTORY/release.tgz"
+          [[ -f "$archive" && ! -L "$archive" ]] || { echo "Missing release archive" >&2; exit 1; }
+          printf '%s  %s\n' "$EXPECTED_SHA256" "$archive" | sha256sum --check --strict -
+          npm publish "$archive" --access public --tag "$PUBLISH_TAG" --ignore-scripts --provenance --registry "$REGISTRY_URL"
