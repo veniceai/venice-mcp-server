@@ -87,6 +87,7 @@ export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
  * - Otherwise adds the canonical `SIGN-IN-WITH-X` when a SIWX token is configured.
+ * - Never follows redirects: credentials and POST bodies stay at the configured upstream.
  * - Surfaces 402 responses as `VeniceUpstreamError(isPaymentRequired)` so tools
  *   can format a helpful top-up message back to the MCP host.
  *
@@ -161,6 +162,7 @@ export class VeniceClient {
         headers,
         body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
         signal: ac.signal,
+        redirect: 'manual',
       })
       headersReceived = true
       contentType = res.headers.get('content-type') ?? ''
@@ -272,7 +274,7 @@ export class VeniceClient {
     // The timer stays armed until the body is consumed so a stalled body cannot hang the call.
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
-      const res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal })
+      const res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal, redirect: 'manual' })
       const body = await parseResponse<T>(res, path, opts.maxBytes)
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
       return body
@@ -314,7 +316,7 @@ export class VeniceClient {
     const timeoutMs = opts.timeoutMs ?? this.cfg.timeoutMs
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
-      const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal })
+      const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal, redirect: 'manual' })
       if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status))
 
       const contentType = res.headers.get('content-type') ?? 'application/octet-stream'
