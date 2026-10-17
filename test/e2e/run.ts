@@ -70,9 +70,8 @@ async function phaseEmpty() {
   log(`signed SIWE for ${ephemeralWallet.address}`)
   log(`SIWX token length: ${siwxToken.length} chars (base64)`)
 
-  const mcp = spawnMcp({
+  const mcp = spawnMcp({ mode: 'x402', siwxToken }, {
     VENICE_TEST_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
-    VENICE_SIWX_TOKEN: siwxToken,
     VENICE_LOG_LEVEL: 'error',
   })
 
@@ -123,9 +122,8 @@ async function phaseBalance() {
 
   // Venice credit balance via MCP
   const siwxToken = await buildSiwxHeader(wallet)
-  const mcp = spawnMcp({
+  const mcp = spawnMcp({ mode: 'x402', siwxToken }, {
     VENICE_TEST_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
-    VENICE_SIWX_TOKEN: siwxToken,
     VENICE_LOG_LEVEL: 'error',
   })
   try {
@@ -176,9 +174,8 @@ async function phaseFunded() {
   const wallet = loadOrCreateWallet()
   const siwxToken = await buildSiwxHeader(wallet)
 
-  const mcp = spawnMcp({
+  const mcp = spawnMcp({ mode: 'x402', siwxToken }, {
     VENICE_TEST_BASE_URL: VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api'),
-    VENICE_SIWX_TOKEN: siwxToken,
     VENICE_LOG_LEVEL: 'error',
   })
 

@@ -410,6 +410,8 @@ The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/s
 
 `test/e2e/` currently exercises the EVM rail against the **real** Venice API and **real** Base mainnet—not a mock. Venice and the MCP x402 helpers support both Base and Solana, but this harness generates a throwaway EVM wallet and signs SIWE + EIP-3009 payloads with `viem`. The wallet is persisted at `.e2e-wallet.json` (chmod 600, gitignored—**never commit**).
 
+Each harness mode passes its intended credentials explicitly: wallet-mode children clear any inherited API key, and API-key children clear any inherited SIWX token. This keeps the two authentication runs independent even when the parent environment contains both credentials.
+
 | Phase | npm script | Cost | What it tests |
 |---|---|---|---|
 | `create` | `test:e2e:create` | free | Generate / reload wallet, print address + balance |
