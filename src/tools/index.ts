@@ -715,7 +715,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. Completion id and actual model, when returned upstream, are available in structured content and an additional JSON text block for venice_tee_signature. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -773,12 +773,22 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
 
           const resp = await client.post<{
+            id?: string
+            model?: string
             choices?: Array<{ message?: Record<string, unknown> & { content?: string | null } }>
             usage?: Record<string, number>
           }>('/v1/chat/completions', body, undefined, { timeoutMs: args.timeout_ms })
           const message = resp.choices?.[0]?.message
           const text = message?.content ?? JSON.stringify(message ?? resp, null, 2)
-          return ok(truncate(text), { message, usage: resp.usage })
+          const metadata = {
+            ...(typeof resp.id === 'string' ? { id: resp.id } : {}),
+            ...(typeof resp.model === 'string' ? { model: resp.model } : {}),
+          }
+          return ok(
+            truncate(text),
+            { ...metadata, message, usage: resp.usage },
+            Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
+          )
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1956,8 +1966,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice TEE Response Signature',
       description: `Fetch the enclave signature for a completed TEE text-model chat request. The caller must cryptographically verify it against the signing identity bound by a separately verified attestation; this tool only returns the provider payload.${NO_AUTH}`,
       inputSchema: {
-        model: z.string().min(1).describe('Same TEE-capable text model used for the chat completion.'),
-        request_id: z.string().min(1).describe('Completion id returned by POST /v1/chat/completions.'),
+        model: z.string().min(1).describe('Actual TEE-capable model returned in the chat completion metadata.'),
+        request_id: z.string().min(1).describe('Completion id returned by venice_chat or venice_chat_with_character, in structured content or the additional metadata text block.'),
       },
       handler: async ({ model, request_id }) => {
         try {
@@ -2277,7 +2287,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat_with_character',
       title: 'Venice Character Chat',
-      description: `Chat with a Venice character by slug. Note: the character lookup itself is API-key-only, but the chat completion supports x402 — so x402 users may need to fetch character info via API key first.${nsfwNote}`,
+      description: `Chat with a Venice character by slug. Completion id and actual model, when returned upstream, are available in structured content and an additional JSON text block for venice_tee_signature. Note: the character lookup itself is API-key-only, but the chat completion supports x402 — so x402 users may need to fetch character info via API key first.${nsfwNote}`,
       inputSchema: {
         character_slug: z.string().min(1),
         messages: z
@@ -2290,6 +2300,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       handler: async (args) => {
         try {
           const resp = await client.post<{
+            id?: string
+            model?: string
             choices?: Array<{ message?: { content?: string } }>
             usage?: Record<string, number>
           }>('/v1/chat/completions', {
@@ -2301,7 +2313,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             stream: false,
           })
           const text = resp.choices?.[0]?.message?.content ?? ''
-          return ok(truncate(text), { usage: resp.usage })
+          const metadata = {
+            ...(typeof resp.id === 'string' ? { id: resp.id } : {}),
+            ...(typeof resp.model === 'string' ? { model: resp.model } : {}),
+          }
+          return ok(
+            truncate(text),
+            { ...metadata, usage: resp.usage },
+            Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
+          )
         } catch (err) {
           return fail(formatToolError(err))
         }
