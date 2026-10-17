@@ -2690,7 +2690,7 @@ describe('tool output shaping', () => {
     assert.equal(r.content.some((item) => item.type === 'audio'), false)
   })
 
-  it('venice_music_status returns a WAV resource before requested server cleanup', async () => {
+  it('venice_music_status buffers a WAV resource before requested server cleanup', async () => {
     const wav = Buffer.from('mock-wav-bytes')
     const stub = new StubClient({
       '/v1/audio/retrieve': () => ({
@@ -3470,12 +3470,102 @@ describe('tool annotations', () => {
     }
   })
 
-  it('only lookups are read-only, and only cleanup and crypto relays are destructive', () => {
+  it('lookups are read-only, while cleanup and crypto relays are destructive', () => {
     assert.equal(TOOL_ANNOTATIONS.venice_list_models.readOnlyHint, true)
     assert.equal(TOOL_ANNOTATIONS.venice_video_generate.readOnlyHint, false)
     assert.equal(TOOL_ANNOTATIONS.venice_video_complete.destructiveHint, true)
+    assert.equal(TOOL_ANNOTATIONS.venice_music_complete.destructiveHint, true)
     assert.equal(TOOL_ANNOTATIONS.venice_crypto_rpc.destructiveHint, true)
     assert.equal(TOOL_ANNOTATIONS.venice_image_generate.destructiveHint, false)
+  })
+
+  it('registered status tools advertise optional deletion without claiming unregistered wait behavior', () => {
+    const { get, tools } = setup()
+    for (const name of ['venice_video_status', 'venice_music_status']) {
+      const schema = z.object(get(name).inputSchema)
+      assert.equal(schema.safeParse({ queue_id: 'q', model: 'm', delete_media_on_completion: true }).success, true)
+      assert.deepEqual(TOOL_ANNOTATIONS[name], {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      }, name)
+    }
+    for (const name of ['venice_video_wait', 'venice_music_wait']) {
+      assert.equal(tools.some((tool) => tool.name === name), false, name)
+      assert.equal(Object.hasOwn(TOOL_ANNOTATIONS, name), false, name)
+    }
+  })
+
+  it('marks URL ingestion, web features, public character content and the crypto relay as open-world', () => {
+    const { get } = setup()
+    for (const name of [
+      'venice_chat',
+      'venice_chat_with_character',
+      'venice_responses',
+      'venice_image_generate',
+      'venice_image_edit',
+      'venice_image_multi_edit',
+      'venice_image_upscale',
+      'venice_image_remove_bg',
+      'venice_video_generate',
+      'venice_asr',
+      'venice_voice_clone',
+      'venice_text_parser',
+      'venice_web_search',
+      'venice_web_scrape',
+      'venice_list_characters',
+      'venice_get_character',
+      'venice_character_reviews',
+      'venice_crypto_rpc',
+    ]) {
+      get(name)
+      assert.equal(TOOL_ANNOTATIONS[name].openWorldHint, true, name)
+    }
+  })
+
+  it('keeps fixed catalog, account and job operations closed-world despite network transport', () => {
+    const { get } = setup()
+    for (const name of [
+      'venice_embeddings',
+      'venice_tts',
+      'venice_music_generate',
+      'venice_tee_attestation',
+      'venice_tee_signature',
+      'venice_list_models',
+      'venice_model_details',
+      'venice_model_traits',
+      'venice_model_compatibility_mapping',
+      'venice_image_styles',
+      'venice_audio_quote',
+      'venice_video_quote',
+      'venice_video_status',
+      'venice_video_complete',
+      'venice_music_status',
+      'venice_music_complete',
+      'venice_billing_balance',
+      'venice_billing_usage_history',
+      'venice_billing_usage_analytics',
+      'venice_list_api_keys',
+      'venice_get_api_key',
+      'venice_api_key_rate_limits',
+      'venice_api_key_rate_limit_logs',
+      'venice_x402_balance',
+      'venice_x402_transactions',
+      'venice_x402_top_up_info',
+      'venice_crypto_networks',
+    ]) {
+      get(name)
+      assert.equal(TOOL_ANNOTATIONS[name].openWorldHint, false, name)
+    }
+  })
+
+  it('public character reads remain read-only and idempotent', () => {
+    for (const name of ['venice_list_characters', 'venice_get_character', 'venice_character_reviews']) {
+      assert.equal(TOOL_ANNOTATIONS[name].readOnlyHint, true, name)
+      assert.equal(TOOL_ANNOTATIONS[name].destructiveHint, false, name)
+      assert.equal(TOOL_ANNOTATIONS[name].idempotentHint, true, name)
+    }
   })
 })
 

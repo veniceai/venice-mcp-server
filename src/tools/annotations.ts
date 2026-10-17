@@ -3,70 +3,71 @@ import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 /** Every hint is set explicitly: the MCP spec defaults an omitted hint to destructive and open-world. */
 export type ToolHints = Required<Pick<ToolAnnotations, 'readOnlyHint' | 'destructiveHint' | 'idempotentHint' | 'openWorldHint'>>
 
-/** Free lookups with no side effects. */
+/** Lookups within a fixed catalog or account domain, with no side effects. */
 const READ: ToolHints = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
-/** Polls a queued job. Safe to repeat; optional server-side cleanup only runs after the result is returned. */
-const STATUS: ToolHints = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+/** Reads public user-generated characters or reviews. */
+const OPEN_READ: ToolHints = { ...READ, openWorldHint: true }
+/** Polls a queued job and may delete its media after buffering, before returning. Repeated cleanup has no additional effect. */
+const STATUS: ToolHints = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
 /** Paid calls that create something new (text, media, embeddings, voices, keys). */
 const GENERATE: ToolHints = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false }
-/** Paid calls whose results come from the open web. */
-const WEB: ToolHints = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+/** Paid calls that may ingest URLs, use web features, or consume remote user-generated content. */
+const OPEN_GENERATE: ToolHints = { ...GENERATE, openWorldHint: true }
 /** Deletes server-side media. Repeating it has no further effect. */
 const CLEANUP: ToolHints = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
 /** May broadcast to a blockchain, which cannot be undone. */
 const IRREVERSIBLE: ToolHints = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true }
 
 /**
- * Keyed by tool name. Includes tools from open PRs so they are annotated the moment they merge;
- * extra entries are harmless, and a missing entry fails the tests.
+ * Keyed by tool name; missing entries for registered tools fail the tests.
+ * Hints cover all supported arguments, including optional web access and deletion.
+ * Network transport alone does not make a fixed catalog or account domain open-world.
  */
 export const TOOL_ANNOTATIONS: Readonly<Record<string, ToolHints>> = {
   // chat / text
-  venice_chat: GENERATE,
-  venice_chat_with_character: GENERATE,
-  venice_responses: GENERATE,
+  venice_chat: OPEN_GENERATE,
+  venice_chat_with_character: OPEN_GENERATE,
+  venice_responses: OPEN_GENERATE,
   venice_embeddings: GENERATE,
   venice_tee_attestation: READ,
   venice_tee_signature: READ,
 
   // image
-  venice_image_generate: GENERATE,
-  venice_image_edit: GENERATE,
-  venice_image_multi_edit: GENERATE,
-  venice_image_upscale: GENERATE,
-  venice_image_remove_bg: GENERATE,
+  venice_image_generate: OPEN_GENERATE,
+  venice_image_edit: OPEN_GENERATE,
+  venice_image_multi_edit: OPEN_GENERATE,
+  venice_image_upscale: OPEN_GENERATE,
+  venice_image_remove_bg: OPEN_GENERATE,
   venice_image_styles: READ,
 
   // video
   venice_video_quote: READ,
-  venice_video_generate: GENERATE,
+  venice_video_generate: OPEN_GENERATE,
   venice_video_status: STATUS,
-  venice_video_wait: STATUS,
   venice_video_complete: CLEANUP,
 
   // audio / music
   venice_tts: GENERATE,
-  venice_asr: GENERATE,
-  venice_voice_clone: GENERATE,
+  venice_asr: OPEN_GENERATE,
+  venice_voice_clone: OPEN_GENERATE,
   venice_audio_quote: READ,
   venice_music_generate: GENERATE,
   venice_music_status: STATUS,
-  venice_music_wait: STATUS,
   venice_music_complete: CLEANUP,
 
   // augment
-  venice_web_search: WEB,
-  venice_web_scrape: WEB,
-  venice_text_parser: GENERATE,
+  venice_web_search: OPEN_GENERATE,
+  venice_web_scrape: OPEN_GENERATE,
+  venice_text_parser: OPEN_GENERATE,
 
   // catalog / characters
   venice_list_models: READ,
   venice_model_details: READ,
   venice_model_traits: READ,
   venice_model_compatibility_mapping: READ,
-  venice_list_characters: READ,
-  venice_get_character: READ,
-  venice_character_reviews: READ,
+  venice_list_characters: OPEN_READ,
+  venice_get_character: OPEN_READ,
+  venice_character_reviews: OPEN_READ,
 
   // billing / keys
   venice_billing_balance: READ,
