@@ -10,6 +10,7 @@ export async function readBoundedBuffer(res: Response, maxBytes: number, label: 
   if (contentLength !== null) {
     const size = Number(contentLength)
     if (Number.isFinite(size) && size > maxBytes) {
+      void res.body?.cancel().catch(() => {})
       throw new ResponseTooLargeError(label, maxBytes)
     }
   }
@@ -18,13 +19,23 @@ export async function readBoundedBuffer(res: Response, maxBytes: number, label: 
 
   const chunks: Buffer[] = []
   let total = 0
-  for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
-    const buf = Buffer.from(chunk)
-    total += buf.length
-    if (total > maxBytes) {
-      throw new ResponseTooLargeError(label, maxBytes)
+  const reader = res.body.getReader()
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > maxBytes) {
+        throw new ResponseTooLargeError(label, maxBytes)
+      }
+      chunks.push(Buffer.from(value))
     }
-    chunks.push(buf)
+    return Buffer.concat(chunks, total)
+  } catch (err) {
+    // Start cleanup without waiting for an untrusted source's cancel promise.
+    void reader.cancel().catch(() => {})
+    throw err
+  } finally {
+    reader.releaseLock()
   }
-  return Buffer.concat(chunks, total)
 }

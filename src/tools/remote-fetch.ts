@@ -39,24 +39,25 @@ export async function fetchUploadSource(url: string, opts: FetchUploadSourceOpti
   const useInjectedFetch = opts.fetchImpl !== undefined || fetchImpl !== DEFAULT_FETCH
   const lookupAddresses = opts.lookupAddresses ?? lookupHostname
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_UPLOAD_BYTES
+  let res: Response | undefined
 
   try {
     let currentUrl = new URL(url)
-    let res: Response | undefined
 
     for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
       res = await fetchRemoteUrl(currentUrl, ac.signal, lookupAddresses, useInjectedFetch ? fetchImpl : undefined, opts.pinnedFetchImpl)
 
       if (!isRedirect(res.status)) break
 
+      cancelResponseBody(res)
       const location = res.headers.get('location')
       if (!location) throw new Error(`Could not fetch ${opts.label}: redirect missing Location header`)
+      if (redirects === MAX_REDIRECTS) throw new Error(`Could not fetch ${opts.label}: too many redirects`)
       currentUrl = new URL(location, currentUrl)
       res = undefined
     }
 
     if (!res) throw new Error(`Could not fetch ${opts.label}: too many redirects`)
-    if (isRedirect(res.status)) throw new Error(`Could not fetch ${opts.label}: too many redirects`)
     if (!res.ok) throw new Error(`Could not fetch ${opts.label}: HTTP ${res.status}`)
 
     const headerContentType = res.headers.get('content-type')
@@ -70,13 +71,21 @@ export async function fetchUploadSource(url: string, opts: FetchUploadSourceOpti
       filename: filenameFromUrl(currentUrl, opts.fallbackFilename),
     }
   } catch (err) {
-    if ((err as Error).name === 'AbortError') {
+    if (ac.signal.aborted || (err as Error).name === 'AbortError') {
       throw new Error(`Timed out fetching ${opts.label} after ${opts.timeoutMs}ms`)
     }
     throw err
   } finally {
+    // Close any request that did not finish before removing its deadline.
+    ac.abort()
+    cancelResponseBody(res)
     clearTimeout(timeout)
   }
+}
+
+function cancelResponseBody(res: Response | undefined): void {
+  // Cancellation starts immediately; a failing or stalled cleanup must not mask the result.
+  void res?.body?.cancel().catch(() => {})
 }
 
 export async function validateRemoteUrl(url: URL, lookupAddresses: LookupAddresses = lookupHostname): Promise<void> {
@@ -214,7 +223,7 @@ async function lookupHostname(hostname: string): Promise<string[]> {
 }
 
 function isRedirect(status: number): boolean {
-  return status >= 300 && status < 400
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
 }
 
 function assertAllowedContentType(
