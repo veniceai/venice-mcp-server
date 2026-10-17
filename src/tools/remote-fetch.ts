@@ -171,22 +171,39 @@ async function requestPinnedAddress(url: URL, address: string, signal: AbortSign
 
   return new Promise((resolve, reject) => {
     const req = client.request(options, (res) => {
-      const headers = new Headers()
-      for (const [key, value] of Object.entries(res.headers)) {
-        if (Array.isArray(value)) {
-          for (const item of value) headers.append(key, item)
-        } else if (value !== undefined) {
-          headers.set(key, value)
+      try {
+        const headers = new Headers()
+        for (const [key, value] of Object.entries(res.headers)) {
+          if (Array.isArray(value)) {
+            for (const item of value) headers.append(key, item)
+          } else if (value !== undefined) {
+            headers.set(key, value)
+          }
         }
-      }
 
-      resolve(new Response(Readable.toWeb(res) as unknown as ConstructorParameters<typeof Response>[0], {
-        status: res.statusCode ?? 500,
-        statusText: res.statusMessage,
-        headers,
-      }))
+        const status = res.statusCode ?? 500
+        const nullBody = status === 204 || status === 205 || status === 304
+        const response = new Response(
+          nullBody ? null : Readable.toWeb(res) as unknown as ConstructorParameters<typeof Response>[0],
+          { status, statusText: res.statusMessage, headers },
+        )
+        if (nullBody) {
+          // There is no exposed body to cancel, even if the peer keeps sending bytes.
+          res.destroy()
+          req.destroy()
+        }
+        resolve(response)
+      } catch (err) {
+        // Event callbacks run after the Promise executor: conversion errors must reject explicitly.
+        res.destroy()
+        req.destroy()
+        reject(err)
+      }
     })
-    req.on('error', reject)
+    req.on('error', (err) => {
+      req.destroy()
+      reject(err)
+    })
     req.end()
   })
 }
