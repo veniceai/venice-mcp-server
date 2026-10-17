@@ -1181,7 +1181,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           'Queue-time download_url from venice_video_generate. Must be an https Venice host. Needed for VPS / Grok Imagine Private only when this process did not queue the job (retrieve returns COMPLETED without a URL).',
         ),
         delete_media_on_completion: z.boolean().optional().describe(
-          'Delete server-side media once an embedded MP4 has been buffered. Ignored for download_url results: download first, then call venice_video_complete.',
+          'Delete server-side media after an embedded MP4 has been buffered, before the tool result returns to the client. Ignored for download_url results: download first, then call venice_video_complete.',
         ),
       },
       handler: async (args) => {
@@ -1195,8 +1195,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             execution_duration?: number
           }>('/v1/video/retrieve', {
             ...retrieveArgs,
-            // Defer deletion until the result is safely captured. This keeps an
-            // oversized binary response retryable after increasing the configured limit.
+            // Buffer and validate the MP4 before cleanup, keeping oversized responses retryable.
+            // Requested cleanup then runs before the tool result returns to the client.
             delete_media_on_completion: false,
           }, { maxBytes: cfg.maxVideoResponseBytes })
           const cleanupAfterSuccess = async (successNote: string) => {
@@ -1557,7 +1557,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         queue_id: z.string().min(1),
         model: z.string().min(1),
         delete_media_on_completion: z.boolean().optional().describe(
-          'Delete server-side media once embedded audio has been buffered. Ignored for download_url results: download first, then call venice_music_complete.',
+          'Delete server-side media after embedded audio has been buffered, before the tool result returns to the client. Ignored for download_url results: download first, then call venice_music_complete.',
         ),
       },
       handler: async (args) => {
@@ -1572,8 +1572,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             '/v1/audio/retrieve',
             {
               ...args,
-              // Keep the queued media until a supported response is safely buffered.
-              // This makes an oversized response retryable with a higher limit.
+              // Buffer and validate the audio before cleanup, keeping oversized responses retryable.
+              // Requested cleanup then runs before the tool result returns to the client.
               delete_media_on_completion: false,
             },
             { maxBytes: cfg.maxAudioResponseBytes },
