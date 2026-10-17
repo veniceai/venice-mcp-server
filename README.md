@@ -115,6 +115,8 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 Both routes are currently live without authentication. They only apply to text models advertising `supportsTeeAttestation`. These tools expose evidence; they do not verify it, and this server does not encrypt chat. `venice_chat` rejects `enable_e2ee`.
 
+Chat results retain the upstream completion `id` and actual `model`, when present, in structured content and an additional text block. Pass those values to `venice_tee_signature` to retrieve the signature for that completion. The first text block remains the assistant's reply.
+
 ### Media API behavior
 
 - Image `aspect_ratio` and `resolution` values remain free strings because supported values vary by model. Venice validates them. When `enhance_prompt` is applied, image generate/edit/multi-edit results include the URL-decoded `enhanced_prompt` returned in `x-venice-enhanced-prompt`. Image responses are capped at `VENICE_MAX_IMAGE_RESPONSE_BYTES` (default 32 MiB). Unlike an oversized video, an oversized image result cannot be retried for free, so request fewer variants, a lower resolution, or jpeg/webp output for large batches.
