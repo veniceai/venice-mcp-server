@@ -13,3 +13,7 @@ docker run --rm -p 3333:3333 \
 In Open WebUI: Settings → Tools → Add MCP Server → URL `http://localhost:3333/mcp` and send `Authorization: Bearer <choose-a-long-random-token>` if your client supports custom headers.
 
 The Docker image binds to `0.0.0.0`, so startup requires `VENICE_MCP_AUTH_TOKEN` by default. Do not publish `/mcp` to an untrusted network without that token or an authenticated reverse proxy; callers can invoke tools using the server's Venice credentials.
+
+The default Host allowlist supports `localhost:3333`, `127.0.0.1:3333`, and `[::1]:3333`. For a different hostname, reverse proxy, or mapped port, set `VENICE_MCP_ALLOWED_HOSTS` to the exact authority your client sends. For browser clients that send Origin, set `VENICE_MCP_ALLOWED_ORIGINS` to the exact browser application's origin (scheme, host, and non-default port). Both settings accept comma-separated entries, without wildcards. Native clients may omit Origin. Host/Origin checks run before authentication and body parsing, and forwarded headers do not bypass them.
+
+The Origin allowlist does not enable CORS or browser preflight handling. Use Open WebUI's server-side MCP connection, or a trusted proxy configured for the intended browser origin.
