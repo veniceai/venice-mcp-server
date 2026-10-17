@@ -45,7 +45,7 @@
     "prepublishOnly": "npm run build"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "keywords": [
     "mcp",
@@ -60,15 +60,15 @@
     "cursor"
   ],
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
-    "express": "^4.21.2",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "express": "^4.22.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.2",
-    "tsx": "^4.19.2",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.2",
-    "viem": "^2.48.8"
+    "viem": "^2.57.4"
   }
 }
