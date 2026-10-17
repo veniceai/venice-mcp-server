@@ -1,8 +1,10 @@
 import express from 'express'
-import type { Request, Response } from 'express'
+import type { Request } from 'express'
 import { randomUUID, timingSafeEqual } from 'node:crypto'
+import type { Server } from 'node:http'
 import { isIP } from 'node:net'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { isInitializeRequest, isJSONRPCRequest } from '@modelcontextprotocol/sdk/types.js'
 import { buildServer } from '../server.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
@@ -67,44 +69,151 @@ export function isValidSessionId(sessionId: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)
 }
 
-function closeTransport(transport: StreamableHTTPServerTransport): void {
-  const close = (transport as unknown as { close?: () => void | Promise<void> }).close
-  if (typeof close === 'function') void close.call(transport)
+async function closeTransport(transport: StreamableHTTPServerTransport): Promise<void> {
+  try {
+    await transport.close()
+  } catch {
+    console.error('[venice-mcp] transport cleanup failed')
+  }
+}
+
+function normalizeAuthority(value: string): string | undefined {
+  const authority = value.toLowerCase()
+  const match = /^(\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::([1-9][0-9]{0,4}))?$/.exec(authority)
+  if (!match) return undefined
+  if (!match[1].startsWith('[') && match[1].split('.').some((label) =>
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) return undefined
+  try {
+    const url = new URL(`http://${authority}`)
+    // Reject URL aliases such as shortened/hex IPv4, and require canonical IPv6.
+    if (url.hostname !== match[1]) return undefined
+    return authority
+  } catch {
+    return undefined
+  }
+}
+
+function normalizeOrigin(value: string): string | undefined {
+  try {
+    const url = new URL(value)
+    if (!['http:', 'https:'].includes(url.protocol) || url.origin !== value) return undefined
+    return normalizeAuthority(url.host) ? url.origin : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function parseAllowlist(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  normalize: (value: string) => string | undefined,
+): Set<string> | undefined {
+  const value = env[name]
+  if (value === undefined) return undefined
+  const entries = new Set<string>()
+  for (const entry of value.split(',')) {
+    const normalized = normalize(entry.trim())
+    if (normalized === undefined) {
+      throw new Error(`${name} must contain comma-separated exact ${name.endsWith('HOSTS') ? 'Host authorities' : 'HTTP(S) origins'}; wildcards and empty entries are not allowed.`)
+    }
+    entries.add(normalized)
+  }
+  return entries
+}
+
+function headerCount(req: Request, name: string): number {
+  let count = 0
+  for (let i = 0; i < req.rawHeaders.length; i += 2) {
+    if (req.rawHeaders[i].toLowerCase() === name) count++
+  }
+  return count
 }
 
 /**
  * Run the server over Streamable HTTP for hosted deployments
  * (Smithery, internal Cloud Run, etc.). Sessionful.
  */
-export async function runHttp(opts: { port?: number; host?: string } = {}): Promise<void> {
+export async function runHttp(opts: {
+  port?: number
+  host?: string
+  env?: NodeJS.ProcessEnv
+  serverFactory?: typeof buildServer
+} = {}): Promise<Server> {
+  const env = opts.env ?? process.env
+  const port = opts.port ?? Number(env.PORT ?? 3333)
+  const host = opts.host ?? env.VENICE_MCP_HOST ?? '127.0.0.1'
+  const authToken = env.VENICE_MCP_AUTH_TOKEN
+  validateHttpAuthConfig(host, authToken, env.VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP === '1')
+  const configuredHosts = parseAllowlist(env, 'VENICE_MCP_ALLOWED_HOSTS', normalizeAuthority)
+  const configuredOrigins = parseAllowlist(env, 'VENICE_MCP_ALLOWED_ORIGINS', normalizeOrigin)
+  const serverFactory = opts.serverFactory ?? buildServer
   const app = express()
-  app.use(express.json({ limit: '10mb' }))
+  const parseJson = express.json({ limit: '10mb' })
 
   const sessions = new Map<string, SessionEntry>()
-  const maxSessions = parsePositiveInt(process.env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS)
-  const sessionTtlMs = parsePositiveInt(process.env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS)
+  const maxSessions = parsePositiveInt(env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS)
+  const sessionTtlMs = parsePositiveInt(env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS)
 
   const cleanupExpiredSessions = () => {
     const now = Date.now()
     for (const [sid, entry] of sessions) {
       if (now - entry.lastSeen > sessionTtlMs) {
         sessions.delete(sid)
-        closeTransport(entry.transport)
+        void closeTransport(entry.transport)
       }
     }
   }
 
   app.get('/healthz', (_req, res) => res.json({ ok: true, name: '@veniceai/mcp-server' }))
 
-  app.all('/mcp', async (req, res) => {
-    try {
-      const authToken = process.env.VENICE_MCP_AUTH_TOKEN
-      if (!isAuthorizedBearerHeader(req.header('authorization'), authToken)) {
-        res.setHeader('WWW-Authenticate', 'Bearer')
-        res.status(401).json({ error: 'unauthorized' })
+  app.all('/mcp', (req, res, next) => {
+    // Use the actual listener port (including port=0), never forwarded headers.
+    const localHosts = ['localhost', '127.0.0.1', '[::1]'].map((name) => `${name}:${req.socket.localPort}`)
+    const allowedHosts = configuredHosts ?? new Set([
+      ...localHosts,
+      ...(req.socket.localPort === 80 ? ['localhost', '127.0.0.1', '[::1]'] : []),
+    ])
+    const allowedOrigins = configuredOrigins ?? new Set(localHosts.map((name) => new URL(`http://${name}`).origin))
+    const authority = normalizeAuthority(req.header('host') ?? '')
+    const originHeader = req.header('origin')
+    const origin = originHeader === undefined ? undefined : normalizeOrigin(originHeader)
+    if (headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority) ||
+        headerCount(req, 'origin') > 1 ||
+        (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))) {
+      res.status(403).json({ error: 'forbidden' })
+      return
+    }
+    if (!isAuthorizedBearerHeader(req.header('authorization'), authToken)) {
+      res.setHeader('WWW-Authenticate', 'Bearer')
+      res.status(401).json({ error: 'unauthorized' })
+      return
+    }
+    if (!['POST', 'GET', 'DELETE'].includes(req.method)) {
+      res.setHeader('Allow', 'GET, POST, DELETE')
+      res.status(405).json({ error: 'method not allowed' })
+      return
+    }
+    if (req.method !== 'POST') {
+      next()
+      return
+    }
+    if (!req.is('application/json')) {
+      res.status(415).json({ error: 'content-type must be application/json' })
+      return
+    }
+    parseJson(req, res, (err: { status?: number } | undefined) => {
+      if (err) {
+        const status = err.status === 413 ? 413 : err.status === 415 ? 415 : 400
+        res.status(status).json({ error: status === 413 ? 'request body too large' : 'invalid request body' })
         return
       }
-
+      next()
+    })
+  }, async (req, res) => {
+    let newTransport: StreamableHTTPServerTransport | undefined
+    let newSessionId: string | undefined
+    let keepNewSession = false
+    try {
       cleanupExpiredSessions()
       const sessionHeader = req.header('mcp-session-id')
       let entry = sessionHeader ? sessions.get(sessionHeader) : undefined
@@ -120,51 +229,66 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
       }
 
       if (!entry) {
+        const message = Array.isArray(req.body) && req.body.length === 1 ? req.body[0] : req.body
+        if (req.method !== 'POST' || !isJSONRPCRequest(message) || !isInitializeRequest(message)) {
+          res.status(400).json({ error: 'initialize a new MCP session with a valid initialize request' })
+          return
+        }
         if (sessions.size >= maxSessions) {
           res.status(503).json({ error: 'too many active MCP sessions' })
           return
         }
         const sessionId = randomUUID()
-        const newTransport = new StreamableHTTPServerTransport({
+        newSessionId = sessionId
+        const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => sessionId,
           onsessioninitialized: (sid: string) => {
-            sessions.set(sid, { transport: newTransport, lastSeen: Date.now() })
+            sessions.set(sid, { transport, lastSeen: Date.now() })
           },
           enableJsonResponse: true,
         })
-        newTransport.onclose = () => {
+        newTransport = transport
+        transport.onclose = () => {
           sessions.delete(sessionId)
         }
-        const server = buildServer()
-        await server.connect(newTransport)
-        entry = { transport: newTransport, lastSeen: Date.now() }
+        const server = serverFactory()
+        await server.connect(transport)
+        entry = { transport, lastSeen: Date.now() }
       }
 
       entry.lastSeen = Date.now()
       await entry.transport.handleRequest(req, res, req.body)
+      keepNewSession = res.statusCode < 400 && res.writableEnded &&
+        newSessionId !== undefined && sessions.get(newSessionId)?.transport === newTransport
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error('[venice-mcp] /mcp error', err)
       if (!res.headersSent) {
         res.status(500).json({ error: 'internal' })
       }
+    } finally {
+      if (newTransport && !keepNewSession) {
+        if (newSessionId) sessions.delete(newSessionId)
+        await closeTransport(newTransport)
+      }
     }
   })
 
-  const port = opts.port ?? Number(process.env.PORT ?? 3333)
-  // Default to loopback-only for safety. Opt in to all-interfaces via VENICE_MCP_HOST=0.0.0.0
-  // (useful for Docker containers and intentional LAN exposure).
-  const host = opts.host ?? process.env.VENICE_MCP_HOST ?? '127.0.0.1'
-  validateHttpAuthConfig(host, process.env.VENICE_MCP_AUTH_TOKEN)
+  const listener = app.listen(port, host)
+  listener.once('close', () => {
+    for (const entry of sessions.values()) void closeTransport(entry.transport)
+    sessions.clear()
+  })
   await new Promise<void>((resolve, reject) => {
-    const listener = app.listen(port, host)
     listener.once('listening', () => resolve())
     listener.once('error', reject)
   })
+  const address = listener.address()
   // eslint-disable-next-line no-console
-  console.error(`[venice-mcp] listening on http://${host}:${port}/mcp`)
+  console.error(`[venice-mcp] listening on http://${host}:${typeof address === 'object' && address ? address.port : port}/mcp`)
   if (!isLoopbackHost(host)) {
     // eslint-disable-next-line no-console
     console.error(`[venice-mcp] WARNING: bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`)
   }
+  return listener
 }
