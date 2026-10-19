@@ -76,7 +76,7 @@ describe('finite success body budgets and existing endpoint limits', () => {
             assert.ok(err instanceof VeniceResponseTooLargeError)
             assert.equal(err.maxBytes, 16 * MiB)
             assert.equal(err.headers['x-venice-rpc-credits'], '20')
-            assert.match(err.message, /may have completed upstream and been charged; check its result before retrying/)
+            assert.match(err.message, /If this was a billable request, it may have been charged; check its result before retrying/)
             return true
           })
         })

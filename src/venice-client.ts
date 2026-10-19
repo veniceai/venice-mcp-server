@@ -70,7 +70,7 @@ export class VeniceResponseTooLargeError extends Error {
   ) {
     super(
       `Venice response on ${path} exceeds the configured ${maxBytes}-byte limit. ` +
-        'The request may have completed upstream and been charged; check its result before retrying.',
+        'The request may have completed upstream. If this was a billable request, it may have been charged; check its result before retrying.',
     )
     this.name = 'VeniceResponseTooLargeError'
   }
@@ -176,7 +176,9 @@ export class VeniceClient {
       const successLimit = maxBytes ?? (
         init.responseType === 'event-stream' ? DEFAULT_MAX_EVENT_STREAM_BYTES : DEFAULT_MAX_RESPONSE_BYTES
       )
-      const text = (await readBoundedResponseBuffer(res, path, successLimit)).toString('utf8')
+      const buffer = await readBoundedResponseBuffer(res, path, successLimit)
+      // Preserve Response.text() BOM handling for calls that previously had no explicit cap.
+      const text = maxBytes === undefined ? new TextDecoder().decode(buffer) : buffer.toString('utf8')
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
       init.onResponse?.({ status: res.status, headers: responseHeaders(res) })
       if (init.responseType === 'event-stream') {

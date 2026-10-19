@@ -310,6 +310,9 @@ function safeJson(value: unknown): string {
 }
 
 const BILLING_USAGE_DEFAULT_PAGE_SIZE = 10
+const EMBEDDING_MAX_INPUTS = 128
+const EMBEDDING_BATCH_TOO_LARGE = `Embedding batches are limited to ${EMBEDDING_MAX_INPUTS} texts per call. Split the input into smaller batches; no request was submitted to Venice.`
+
 const BILLING_USAGE_MAX_RESPONSE_BYTES = 64 * 1024
 const BILLING_USAGE_TOO_LARGE =
   'Billing usage page exceeds 64 KiB. No partial records or continuation cursor were returned. ' +
@@ -820,13 +823,17 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_embeddings',
       title: 'Venice Embeddings',
-      description: `Compute embeddings for text input (OpenAI-compatible).${X402_OK}`,
+      description: `Compute embeddings for text input (OpenAI-compatible). Accepts up to ${EMBEDDING_MAX_INPUTS} texts per call; split larger jobs into separate batches. Oversized batches are rejected before submission.${X402_OK}`,
       inputSchema: {
-        input: z.union([z.string(), z.array(z.string())]).describe('Text or array of texts.'),
+        input: z.union([z.string(), z.array(z.string()).max(EMBEDDING_MAX_INPUTS, EMBEDDING_BATCH_TOO_LARGE)])
+          .describe(`Text or array of at most ${EMBEDDING_MAX_INPUTS} texts.`),
         model: z.string().min(1).describe('Embedding model id.'),
         encoding_format: z.enum(['float', 'base64']).optional(),
       },
       handler: async (args) => {
+        if (Array.isArray(args.input) && args.input.length > EMBEDDING_MAX_INPUTS) {
+          return fail(EMBEDDING_BATCH_TOO_LARGE)
+        }
         try {
           const resp = await client.post<{
             data?: Array<{ embedding?: number[] | string; index?: number }>
