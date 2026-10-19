@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { describe, it } from 'node:test'
+import { setTimeout as delay } from 'node:timers/promises'
 import { promisify } from 'node:util'
 import { readBoundedBuffer, ResponseTooLargeError } from '../src/bounded-read.js'
 import { fetchUploadSource } from '../src/tools/remote-fetch.js'
@@ -24,6 +25,7 @@ const requests = [];
 const uploads = [];
 let transports = 0;
 let lookups = 0;
+let bodyError;
 const server = http.createServer((req, res) => {
   if (req.url.startsWith('/v1/')) {
     const chunks = [];
@@ -78,6 +80,7 @@ const server = http.createServer((req, res) => {
     req.socket.write('HTTP/1.1 200 OK\r\nX-Test: a\u0001b\r\nContent-Length: 100\r\n\r\nx');
     return;
   }
+  if (mode === 'transport-timeout') return;
   if (mode.startsWith('redirect-')) {
     const target = {
       'redirect-private': 'http://127.0.0.1/private',
@@ -126,7 +129,12 @@ http.request = (options, callback) => {
   });
   return originalRequest({
     ...options, hostname: '127.0.0.1', port: server.address().port, lookup: undefined,
-  }, callback);
+  }, response => {
+    response.on('error', err => {
+      bodyError = { name: err.name, code: err.code, message: err.message };
+    });
+    callback(response);
+  });
 };
 let result;
 let toolResult;
@@ -146,7 +154,7 @@ try {
     } else {
       result = await fetchUploadSource('http://public-fixture.example/first', {
         label: 'fixture', fallbackContentType: 'image/png', fallbackFilename: 'image.png',
-        timeoutMs: mode === 'timeout' ? 100 : 2000, maxBytes: 10,
+        timeoutMs: mode.endsWith('timeout') ? 100 : 2000, maxBytes: 10,
         lookupAddresses: async hostname => {
           lookups++;
           return hostname === 'private-fixture.example' ? ['10.0.0.1'] : ['93.184.216.34'];
@@ -165,7 +173,7 @@ try {
   ]);
   assert.ok(unfinished.every(item => item.closed));
   console.log(JSON.stringify({
-    error, bytes: result?.buffer.length, toolResult, uploads, requests, transports, lookups,
+    error, bodyError, bytes: result?.buffer.length, body: result?.buffer.toString(), toolResult, uploads, requests, transports, lookups,
     unfinished: unfinished.length, closed: unfinished.filter(item => item.closed).length,
   }));
 } finally {
@@ -178,7 +186,9 @@ try {
 
 interface ProbeResult {
   error?: { name: string; message: string }
+  bodyError?: { name: string; code: string; message: string }
   bytes?: number
+  body?: string
   toolResult?: { isError?: boolean; content: Array<{ type: string; text?: string }> }
   uploads: Array<{
     method: string
@@ -253,6 +263,7 @@ describe('upload HTTP callback and socket lifecycle', () => {
       const result = await runProbe(`redirect-${status}`)
       assert.equal(result.error, undefined)
       assert.equal(result.bytes, 5)
+      assert.equal(result.body, 'image')
       assert.deepEqual(result.requests, ['/first', '/final'])
       assert.equal(result.lookups, 2)
       assert.equal(result.closed, 1)
@@ -268,7 +279,7 @@ describe('upload HTTP callback and socket lifecycle', () => {
     ['redirect-loop', /too many redirects/],
     ['declared-oversize', /larger than 10 bytes/],
     ['stream-oversize', /larger than 10 bytes/],
-    ['timeout', /Timed out fetching fixture after 100ms/],
+    ['transport-timeout', /Timed out fetching fixture after 100ms/],
     ['truncated', /aborted|terminated|closed/i],
     ['invalid-header', /Parse Error/],
   ] as const) {
@@ -278,6 +289,98 @@ describe('upload HTTP callback and socket lifecycle', () => {
       assert.equal(result.bytes, undefined)
       assert.equal(result.transports, mode === 'redirect-loop' ? 6 : 1)
       assert.equal(result.closed, result.transports)
+    })
+  }
+
+  it('normalizes a real body timeout and closes the unfinished socket', async () => {
+    const result = await runProbe('timeout')
+    assert.equal(result.error?.message, 'Timed out fetching fixture after 100ms')
+    assert.deepEqual(result.bodyError, { name: 'Error', code: 'ECONNRESET', message: 'aborted' })
+    assert.equal(result.bytes, undefined)
+    assert.deepEqual(result.requests, ['/first'])
+    assert.equal(result.closed, 1)
+  })
+})
+
+describe('upload timeout error provenance', () => {
+  for (const transport of ['injected', 'pinned'] as const) {
+    it(`normalizes ${transport} transport cancellation after slow public DNS`, async () => {
+      let transports = 0
+      const fetchResponse = async (signal: AbortSignal) => {
+        transports++
+        assert.equal(signal.aborted, true)
+        throw signal.reason
+      }
+      await assert.rejects(fetchUploadSource('http://public-fixture.example/image', {
+        label: 'fixture', fallbackContentType: 'image/png', fallbackFilename: 'image.png', timeoutMs: 10,
+        lookupAddresses: async () => {
+          await delay(60)
+          return ['93.184.216.34']
+        },
+        ...(transport === 'injected' ? {
+          fetchImpl: async (_input, init) => {
+            assert.ok(init?.signal)
+            return fetchResponse(init.signal)
+          },
+        } : { pinnedFetchImpl: async (_url, _address, signal) => fetchResponse(signal) }),
+      }), /Timed out fetching fixture after 10ms/)
+      assert.equal(transports, 1)
+    })
+
+    for (const redirected of [false, true]) {
+      for (const failure of ['private-address', 'dns-error'] as const) {
+        it(`preserves a slow ${failure} with ${transport} fetch${redirected ? ' after a redirect' : ''}`, async () => {
+          const dnsError = Object.assign(new Error('fixture DNS failure'), { code: 'EAI_AGAIN' })
+          let transports = 0
+          let lookups = 0
+          const fetchResponse = async () => {
+            transports++
+            return new Response(null, { status: 302, headers: { location: '/next' } })
+          }
+          await assert.rejects(fetchUploadSource('http://public-fixture.example/image', {
+            label: 'fixture', fallbackContentType: 'image/png', fallbackFilename: 'image.png', timeoutMs: 10,
+            lookupAddresses: async () => {
+              lookups++
+              if (redirected && lookups === 1) return ['93.184.216.34']
+              await delay(60)
+              if (failure === 'dns-error') throw dnsError
+              return ['10.0.0.1']
+            },
+            ...(transport === 'injected' ? { fetchImpl: fetchResponse } : { pinnedFetchImpl: fetchResponse }),
+          }), err => {
+            if (failure === 'dns-error') assert.equal(err, dnsError)
+            else {
+              assert.ok(err instanceof Error)
+              assert.equal(err.message, 'Refusing to fetch private or local address: 10.0.0.1')
+            }
+            return true
+          })
+          assert.equal(transports, redirected ? 1 : 0)
+          assert.equal(lookups, redirected ? 2 : 1)
+        })
+      }
+    }
+  }
+
+  for (const stage of ['transport', 'body'] as const) {
+    it(`preserves an unrelated ${stage} error after the deadline`, async () => {
+      const failure = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
+      await assert.rejects(fetchUploadSource('http://public-fixture.example/image', {
+        label: 'fixture', fallbackContentType: 'image/png', fallbackFilename: 'image.png', timeoutMs: 10,
+        lookupAddresses: async () => ['93.184.216.34'],
+        fetchImpl: async () => {
+          if (stage === 'transport') {
+            await delay(60)
+            throw failure
+          }
+          return new Response(new ReadableStream({
+            async pull(controller) {
+              await delay(60)
+              controller.error(failure)
+            },
+          }))
+        },
+      }), err => err === failure)
     })
   }
 })
