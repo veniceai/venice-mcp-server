@@ -17,6 +17,7 @@ describe('requestWithMetadata UTF-8 compatibility', () => {
   const sse = `data: ${JSON.stringify(json)}\r\n\r\ndata: [DONE]\r\n\r\n`
   const bodies = {
     json: Buffer.from(`\uFEFF${JSON.stringify(json)}`),
+    doubleJson: Buffer.from(`\uFEFF\uFEFF${JSON.stringify(json)}`),
     text: Buffer.from(`\uFEFF${text}`),
     sse: Buffer.from(`\uFEFF${sse}`),
     invalid: Buffer.concat([Buffer.from('\uFEFF{"text":"'), Buffer.from([0xe2, 0x28, 0xa1]), Buffer.from('"}')]),
@@ -56,6 +57,11 @@ describe('requestWithMetadata UTF-8 compatibility', () => {
       assert.equal(response.headers['x-request-id'], 'utf8-fixture')
     })
   }
+
+  it('matches the former fetch decoder for repeated leading BOMs', async () => {
+    const expected = JSON.parse(await new Response(bodies.doubleJson).text())
+    assert.deepEqual(await client.get('/doubleJson?split=1'), expected)
+  })
 
   it('preserves default-budget text decoding and embedded BOM characters', async () => {
     assert.equal(await client.get('/text?split=1'), text)

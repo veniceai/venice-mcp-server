@@ -177,8 +177,8 @@ export class VeniceClient {
         init.responseType === 'event-stream' ? DEFAULT_MAX_EVENT_STREAM_BYTES : DEFAULT_MAX_RESPONSE_BYTES
       )
       const buffer = await readBoundedResponseBuffer(res, path, successLimit)
-      // Preserve Response.text() BOM handling for calls that previously had no explicit cap.
-      const text = maxBytes === undefined ? new TextDecoder().decode(buffer) : buffer.toString('utf8')
+      // Keep the former fetch decoder after enforcing the byte budget.
+      const text = maxBytes === undefined ? await new Response(buffer).text() : buffer.toString('utf8')
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
       init.onResponse?.({ status: res.status, headers: responseHeaders(res) })
       if (init.responseType === 'event-stream') {
