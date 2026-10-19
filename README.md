@@ -115,7 +115,7 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 Both routes are currently live without authentication. They only apply to text models advertising `supportsTeeAttestation`. These tools expose evidence; they do not verify it, and this server does not encrypt chat. `venice_chat` rejects `enable_e2ee`.
 
-Chat results retain the upstream completion `id` and actual `model`, when present, in structured content and an additional text block. Pass those values to `venice_tee_signature` to retrieve the signature for that completion. The first text block remains the assistant's reply.
+Both chat tools retain the upstream completion `id` and actual `model`, when present, in `structuredContent`. Only responses with the upstream `X-Venice-TEE: true` header also include those values in an additional JSON text block for text-only clients. Pass those values to `venice_tee_signature` to retrieve the signature for that completion. Ordinary responses keep their existing answer text without an extra metadata block; the first block and tool-call fallbacks are unchanged. The header is an upstream indication, not cryptographic verification.
 
 ### Media API behavior
 

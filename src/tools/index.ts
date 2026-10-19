@@ -715,7 +715,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. Completion id and actual model, when returned upstream, are available in structured content and an additional JSON text block for venice_tee_signature. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. Completion id and actual model, when returned upstream, are available in structured content. Responses marked X-Venice-TEE: true also include a JSON text block for venice_tee_signature. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -772,7 +772,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             stream: false,
           }
 
-          const resp = await client.post<{
+          const { body: resp, headers } = await client.postWithHeaders<{
             id?: string
             model?: string
             choices?: Array<{ message?: Record<string, unknown> & { content?: string | null } }>
@@ -787,7 +787,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           return ok(
             truncate(text),
             { ...metadata, message, usage: resp.usage },
-            Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
+            headers['x-venice-tee'] === 'true' && Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
           )
         } catch (err) {
           return fail(formatToolError(err))
@@ -2287,7 +2287,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat_with_character',
       title: 'Venice Character Chat',
-      description: `Chat with a Venice character by slug. Completion id and actual model, when returned upstream, are available in structured content and an additional JSON text block for venice_tee_signature. Note: the character lookup itself is API-key-only, but the chat completion supports x402 — so x402 users may need to fetch character info via API key first.${nsfwNote}`,
+      description: `Chat with a Venice character by slug. Completion id and actual model, when returned upstream, are available in structured content. Responses marked X-Venice-TEE: true also include a JSON text block for venice_tee_signature. Note: the character lookup itself is API-key-only, but the chat completion supports x402 — so x402 users may need to fetch character info via API key first.${nsfwNote}`,
       inputSchema: {
         character_slug: z.string().min(1),
         messages: z
@@ -2299,7 +2299,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
-          const resp = await client.post<{
+          const { body: resp, headers } = await client.postWithHeaders<{
             id?: string
             model?: string
             choices?: Array<{ message?: { content?: string } }>
@@ -2320,7 +2320,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           return ok(
             truncate(text),
             { ...metadata, usage: resp.usage },
-            Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
+            headers['x-venice-tee'] === 'true' && Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
           )
         } catch (err) {
           return fail(formatToolError(err))

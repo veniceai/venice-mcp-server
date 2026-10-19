@@ -9,6 +9,7 @@ import { StubClient } from './helpers/stub-client.js'
 const cfg = loadConfig({ VENICE_DEFAULT_CHAT_MODEL: 'configured-model-alias' })
 const messages = [{ role: 'user', content: 'Hello' }]
 const chatTools = ['venice_chat', 'venice_chat_with_character'] as const
+const teeHeaders = { '/v1/chat/completions': { 'x-venice-tee': 'true' } }
 
 function caller(stub: StubClient) {
   const tools = buildTools(stub.asClient(), cfg)
@@ -46,7 +47,7 @@ describe('chat completion metadata', () => {
               assert.equal(call.auth, 'none')
               return { signature: 'mock-signature', request_id: params.get('request_id') }
             },
-          })
+          }, teeHeaders)
           const call = caller(stub)
           const result = await call(name, { messages, character_slug: 'test-character', model })
           assert.equal(result.isError, undefined)
@@ -80,38 +81,58 @@ describe('chat completion metadata', () => {
       }
     }
 
-    it(`${name}: metadata survives text truncation without changing the first block`, async () => {
-      const metadata = { id: `chatcmpl-${randomUUID()}`, model: 'actual-model' }
-      const message = { role: 'assistant', content: 'x'.repeat(9000) }
+    it(`${name}: does not infer TEE from model names or the response body`, async () => {
+      const metadata = { id: 'upstream-id', model: 'e2ee-tee-model' }
+      const message = { role: 'assistant', content: 'An ordinary reply.' }
       const call = caller(new StubClient({
-        '/v1/chat/completions': () => ({ ...metadata, choices: [{ message }] }),
+        '/v1/chat/completions': () => ({
+          ...metadata,
+          choices: [{ message }],
+          tee: true,
+          headers: { 'X-Venice-TEE': 'true' },
+        }),
       }))
-      const result = await call(name, { messages, character_slug: 'test-character' })
-      assert.equal(textAt(result), `${'x'.repeat(8000)}\n…[truncated 1000 chars]`)
-      assert.deepEqual(JSON.parse(textAt(result, 1)), metadata)
+      const result = await call(name, { messages, character_slug: 'test-character', model: 'e2ee-tee-model' })
+      assert.deepEqual(result.content, [{ type: 'text', text: message.content }])
       assert.equal(result.structuredContent?.id, metadata.id)
       assert.equal(result.structuredContent?.model, metadata.model)
-      if (name === 'venice_chat') assert.deepEqual(result.structuredContent?.message, message)
     })
 
-    for (const metadata of [{}, { id: 'upstream-id-only' }, { model: 'upstream-model-only' }]) {
-      it(`${name}: does not fabricate missing metadata when upstream returns ${JSON.stringify(metadata)}`, async () => {
+    for (const tee of [false, true]) {
+      it(`${name}: metadata survives text truncation without changing the first block (TEE=${tee})`, async () => {
+        const metadata = { id: `chatcmpl-${randomUUID()}`, model: 'actual-model' }
+        const message = { role: 'assistant', content: 'x'.repeat(9000) }
         const call = caller(new StubClient({
-          '/v1/chat/completions': () => ({ ...metadata, choices: [{ message: { content: '' } }] }),
-        }))
-        const result = await call(name, { messages, character_slug: 'test-character', model: 'requested-alias' })
-        assert.equal(result.isError, undefined)
-        assert.equal(textAt(result), '')
-        for (const key of ['id', 'model']) {
-          assert.equal(Object.hasOwn(result.structuredContent!, key), Object.hasOwn(metadata, key))
-        }
-        if (Object.keys(metadata).length > 0) {
-          assert.deepEqual(JSON.parse(textAt(result, 1)), metadata)
-          assert.equal(result.content.length, 2)
-        } else {
-          assert.equal(result.content.length, 1)
-        }
+          '/v1/chat/completions': () => ({ ...metadata, choices: [{ message }] }),
+        }, tee ? teeHeaders : {}))
+        const result = await call(name, { messages, character_slug: 'test-character' })
+        assert.equal(textAt(result), `${'x'.repeat(8000)}\n…[truncated 1000 chars]`)
+        assert.equal(result.content.length, tee ? 2 : 1)
+        if (tee) assert.deepEqual(JSON.parse(textAt(result, 1)), metadata)
+        assert.equal(result.structuredContent?.id, metadata.id)
+        assert.equal(result.structuredContent?.model, metadata.model)
+        if (name === 'venice_chat') assert.deepEqual(result.structuredContent?.message, message)
       })
+
+      for (const metadata of [{}, { id: 'upstream-id-only' }, { model: 'upstream-model-only' }]) {
+        it(`${name}: does not fabricate missing metadata when upstream returns ${JSON.stringify(metadata)} (TEE=${tee})`, async () => {
+          const call = caller(new StubClient({
+            '/v1/chat/completions': () => ({ ...metadata, choices: [{ message: { content: '' } }] }),
+          }, tee ? teeHeaders : {}))
+          const result = await call(name, { messages, character_slug: 'test-character', model: 'requested-alias' })
+          assert.equal(result.isError, undefined)
+          assert.equal(textAt(result), '')
+          for (const key of ['id', 'model']) {
+            assert.equal(Object.hasOwn(result.structuredContent!, key), Object.hasOwn(metadata, key))
+          }
+          if (tee && Object.keys(metadata).length > 0) {
+            assert.deepEqual(JSON.parse(textAt(result, 1)), metadata)
+            assert.equal(result.content.length, 2)
+          } else {
+            assert.equal(result.content.length, 1)
+          }
+        })
+      }
     }
 
     it(`${name}: leaves upstream failures as errors without completion metadata`, async () => {
@@ -126,36 +147,42 @@ describe('chat completion metadata', () => {
     })
   }
 
-  it('preserves tool-call JSON and thought signatures in the first chat block', async () => {
-    const metadata = { id: `chatcmpl-${randomUUID()}`, model: 'actual-model' }
-    const message = {
-      role: 'assistant',
-      content: null,
-      tool_calls: [{
-        id: 'call_lookup',
-        type: 'function',
-        thought_signature: 'mock-thought-signature+/=',
-        function: { name: 'lookup', arguments: '{}' },
-      }],
-    }
-    const call = caller(new StubClient({
-      '/v1/chat/completions': () => ({ ...metadata, choices: [{ message }] }),
-    }))
-    const result = await call('venice_chat', { messages })
-    assert.equal(textAt(result), JSON.stringify(message, null, 2))
-    assert.deepEqual(result.structuredContent?.message, message)
-    assert.deepEqual(JSON.parse(textAt(result, 1)), metadata)
-  })
+  for (const tee of [false, true]) {
+    it(`preserves tool-call JSON and thought signatures in the first chat block (TEE=${tee})`, async () => {
+      const metadata = { id: `chatcmpl-${randomUUID()}`, model: 'actual-model' }
+      const message = {
+        role: 'assistant',
+        content: null,
+        tool_calls: [{
+          id: 'call_lookup',
+          type: 'function',
+          thought_signature: 'mock-thought-signature+/=',
+          function: { name: 'lookup', arguments: '{}' },
+        }],
+      }
+      const call = caller(new StubClient({
+        '/v1/chat/completions': () => ({ ...metadata, choices: [{ message }] }),
+      }, tee ? teeHeaders : {}))
+      const result = await call('venice_chat', { messages })
+      assert.equal(textAt(result), JSON.stringify(message, null, 2))
+      assert.deepEqual(result.structuredContent?.message, message)
+      assert.equal(result.content.length, tee ? 2 : 1)
+      if (tee) assert.deepEqual(JSON.parse(textAt(result, 1)), metadata)
+    })
 
-  it('preserves each chat tool\'s first-block fallback when the completion has no message', async () => {
-    const response = { id: `chatcmpl-${randomUUID()}`, model: 'actual-model', choices: [] }
-    const call = caller(new StubClient({ '/v1/chat/completions': () => response }))
-    const chat = await call('venice_chat', { messages })
-    const character = await call('venice_chat_with_character', { messages, character_slug: 'test-character' })
-    assert.equal(textAt(chat), JSON.stringify(response, null, 2))
-    assert.equal(textAt(character), '')
-    for (const result of [chat, character]) {
-      assert.deepEqual(JSON.parse(textAt(result, 1)), { id: response.id, model: response.model })
-    }
-  })
+    it(`preserves each chat tool's first-block fallback when the completion has no message (TEE=${tee})`, async () => {
+      const response = { id: `chatcmpl-${randomUUID()}`, model: 'actual-model', choices: [] }
+      const call = caller(new StubClient({ '/v1/chat/completions': () => response }, tee ? teeHeaders : {}))
+      const chat = await call('venice_chat', { messages })
+      const character = await call('venice_chat_with_character', { messages, character_slug: 'test-character' })
+      assert.equal(textAt(chat), JSON.stringify(response, null, 2))
+      assert.equal(textAt(character), '')
+      for (const result of [chat, character]) {
+        assert.equal(result.structuredContent?.id, response.id)
+        assert.equal(result.structuredContent?.model, response.model)
+        assert.equal(result.content.length, tee ? 2 : 1)
+        if (tee) assert.deepEqual(JSON.parse(textAt(result, 1)), { id: response.id, model: response.model })
+      }
+    })
+  }
 })
