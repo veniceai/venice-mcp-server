@@ -215,7 +215,7 @@ async function lookupHostname(hostname: string): Promise<string[]> {
 }
 
 function isRedirect(status: number): boolean {
-  return status >= 300 && status < 400
+  return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
 }
 
 function assertAllowedContentType(

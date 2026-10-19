@@ -93,8 +93,8 @@ const server = http.createServer((req, res) => {
   const headers = { 'content-type': tool?.contentType ?? 'image/png' };
   if (mode === 'declared-oversize') headers['content-length'] = '999999';
   if (mode === 'truncated') headers['content-length'] = '10';
-  // Callback-only 304 coverage does not require the later redirect-classification fix.
-  if (status >= 300 && status < 400 && status !== 304) headers.location = '/final';
+  // A Location on a non-redirect must never be followed, including 304.
+  if (status >= 300 && status < 400) headers.location = '/final';
   res.writeHead(status, headers);
   res.flushHeaders();
   if (mode === 'stream-oversize') res.write('01234567890');
@@ -229,11 +229,11 @@ describe('upload HTTP callback errors', () => {
     })
   }
 
-  it('handles a null-body 304 without crashing the production callback', async () => {
+  it('rejects a null-body 304 without crashing or following its Location', async () => {
     const result = await runProbe('304')
-    // Redirect classification is unchanged in this commit; construction must still be safe.
     assert.equal(result.error?.name, 'Error')
-    assert.match(result.error?.message ?? '', /redirect missing Location/)
+    assert.match(result.error?.message ?? '', /HTTP 304/)
+    assert.deepEqual(result.requests, ['/first'])
     assert.equal(result.transports, 1)
     assert.equal(result.closed, 1)
   })
