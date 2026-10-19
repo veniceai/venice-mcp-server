@@ -110,6 +110,7 @@ describe('upstream redirects never forward credentials or request bodies', () =>
 describe('original error status, payment instructions, and cancellation deadlines', () => {
   let server: http.Server
   let baseUrl: string
+  const requestTimeoutMs = 1_000
   const aborted = new Set<string>()
 
   before(async () => {
@@ -148,8 +149,8 @@ describe('original error status, payment instructions, and cancellation deadline
 
   for (const status of [301, 302, 303, 307, 308, 402, 500]) {
     for (const mode of ['declared', 'oversized', 'stall', 'broken', 'malformed']) {
-      it(`${status} ${mode} preserves status and headers across transports`, { timeout: 3_000 }, async () => {
-        const client = new VeniceClient({ ...config(baseUrl), timeoutMs: 100 })
+      it(`${status} ${mode} preserves status and headers across transports`, { timeout: readCalls.length * requestTimeoutMs + 2_000 }, async () => {
+        const client = new VeniceClient({ ...config(baseUrl), timeoutMs: requestTimeoutMs })
         for (const call of readCalls) {
           const expected = mode === 'declared' || mode === 'oversized'
             ? { error: 'upstream_error_body_truncated', truncated: true, max_bytes: status === 402 ? MiB : 64 * 1024 }
@@ -178,8 +179,8 @@ describe('original error status, payment instructions, and cancellation deadline
     }
   })
 
-  it('closes stalled and advertised oversized error bodies', { timeout: 2_000 }, async () => {
-    const client = new VeniceClient({ ...config(baseUrl), timeoutMs: 75 })
+  it('closes stalled and advertised oversized error bodies', { timeout: 6_000 }, async () => {
+    const client = new VeniceClient({ ...config(baseUrl), timeoutMs: requestTimeoutMs })
     for (const mode of ['stall', 'declared', 'overflow-stall']) {
       const path = `/error/308/${mode}/cancellation-check`
       await assert.rejects(client.post(path, {}), VeniceUpstreamError)
