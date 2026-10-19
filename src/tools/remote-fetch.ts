@@ -62,6 +62,7 @@ export async function fetchUploadSource(url: string, opts: FetchUploadSourceOpti
     const headerContentType = res.headers.get('content-type')
     const contentType = headerContentType ?? opts.fallbackContentType
     const buffer = await readBoundedBuffer(res, maxBytes, opts.label)
+    if (buffer.length === 0) throw new Error(`Could not fetch ${opts.label}: empty response body`)
     assertAllowedContentType(contentType, opts.allowedContentTypes, opts.label, buffer, headerContentType === null)
 
     return {

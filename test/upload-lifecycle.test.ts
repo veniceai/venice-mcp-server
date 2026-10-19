@@ -12,16 +12,43 @@ const probe = String.raw`
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
-const [mode, sourceUrl] = process.argv.slice(1);
+const [mode, sourceUrl, toolJson] = process.argv.slice(1);
+const tool = JSON.parse(toolJson);
 const { fetchUploadSource } = await import(sourceUrl);
+const sourceHostname = tool ? '93.184.216.34' : 'public-fixture.example';
 const sockets = new Set();
 const unfinished = [];
 const requests = [];
+const uploads = [];
 let transports = 0;
 let lookups = 0;
 const server = http.createServer((req, res) => {
+  if (req.url.startsWith('/v1/')) {
+    const chunks = [];
+    req.on('data', chunk => chunks.push(chunk));
+    req.on('end', async () => {
+      const form = await new Response(Buffer.concat(chunks), {
+        headers: { 'content-type': req.headers['content-type'] },
+      }).formData();
+      const files = [];
+      for (const [field, value] of form) {
+        if (typeof value !== 'string') {
+          files.push({ field, name: value.name, type: value.type, text: await value.text() });
+        }
+      }
+      uploads.push({ method: req.method, path: req.url, files });
+      if (req.url === '/v1/image/upscale') {
+        res.writeHead(200, { 'content-type': 'image/png' });
+        res.end('image');
+      } else {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ text: 'fixture result' }));
+      }
+    });
+    return;
+  }
   requests.push(req.url);
-  assert.equal(req.headers.host, 'public-fixture.example');
+  assert.equal(req.headers.host, sourceHostname);
   if (req.url === '/final') {
     // The final response cannot finish until redirect cleanup closes the old
     // connection. A final-only abort would time out instead of passing this test.
@@ -31,11 +58,16 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  // Deliberately never call end() for these responses. Record close events now,
-  // and assert them before teardown can destroy any fixture-side sockets.
+  // Record close events before teardown can destroy fixture-side sockets.
+  // Only the 200 cases below end their responses; the others stay unfinished.
   const pending = { closed: false, closedPromise: once(req.socket, 'close') };
   req.socket.once('close', () => { pending.closed = true; });
   unfinished.push(pending);
+  if (mode === 'empty-200' || mode === 'nonempty-200') {
+    res.writeHead(200, { 'content-type': tool.contentType, connection: 'close' });
+    res.end(mode === 'empty-200' ? '' : 'fixture input');
+    return;
+  }
   if (mode === '700') {
     req.socket.write('HTTP/1.1 700 Odd\r\nContent-Type: image/png\r\nContent-Length: 100\r\n\r\nx');
     return;
@@ -58,7 +90,7 @@ const server = http.createServer((req, res) => {
     return;
   }
   const status = Number(mode) || 200;
-  const headers = { 'content-type': 'image/png' };
+  const headers = { 'content-type': tool?.contentType ?? 'image/png' };
   if (mode === 'declared-oversize') headers['content-length'] = '999999';
   if (mode === 'truncated') headers['content-length'] = '10';
   // Callback-only 304 coverage does not require the later redirect-classification fix.
@@ -78,7 +110,7 @@ await once(server, 'listening');
 const originalRequest = http.request.bind(http);
 http.request = (options, callback) => {
   transports++;
-  assert.equal(options.hostname, 'public-fixture.example');
+  assert.equal(options.hostname, sourceHostname);
   // Exercise the production pinned lookup in both Node callback shapes. Only
   // after validation do we remap the socket destination to the local fixture.
   options.lookup(options.hostname, { all: true }, (err, records) => {
@@ -95,18 +127,30 @@ http.request = (options, callback) => {
   }, callback);
 };
 let result;
+let toolResult;
 let error;
 let closeDeadline;
 try {
   try {
-    result = await fetchUploadSource('http://public-fixture.example/first', {
-      label: 'fixture', fallbackContentType: 'image/png', fallbackFilename: 'image.png',
-      timeoutMs: mode === 'timeout' ? 100 : 2000, maxBytes: 10,
-      lookupAddresses: async hostname => {
-        lookups++;
-        return hostname === 'private-fixture.example' ? ['10.0.0.1'] : ['93.184.216.34'];
-      },
-    });
+    if (tool) {
+      const { buildTools } = await import(new URL('./index.ts', sourceUrl));
+      const { loadConfig } = await import(new URL('../config.ts', sourceUrl));
+      const { VeniceClient } = await import(new URL('../venice-client.ts', sourceUrl));
+      const cfg = { ...loadConfig({}), baseUrl: 'http://127.0.0.1:' + server.address().port, timeoutMs: 2000 };
+      const handler = buildTools(new VeniceClient(cfg), cfg).find(item => item.name === tool.name).handler;
+      toolResult = await handler({
+        ...tool.args, [tool.label]: 'http://' + sourceHostname + '/' + tool.filename,
+      });
+    } else {
+      result = await fetchUploadSource('http://public-fixture.example/first', {
+        label: 'fixture', fallbackContentType: 'image/png', fallbackFilename: 'image.png',
+        timeoutMs: mode === 'timeout' ? 100 : 2000, maxBytes: 10,
+        lookupAddresses: async hostname => {
+          lookups++;
+          return hostname === 'private-fixture.example' ? ['10.0.0.1'] : ['93.184.216.34'];
+        },
+      });
+    }
   } catch (err) {
     error = { name: err.name, message: err.message };
   }
@@ -119,7 +163,7 @@ try {
   ]);
   assert.ok(unfinished.every(item => item.closed));
   console.log(JSON.stringify({
-    error, bytes: result?.buffer.length, requests, transports, lookups,
+    error, bytes: result?.buffer.length, toolResult, uploads, requests, transports, lookups,
     unfinished: unfinished.length, closed: unfinished.filter(item => item.closed).length,
   }));
 } finally {
@@ -133,6 +177,12 @@ try {
 interface ProbeResult {
   error?: { name: string; message: string }
   bytes?: number
+  toolResult?: { isError?: boolean; content: Array<{ type: string; text?: string }> }
+  uploads: Array<{
+    method: string
+    path: string
+    files: Array<{ field: string; name: string; type: string; text: string }>
+  }>
   requests: string[]
   transports: number
   lookups: number
@@ -140,9 +190,28 @@ interface ProbeResult {
   closed: number
 }
 
-async function runProbe(mode: string): Promise<ProbeResult> {
+const uploadTools = [
+  {
+    name: 'venice_image_upscale', label: 'image_url', contentType: 'image/png', filename: 'image.png',
+    path: '/v1/image/upscale', field: 'image', args: {},
+  },
+  {
+    name: 'venice_asr', label: 'audio_url', contentType: 'audio/wav', filename: 'audio.wav',
+    path: '/v1/audio/transcriptions', field: 'file', args: {},
+  },
+  {
+    name: 'venice_voice_clone', label: 'sample_url', contentType: 'audio/mpeg', filename: 'sample.mp3',
+    path: '/v1/audio/voices', field: 'file', args: { action: 'create' },
+  },
+  {
+    name: 'venice_text_parser', label: 'url', contentType: 'application/pdf', filename: 'document.pdf',
+    path: '/v1/augment/text-parser', field: 'file', args: {},
+  },
+]
+
+async function runProbe(mode: string, tool?: typeof uploadTools[number]): Promise<ProbeResult> {
   const { stdout, stderr } = await execFileAsync(process.execPath, [
-    '--import', 'tsx', '--input-type=module', '-e', probe, mode, sourceUrl,
+    '--import', 'tsx', '--input-type=module', '-e', probe, mode, sourceUrl, JSON.stringify(tool ?? null),
   ], { cwd: new URL('..', import.meta.url), timeout: 5000 })
   assert.equal(stderr, '')
   const result: ProbeResult = JSON.parse(stdout)
@@ -152,10 +221,10 @@ async function runProbe(mode: string): Promise<ProbeResult> {
 
 describe('upload HTTP callback errors', () => {
   for (const status of [204, 205]) {
-    it(`handles ${status} with a null body and closes the unfinished socket`, async () => {
+    it(`rejects empty ${status} and closes the unfinished socket without crashing`, async () => {
       const result = await runProbe(String(status))
-      assert.equal(result.error, undefined)
-      assert.equal(result.bytes, 0)
+      assert.deepEqual(result.error, { name: 'Error', message: 'Could not fetch fixture: empty response body' })
+      assert.equal(result.bytes, undefined)
       assert.equal(result.closed, 1)
     })
   }
@@ -183,4 +252,37 @@ describe('upload HTTP callback errors', () => {
     assert.equal(result.transports, 1)
     assert.equal(result.closed, result.transports)
   })
+})
+
+describe('upload tool input validation', () => {
+  for (const tool of uploadTools) {
+    for (const mode of ['empty-200', '204', '205']) {
+      it(`${tool.name} rejects ${mode} with compatible MIME before uploading`, async () => {
+        const result = await runProbe(mode, tool)
+        assert.equal(result.error, undefined)
+        assert.ok(result.toolResult)
+        assert.equal(result.toolResult.isError, true)
+        assert.deepEqual(result.toolResult.content, [
+          { type: 'text', text: `Error: Could not fetch ${tool.label}: empty response body` },
+        ])
+        assert.deepEqual(result.uploads, [])
+        assert.deepEqual(result.requests, [`/${tool.filename}`])
+        assert.equal(result.transports, 1)
+        assert.equal(result.closed, 1)
+      })
+    }
+
+    it(`${tool.name} still uploads a nonempty 200 body`, async () => {
+      const result = await runProbe('nonempty-200', tool)
+      assert.equal(result.error, undefined)
+      assert.ok(result.toolResult)
+      assert.notEqual(result.toolResult.isError, true)
+      assert.deepEqual(result.uploads, [{
+        method: 'POST', path: tool.path,
+        files: [{ field: tool.field, name: tool.filename, type: tool.contentType, text: 'fixture input' }],
+      }])
+      assert.equal(result.transports, 1)
+      assert.equal(result.closed, 1)
+    })
+  }
 })
