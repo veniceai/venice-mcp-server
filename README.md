@@ -7,7 +7,7 @@
 
 Plug Venice's chat, image, video, audio, music, and character models into any agent in 30 seconds, including billing and API-key operations. **45 tools across all modalities, one config block.**
 
-Requires Node.js 20 or newer; Node.js 22 or 24 is recommended. The refreshed MCP SDK dependency graph requires Node.js 20 for fresh installs, so upgrade Node.js before installing this version if you previously used Node.js 18.
+Requires Node.js 20 or newer; Node.js 22 or 24 is recommended. CI tests Node.js 20, 22, and 24. The refreshed MCP SDK dependency graph requires Node.js 20 for fresh installs, so upgrade Node.js before installing this version if you previously used Node.js 18.
 
 ## Quick start
 
