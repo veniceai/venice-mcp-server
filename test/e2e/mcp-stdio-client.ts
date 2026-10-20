@@ -24,7 +24,7 @@ export function spawnMcp(auth: McpAuth, env: NodeJS.ProcessEnv = {}): McpClient 
 
   // Keep runtime settings, but never let inherited or overridden credentials
   // silently change the auth mode being tested. API keys take precedence upstream.
-  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, NODE_ENV: 'test' }
+  const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, NODE_ENV: 'test', VENICE_MCP_HTTP: '0' }
   delete childEnv.VENICE_API_KEY
   delete childEnv.VENICE_SIWX_TOKEN
   childEnv[auth.mode === 'apikey' ? 'VENICE_API_KEY' : 'VENICE_SIWX_TOKEN'] = credential
