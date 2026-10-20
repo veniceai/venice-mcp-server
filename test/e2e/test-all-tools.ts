@@ -17,7 +17,7 @@
  *   - QUEUE_POLL: queue-based jobs (image, video, music) — kicked off + status checked once
  *   - SKIP:       tools that need real-world setup we can't fake (voice clone, x402 cleanup)
  */
-import { spawnMcp, McpClient } from './mcp-stdio-client.js'
+import { spawnMcp, type McpAuth } from './mcp-stdio-client.js'
 import { loadOrCreateWallet, buildSiwxHeader } from './wallet-helper.js'
 
 const VENICE_API = process.env.VENICE_API_URL || 'https://api.venice.ai'
@@ -395,15 +395,16 @@ async function runMode(mode: 'apikey' | 'x402', walletAddr: string): Promise<Too
     VENICE_TEST_BASE_URL: BASE_URL,
     VENICE_LOG_LEVEL: 'error',
   }
+  let auth: McpAuth
   if (mode === 'apikey') {
     if (!process.env.VENICE_API_KEY) throw new Error('VENICE_API_KEY not set')
-    env.VENICE_API_KEY = process.env.VENICE_API_KEY
+    auth = { mode, apiKey: process.env.VENICE_API_KEY }
   } else {
     const wallet = loadOrCreateWallet()
-    env.VENICE_SIWX_TOKEN = await buildSiwxHeader(wallet)
+    auth = { mode, siwxToken: await buildSiwxHeader(wallet) }
   }
 
-  const mcp = spawnMcp(env)
+  const mcp = spawnMcp(auth, env)
   const results: ToolResult[] = []
   let videoQueueId: string | null = null
   let videoQueueModel: string | null = null
