@@ -38,7 +38,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 **45 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer). The voices resource is built live from each TTS model's catalog metadata.
 
-Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` annotations, so hosts can run lookups without prompting and ask before anything destructive, like media cleanup or a crypto relay.
+Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` annotations to help hosts decide when to request approval. Video and music status tools are marked destructive because their optional `delete_media_on_completion` argument can delete stored media before returning the result. Hints describe a tool's possible behavior; hosts should still enforce their own approval policy.
 
 ### 💬 Chat & embeddings
 
