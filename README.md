@@ -468,9 +468,9 @@ If the key is missing or blank, the server falls back to x402 mode and returns a
 
 ---
 
-## Disclaimer
+## Support
 
-Community-maintained. Provided **as-is**, with no warranty or SLA from Venice AI. Use at your own risk.
+Maintained by Venice AI. Report bugs and request features in [GitHub issues](https://github.com/veniceai/venice-mcp-server/issues). For account or billing help, email support@venice.ai.
 
 ## License
 
