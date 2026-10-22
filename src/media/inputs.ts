@@ -31,6 +31,8 @@ const EXTENSION_MIME: Record<string, string> = {
 export interface LocalInputOptions {
   maxBytes: number
   label: string
+  /** When false, local paths are rejected instead of read. */
+  allowLocal?: boolean
 }
 
 /** Returns the filesystem path if `value` refers to a local file, else undefined. */
@@ -60,6 +62,9 @@ export async function readLocalUploadSource(
 ): Promise<LocalUploadSource | undefined> {
   const path = localPathFromInput(value)
   if (!path) return undefined
+  if (opts.allowLocal === false) {
+    throw new Error(`${opts.label}: local file paths are only accepted when the server runs over stdio. Pass a public URL or a data: URL.`)
+  }
   const info = await stat(path).catch(() => undefined)
   if (!info?.isFile()) {
     throw new Error(`${opts.label}: local file not found: ${path}`)

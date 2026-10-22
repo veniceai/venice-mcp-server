@@ -6,6 +6,7 @@ import { isIP } from 'node:net'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { isInitializeRequest, isJSONRPCRequest } from '@modelcontextprotocol/sdk/types.js'
 import { buildServer } from '../server.js'
+import { loadConfig, remoteTransportConfig } from '../config.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
@@ -168,6 +169,10 @@ export async function runHttp(opts: {
   serverFactory?: typeof buildServer
 } = {}): Promise<Server> {
   const env = opts.env ?? process.env
+  if (env.VENICE_MEDIA_DIR?.trim()) {
+    // eslint-disable-next-line no-console
+    console.error('[venice-mcp] VENICE_MEDIA_DIR is ignored in HTTP mode; media is returned inline.')
+  }
   const port = opts.port ?? Number(env.PORT ?? 3333)
   const host = opts.host ?? env.VENICE_MCP_HOST ?? '127.0.0.1'
   const authToken = env.VENICE_MCP_AUTH_TOKEN
@@ -302,7 +307,7 @@ export async function runHttp(opts: {
         transport.onclose = () => {
           sessions.delete(sessionId)
         }
-        const server = serverFactory()
+        const server = serverFactory({ config: remoteTransportConfig(loadConfig(env)) })
         await server.connect(transport)
         entry = { transport, lastSeen: Date.now() }
       }
