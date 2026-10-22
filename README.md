@@ -178,7 +178,7 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 | `VENICE_DEFAULT_IMAGE_MODEL` | `flux-2-pro` | |
 | `VENICE_DEFAULT_TTS_MODEL` | `tts-kokoro` | |
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |
-| `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions and hide the uncensored research and NSFW creative writing prompt templates. |
+| `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions, hide the uncensored research and NSFW creative writing prompt templates, and drop "uncensored" from the server instructions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
 | `VENICE_MAX_VIDEO_RESPONSE_BYTES` | `26214400` (25 MiB) | Maximum completed MP4 bytes buffered and base64-embedded by `venice_video_status`. |
 | `VENICE_MAX_IMAGE_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum response bytes buffered by `venice_image_generate`, `venice_image_edit`, `venice_image_multi_edit`, `venice_image_upscale`, and `venice_image_remove_bg`. Larger results are discarded with an error. |
