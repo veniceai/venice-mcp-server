@@ -3,11 +3,14 @@
  * can offer as quick-launch entry points.
  */
 import { z } from 'zod'
+import type { Config } from './config.js'
 
 export interface PromptDef<S extends z.ZodRawShape = z.ZodRawShape> {
   name: string
   title: string
   description: string
+  /** Hidden when NSFW capability advertising is off (VENICE_DISABLE_NSFW=1). */
+  nsfw?: boolean
   argsSchema: S
   build: (args: z.infer<z.ZodObject<S>>) => {
     messages: Array<{
@@ -17,12 +20,13 @@ export interface PromptDef<S extends z.ZodRawShape = z.ZodRawShape> {
   }
 }
 
-export function buildPrompts(): PromptDef[] {
-  return [
+export function buildPrompts(cfg: Pick<Config, 'enableNsfw'>): PromptDef[] {
+  const prompts: PromptDef[] = [
     {
       name: 'uncensored-research',
       title: 'Uncensored research',
       description: 'Set up a research session free of nanny refusals (security, medical, legal, journalism).',
+      nsfw: true,
       argsSchema: {
         topic: z.string().describe('What you want researched.'),
         domain: z
@@ -48,6 +52,7 @@ export function buildPrompts(): PromptDef[] {
       name: 'nsfw-creative-writing',
       title: 'NSFW creative writing',
       description: 'Adult fiction / mature creative writing scaffold.',
+      nsfw: true,
       argsSchema: {
         scenario: z.string().describe('Scene or premise.'),
         style: z.string().optional().describe('e.g. "noir", "fantasy", "literary".'),
@@ -97,4 +102,5 @@ export function buildPrompts(): PromptDef[] {
       },
     },
   ]
+  return cfg.enableNsfw ? prompts : prompts.filter((prompt) => !prompt.nsfw)
 }

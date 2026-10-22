@@ -30,4 +30,19 @@ describe('server discovery', () => {
       /See https:\/\/docs\.venice\.ai\/guides\/integrations\/venice-mcp for full reference\./,
     )
   })
+
+  it('offers every prompt template by default', async (t) => {
+    const client = await connect(t)
+    const { prompts } = await client.listPrompts()
+    assert.deepEqual(
+      prompts.map((prompt) => prompt.name),
+      ['uncensored-research', 'nsfw-creative-writing', 'image-style-explorer'],
+    )
+  })
+
+  it('hides the NSFW prompt templates when VENICE_DISABLE_NSFW=1', async (t) => {
+    const client = await connect(t, { VENICE_DISABLE_NSFW: '1' })
+    const { prompts } = await client.listPrompts()
+    assert.deepEqual(prompts.map((prompt) => prompt.name), ['image-style-explorer'])
+  })
 })
