@@ -78,6 +78,8 @@ function closeTransport(transport: StreamableHTTPServerTransport): void {
  * (Smithery, internal Cloud Run, etc.). Sessionful.
  */
 export async function runHttp(opts: { port?: number; host?: string } = {}): Promise<void> {
+  // Parse once so an invalid setting fails at startup instead of on every session.
+  const config = remoteTransportConfig(loadConfig())
   if (process.env.VENICE_MEDIA_DIR?.trim()) {
     // eslint-disable-next-line no-console
     console.error('[venice-mcp] VENICE_MEDIA_DIR is ignored in HTTP mode; media is returned inline.')
@@ -140,7 +142,7 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
         newTransport.onclose = () => {
           sessions.delete(sessionId)
         }
-        const server = buildServer({ config: remoteTransportConfig(loadConfig()) })
+        const server = buildServer({ config })
         await server.connect(newTransport)
         entry = { transport: newTransport, lastSeen: Date.now() }
       }
