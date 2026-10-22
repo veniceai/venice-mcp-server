@@ -73,7 +73,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
   }
 
   // Prompts
-  for (const p of buildPrompts()) {
+  for (const p of buildPrompts(cfg)) {
     srv.registerPrompt(
       p.name,
       { title: p.title, description: p.description, argsSchema: p.argsSchema },
