@@ -169,6 +169,8 @@ export async function runHttp(opts: {
   serverFactory?: typeof buildServer
 } = {}): Promise<Server> {
   const env = opts.env ?? process.env
+  // Parse once so an invalid setting fails at startup instead of on every session.
+  const config = remoteTransportConfig(loadConfig(env))
   if (env.VENICE_MEDIA_DIR?.trim()) {
     // eslint-disable-next-line no-console
     console.error('[venice-mcp] VENICE_MEDIA_DIR is ignored in HTTP mode; media is returned inline.')
@@ -307,7 +309,7 @@ export async function runHttp(opts: {
         transport.onclose = () => {
           sessions.delete(sessionId)
         }
-        const server = serverFactory({ config: remoteTransportConfig(loadConfig(env)) })
+        const server = serverFactory({ config })
         await server.connect(transport)
         entry = { transport, lastSeen: Date.now() }
       }
