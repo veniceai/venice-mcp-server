@@ -39,29 +39,43 @@ export async function fetchUploadSource(url: string, opts: FetchUploadSourceOpti
   const useInjectedFetch = opts.fetchImpl !== undefined || fetchImpl !== DEFAULT_FETCH
   const lookupAddresses = opts.lookupAddresses ?? lookupHostname
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_UPLOAD_BYTES
+  let res: Response | undefined
+
+  const rethrowFetchError = (err: unknown): never => {
+    // Node's HTTP body stream reports cancellation as ECONNRESET with message "aborted".
+    const cancelled = err === ac.signal.reason || (err instanceof Error && (
+      err.name === 'AbortError' || ('code' in err && err.code === 'ECONNRESET' && err.message === 'aborted')
+    ))
+    if (ac.signal.aborted && cancelled) {
+      throw new Error(`Timed out fetching ${opts.label} after ${opts.timeoutMs}ms`)
+    }
+    throw err
+  }
 
   try {
     let currentUrl = new URL(url)
-    let res: Response | undefined
 
     for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects += 1) {
-      res = await fetchRemoteUrl(currentUrl, ac.signal, lookupAddresses, useInjectedFetch ? fetchImpl : undefined, opts.pinnedFetchImpl)
+      const addresses = await resolveValidRemoteAddresses(currentUrl, lookupAddresses)
+      res = await fetchRemoteUrl(currentUrl, ac.signal, addresses, useInjectedFetch ? fetchImpl : undefined, opts.pinnedFetchImpl)
+        .catch(rethrowFetchError)
 
       if (!isRedirect(res.status)) break
 
+      cancelResponseBody(res)
       const location = res.headers.get('location')
       if (!location) throw new Error(`Could not fetch ${opts.label}: redirect missing Location header`)
+      if (redirects === MAX_REDIRECTS) throw new Error(`Could not fetch ${opts.label}: too many redirects`)
       currentUrl = new URL(location, currentUrl)
       res = undefined
     }
 
     if (!res) throw new Error(`Could not fetch ${opts.label}: too many redirects`)
-    if (isRedirect(res.status)) throw new Error(`Could not fetch ${opts.label}: too many redirects`)
     if (!res.ok) throw new Error(`Could not fetch ${opts.label}: HTTP ${res.status}`)
 
     const headerContentType = res.headers.get('content-type')
     const contentType = headerContentType ?? opts.fallbackContentType
-    const buffer = await readBoundedBuffer(res, maxBytes, opts.label)
+    const buffer = await readBoundedBuffer(res, maxBytes, opts.label).catch(rethrowFetchError)
     if (buffer.length === 0) throw new Error(`Could not fetch ${opts.label}: empty response body`)
     assertAllowedContentType(contentType, opts.allowedContentTypes, opts.label, buffer, headerContentType === null)
 
@@ -70,14 +84,17 @@ export async function fetchUploadSource(url: string, opts: FetchUploadSourceOpti
       contentType,
       filename: filenameFromUrl(currentUrl, opts.fallbackFilename),
     }
-  } catch (err) {
-    if ((err as Error).name === 'AbortError') {
-      throw new Error(`Timed out fetching ${opts.label} after ${opts.timeoutMs}ms`)
-    }
-    throw err
   } finally {
+    // Close any request that did not finish before removing its deadline.
+    ac.abort()
+    cancelResponseBody(res)
     clearTimeout(timeout)
   }
+}
+
+function cancelResponseBody(res: Response | undefined): void {
+  // Cancellation starts immediately; a failing or stalled cleanup must not mask the result.
+  void res?.body?.cancel().catch(() => {})
 }
 
 export async function validateRemoteUrl(url: URL, lookupAddresses: LookupAddresses = lookupHostname): Promise<void> {
@@ -108,25 +125,23 @@ async function resolveValidRemoteAddresses(url: URL, lookupAddresses: LookupAddr
 async function fetchRemoteUrl(
   url: URL,
   signal: AbortSignal,
-  lookupAddresses: LookupAddresses,
+  addresses: string[],
   injectedFetch?: FetchImpl,
   pinnedFetchImpl?: PinnedFetchImpl,
 ): Promise<Response> {
   if (injectedFetch) {
-    await validateRemoteUrl(url, lookupAddresses)
     return injectedFetch(url, { signal, redirect: 'manual' })
   }
 
-  return fetchPinnedRemoteUrl(url, signal, lookupAddresses, pinnedFetchImpl)
+  return fetchPinnedRemoteUrl(url, signal, addresses, pinnedFetchImpl)
 }
 
 async function fetchPinnedRemoteUrl(
   url: URL,
   signal: AbortSignal,
-  lookupAddresses: LookupAddresses,
+  addresses: string[],
   pinnedFetchImpl: PinnedFetchImpl = requestPinnedAddress,
 ): Promise<Response> {
-  const addresses = await resolveValidRemoteAddresses(url, lookupAddresses)
   let lastError: unknown
 
   for (const address of addresses) {
