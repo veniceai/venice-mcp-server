@@ -195,6 +195,18 @@ describe('formatToolError', () => {
     assert.doesNotMatch(out, /_errors/)
   })
 
+  it('lists validation issues that arrive as plain strings', () => {
+    const err = new VeniceUpstreamError({
+      message: '',
+      status: 400,
+      body: { error: 'Invalid request parameters', issues: ['image_url: must be a public URL', 'duration must be one of 5, 10'] },
+    })
+    const out = formatToolError(err)
+    assert.match(out, /- image_url: must be a public URL/)
+    assert.match(out, /- duration must be one of 5, 10/)
+    assert.doesNotMatch(out, /\(body\): invalid/)
+  })
+
   it('keeps the generic 400 message when the body has no issues array', () => {
     const err = new VeniceUpstreamError({ message: '', status: 400, body: { error: 'bad', secret: 'x' } })
     const out = formatToolError(err)

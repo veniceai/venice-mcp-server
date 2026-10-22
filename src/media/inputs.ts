@@ -44,7 +44,7 @@ export function localPathFromInput(value: string): string | undefined {
       return undefined
     }
   }
-  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return undefined
+  // No URL-scheme test: a Windows path like C:\clip.mp4 would match "c:". URLs are never absolute paths.
   const expanded = expandHome(value)
   return isAbsolute(expanded) ? expanded : undefined
 }

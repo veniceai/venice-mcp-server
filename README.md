@@ -68,7 +68,7 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 |---|---|
 | `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs (URLs, or local file paths over stdio), and the Seedance consent attestation flow where applicable. Returns `estimated_cost_usd` from the quote endpoint. |
 | `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link. Pass the queue-time `download_url` for VPS / Grok Imagine Private models. With `VENICE_MEDIA_DIR` set, completed videos are written to disk and returned as a `file://` link. |
-| `venice_video_wait` | Block until the job completes, polling `venice_video_status` with backoff (default 300 s timeout). On timeout returns `PROCESSING` with the `queue_id` so you can call again. |
+| `venice_video_wait` | Block until the job completes, polling `venice_video_status` with backoff (default 45 s timeout, since most MCP clients abandon a call after about 60 s). On timeout or cancellation returns `PROCESSING` with the `queue_id` so you can call again. Never deletes server-side media. |
 | `venice_video_complete` | Mark a completed video as downloaded. Reports server-side deletion only when Venice confirms success. |
 | `venice_video_quote` | Get a price quote for a video generation BEFORE queuing. |
 
@@ -87,7 +87,7 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 |---|---|
 | `venice_music_generate` | Queue music generation. Uses the live QueueAudioRequest fields: `force_instrumental`, `lyrics_prompt`, `lyrics_optimizer`, `loop`, `voice`, `language_code`, `speed`, and model-specific `duration_seconds`. Deprecated `instrumental` / `lyrics` are still accepted as aliases. |
 | `venice_music_status` | Check status of a queued music job. Returns JSON progress while `PROCESSING`, then either embedded audio or a `download_url` resource link. With `VENICE_MEDIA_DIR` set, completed tracks are written to disk and returned as a `file://` link. |
-| `venice_music_wait` | Block until the job completes, polling `venice_music_status` with backoff (default 300 s timeout). |
+| `venice_music_wait` | Block until the job completes, polling `venice_music_status` with backoff (default 45 s timeout). Never deletes server-side media. |
 | `venice_music_complete` | Mark a completed music job as downloaded and delete server-side media. |
 
 ### 🌐 Web augment
@@ -133,7 +133,7 @@ Set `VENICE_MEDIA_DIR` and every media tool writes its result to disk instead of
   speech/ 2026-09-23_14-09-30-hello-there.mp3       + .json sidecar
 ```
 
-Tools return a `file://` resource link plus `structuredContent.path`, and the sidecar records the prompt, model, parameters, `queue_id`, and `estimated_cost_usd` that produced the file. Any `*_url` input also accepts a local absolute path (for example a frame you exported from your timeline), which is inlined as a `data:` URL.
+Tools return a `file://` resource link plus `structuredContent.path`, and the sidecar records the prompt, model, parameters, `queue_id`, and `estimated_cost_usd` that produced the file. The media inputs of `venice_video_generate` and the image edit, multi-edit, upscale, and background-removal tools also accept a local absolute path or `file://` URL (for example a frame you exported from your timeline), which is inlined as a `data:` URL. Other tools, such as `venice_asr` and the chat tools, still need a remote URL. Local paths and `VENICE_MEDIA_DIR` only work over stdio; in HTTP mode local paths are rejected and media is returned inline.
 
 Editors do not host MCP servers themselves; pair this server with your editor's MCP server inside one host (Claude Code, Claude Desktop, Codex, Cursor). DaVinci Resolve Studio 21.1+ ships a native MCP server (`File > Setup AI Assistants…`) whose `run_script` tool can call `MediaPool.ImportMedia([path])` and `AppendToTimeline`; community servers such as [samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp) expose named import tools. For editors without an MCP server, point `VENICE_MEDIA_DIR` at a watch folder or drag the files in.
 
@@ -142,7 +142,7 @@ Editors do not host MCP servers themselves; pair this server with your editor's 
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.2.0"],
+      "args": ["-y", "@veniceai/mcp-server@0.3.0"],
       "env": {
         "VENICE_API_KEY": "<your-venice-api-key>",
         "VENICE_MEDIA_DIR": "~/Movies/Venice",

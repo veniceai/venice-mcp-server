@@ -45,8 +45,10 @@ import {
   type AsrUpstreamBody,
 } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
+import { readBoundedBuffer, ResponseTooLargeError } from '../bounded-read.js'
 import { MediaStore, type MediaKind } from '../media/store.js'
 import { readLocalUploadSource, resolveMediaInput, resolveMediaInputs } from '../media/inputs.js'
+import { dataUrlVideoDurationSeconds } from '../media/duration.js'
 import type { Toolset } from '../config.js'
 
 /**
@@ -102,13 +104,18 @@ export interface ToolResult {
   structuredContent?: Record<string, unknown>
 }
 
+export interface ToolCallContext {
+  /** Aborted when the MCP client cancels the request or disconnects. */
+  signal?: AbortSignal
+}
+
 export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
   name: string
   title: string
   description: string
   annotations?: ToolAnnotations
   inputSchema: S
-  handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
+  handler: (args: z.infer<z.ZodObject<S>>, ctx?: ToolCallContext) => Promise<ToolResult>
 }
 
 const TOOL_PREFIX_TOOLSET: Array<[prefix: string, toolset: Toolset]> = [
@@ -215,16 +222,75 @@ async function mediaResult(store: MediaStore | undefined, input: MediaResultInpu
   }
 }
 
-/** Download a completed-media URL that Venice handed back (download_url flow). */
-async function downloadVeniceUrl(url: string, maxBytes: number): Promise<{ buffer: Buffer; contentType: string }> {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`Download of completed media failed: HTTP ${res.status} from ${url}`)
-  const contentType = res.headers.get('content-type')?.split(';', 1)[0].trim() || 'video/mp4'
-  const declared = Number(res.headers.get('content-length') ?? 0)
-  if (declared > maxBytes) throw new VeniceResponseTooLargeError(url, maxBytes)
-  const buffer = Buffer.from(await res.arrayBuffer())
-  if (buffer.length > maxBytes) throw new VeniceResponseTooLargeError(url, maxBytes)
-  return { buffer, contentType }
+const MAX_DOWNLOAD_REDIRECTS = 3
+
+/** MIME type implied by an untyped body's magic bytes, or undefined if it isn't the expected media kind. */
+function sniffMediaMime(buffer: Buffer, kind: 'video' | 'audio'): string | undefined {
+  const ascii = (start: number, end: number) => buffer.subarray(start, end).toString('ascii')
+  const isoBmff = buffer.length >= 12 && ascii(4, 8) === 'ftyp'
+  if (kind === 'video') return isoBmff ? 'video/mp4' : undefined
+  if (isoBmff) return 'audio/mp4'
+  if (ascii(0, 3) === 'ID3' || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)) return 'audio/mpeg'
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WAVE') return 'audio/wav'
+  if (ascii(0, 4) === 'fLaC') return 'audio/flac'
+  if (ascii(0, 4) === 'OggS') return 'audio/ogg'
+  return undefined
+}
+
+/**
+ * Download completed media from a Venice download_url. Throws, before
+ * anything is persisted or cleaned up, unless the body is non-empty media of
+ * the expected kind served from an https Venice host (redirects included).
+ */
+async function downloadVeniceMedia(
+  url: string,
+  opts: { kind: 'video' | 'audio'; statusTool: string; maxBytes: number; timeoutMs: number; signal?: AbortSignal },
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const label = `completed ${opts.kind === 'video' ? 'video' : 'music'}`
+  const notDeleted = `The queued media was not deleted; retry ${opts.statusTool} with the same queue_id.`
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), opts.timeoutMs)
+  const onAbort = () => ac.abort()
+  opts.signal?.addEventListener('abort', onAbort, { once: true })
+  try {
+    const initial = trustedQueueDownloadUrl(url)
+    if (!initial) throw new Error(`Refusing to download ${label} from ${url}: only https venice.ai hosts are allowed. ${notDeleted}`)
+    let current: string = initial
+    for (let redirects = 0; ; redirects += 1) {
+      const res = await fetch(current, { redirect: 'manual', signal: ac.signal })
+      if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel()
+        const location = res.headers.get('location')
+        const next: string | undefined = location ? trustedQueueDownloadUrl(new URL(location, current).href) : undefined
+        if (!next) {
+          throw new Error(`Refusing to follow ${label} redirect to ${location ?? '(missing Location)'}: only https venice.ai hosts are allowed. ${notDeleted}`)
+        }
+        if (redirects >= MAX_DOWNLOAD_REDIRECTS) throw new Error(`Too many redirects downloading ${label}. ${notDeleted}`)
+        current = next
+        continue
+      }
+      if (!res.ok) throw new Error(`Download of ${label} failed: HTTP ${res.status}. ${notDeleted}`)
+      const buffer = await readBoundedBuffer(res, opts.maxBytes, label)
+      if (buffer.length === 0) throw new Error(`Venice returned an empty ${label} download. ${notDeleted}`)
+      const header = res.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? ''
+      const prefix = `${opts.kind}/`
+      if (header.startsWith(prefix) && header.length > prefix.length) return { buffer, contentType: header }
+      const sniffed = header === '' || header === 'application/octet-stream' || header === 'binary/octet-stream'
+        ? sniffMediaMime(buffer, opts.kind)
+        : undefined
+      if (sniffed) return { buffer, contentType: sniffed }
+      throw new Error(`${label[0].toUpperCase()}${label.slice(1)} download returned unsupported content type ${header || '(missing)'}. ${notDeleted}`)
+    }
+  } catch (err) {
+    if (err instanceof ResponseTooLargeError) throw new VeniceResponseTooLargeError(url, opts.maxBytes)
+    if (ac.signal.aborted && !opts.signal?.aborted) {
+      throw new Error(`Timed out downloading ${label} after ${opts.timeoutMs}ms. ${notDeleted}`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+    opts.signal?.removeEventListener('abort', onAbort)
+  }
 }
 
 const PREVIEW_MAX_BYTES = 256 * 1024
@@ -235,22 +301,25 @@ function imagePreview(buffer: Buffer, mimeType: string): ToolContent | undefined
   return { type: 'image', data: buffer.toString('base64'), mimeType }
 }
 
+type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>
+
 interface PollOptions {
   timeoutMs: number
   initialDelayMs: number
   maxDelayMs: number
-  sleep: (ms: number) => Promise<void>
+  sleep: Sleep
+  signal?: AbortSignal
 }
 
 /**
- * Poll `attempt` until it returns a non-PROCESSING result or the deadline
- * passes. Elapsed time counts both request time and the sleeps we scheduled,
- * so an injected no-op `sleep` still honours the timeout.
+ * Poll `attempt` until it returns a non-PROCESSING result, the deadline
+ * passes, or the client cancels. Elapsed time counts both request time and
+ * the sleeps we scheduled, so an injected no-op `sleep` still honours the timeout.
  */
 async function pollUntilDone(
   attempt: () => Promise<ToolResult>,
   opts: PollOptions,
-): Promise<{ result: ToolResult; timedOut: boolean; elapsedMs: number }> {
+): Promise<{ result: ToolResult; outcome: 'done' | 'timeout' | 'cancelled'; elapsedMs: number }> {
   const start = Date.now()
   let sleptMs = 0
   let delay = opts.initialDelayMs
@@ -259,18 +328,33 @@ async function pollUntilDone(
     const result = await attempt()
     const status = (result.structuredContent as { status?: string } | undefined)?.status
     if (result.isError || status !== 'PROCESSING') {
-      return { result, timedOut: false, elapsedMs: elapsed() }
+      return { result, outcome: 'done', elapsedMs: elapsed() }
     }
+    if (opts.signal?.aborted) return { result, outcome: 'cancelled', elapsedMs: elapsed() }
     if (elapsed() + delay > opts.timeoutMs) {
-      return { result, timedOut: true, elapsedMs: elapsed() }
+      return { result, outcome: 'timeout', elapsedMs: elapsed() }
     }
-    await opts.sleep(delay)
+    await opts.sleep(delay, opts.signal)
     sleptMs += delay
+    if (opts.signal?.aborted) return { result, outcome: 'cancelled', elapsedMs: elapsed() }
     delay = Math.min(Math.round(delay * 1.5), opts.maxDelayMs)
   }
 }
 
-const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+const defaultSleep: Sleep = (ms, signal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
+
+/** Most MCP clients abandon a tool call after about 60s, so waits default well under that. */
+const DEFAULT_WAIT_SECONDS = 45
 
 const ok = (text: string, structured?: Record<string, unknown>, extraText: string[] = []): ToolResult => ({
   content: [text, ...extraText].map((t) => ({ type: 'text', text: t })),
@@ -406,23 +490,32 @@ function quoteValue(resp: unknown): number | undefined {
   return typeof quote === 'number' && Number.isFinite(quote) ? quote : undefined
 }
 
+/** The quote runs before queuing, so a slow quote endpoint must not hold up generation. */
+const QUOTE_TIMEOUT_MS = 5_000
+
 /** Best-effort pre-queue estimate. Quote failures never block generation. */
-async function estimateVideoCost(client: VeniceClient, body: Record<string, unknown>): Promise<number | undefined> {
+async function estimateCost(client: VeniceClient, path: string, body: Record<string, unknown>): Promise<number | undefined> {
   try {
     const clean = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined))
-    return quoteValue(await client.post<unknown>('/v1/video/quote', clean))
+    return quoteValue(await client.post<unknown>(path, clean, undefined, { timeoutMs: QUOTE_TIMEOUT_MS }))
   } catch {
     return undefined
   }
 }
 
-async function estimateMusicCost(client: VeniceClient, body: Record<string, unknown>): Promise<number | undefined> {
-  try {
-    const clean = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined))
-    return quoteValue(await client.post<unknown>('/v1/audio/quote', clean))
-  } catch {
-    return undefined
+/**
+ * Total reference-video seconds for a quote, or null when any clip's length is
+ * unknown (remote URLs are not fetched just to quote).
+ */
+function referenceVideoTotalSeconds(urls: string[] | undefined): number | undefined | null {
+  if (!urls?.length) return undefined
+  let total = 0
+  for (const url of urls) {
+    const seconds = dataUrlVideoDurationSeconds(url)
+    if (seconds === undefined) return null
+    total += seconds
   }
+  return Math.round(total * 100) / 100
 }
 
 /** Caller-supplied queue URLs must be Venice HTTPS hosts. Retrieve URLs come from Venice and are not re-checked here. */
@@ -952,7 +1045,7 @@ const responsesVeniceParametersSchema = z
 
 export interface BuildToolsOptions {
   /** Injected for tests; defaults to setTimeout. */
-  sleep?: (ms: number) => Promise<void>
+  sleep?: Sleep
 }
 
 export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOptions = {}): ToolDef[] {
@@ -973,6 +1066,38 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
   const localPathNote = cfg.localFiles
     ? ' Local absolute file paths are accepted anywhere a URL is (they are inlined as data: URLs).'
     : ''
+
+  /**
+   * Poll a status tool for a wait tool. Never requests server-side deletion:
+   * a client that already gave up could not receive media deleted on its behalf.
+   */
+  const waitForCompletion = async (
+    statusTool: 'venice_video_status' | 'venice_music_status',
+    statusArgs: Record<string, unknown>,
+    timeoutSeconds: number | undefined,
+    ctx: ToolCallContext | undefined,
+  ): Promise<ToolResult> => {
+    const status = toolByName(statusTool)
+    const waitTool = statusTool.replace('_status', '_wait')
+    const { result, outcome, elapsedMs } = await pollUntilDone(
+      () => status.handler({ ...statusArgs, delete_media_on_completion: false } as never, ctx),
+      { timeoutMs: (timeoutSeconds ?? DEFAULT_WAIT_SECONDS) * 1000, initialDelayMs: 5_000, maxDelayMs: 30_000, sleep, signal: ctx?.signal },
+    )
+    if (outcome === 'done') return result
+    const waited = Math.round(elapsedMs / 1000)
+    const lead = outcome === 'cancelled' ? `Wait cancelled after ${waited}s.` : `Still PROCESSING after ${waited}s.`
+    return ok(
+      `${lead} The job continues server-side; call ${waitTool} or ${statusTool} again with queue_id=${statusArgs.queue_id}, model=${statusArgs.model}.`,
+      {
+        ...result.structuredContent,
+        status: 'PROCESSING',
+        queue_id: statusArgs.queue_id,
+        model: statusArgs.model,
+        ...(outcome === 'cancelled' ? { cancelled: true } : { timed_out: true }),
+        waited_seconds: waited,
+      },
+    )
+  }
 
   const tools: ToolDef[] = [
     // ========================================================================
@@ -1485,16 +1610,23 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               video_url: el.video_url && (await resolveMediaInput(el.video_url, localInput(`elements[${i}].video_url`))),
             })))),
           }
-          const estimatedCost = await estimateVideoCost(client, {
-            model: args.model,
-            duration: args.duration,
-            aspect_ratio: args.aspect_ratio,
-            resolution: args.resolution,
-            upscale_factor: args.upscale_factor,
-            audio: args.audio,
-            video_url: body.video_url,
-            reference_image_count: args.reference_image_urls?.length,
-          })
+          // Models that take video_url need it to quote, but quoting an inline clip would upload it twice;
+          // an estimate that ignores reference-video length would under-quote. Skip the quote in both cases.
+          const referenceVideoSeconds = referenceVideoTotalSeconds(body.reference_video_urls)
+          const canQuote = !body.video_url?.startsWith('data:') && referenceVideoSeconds !== null
+          const estimatedCost = canQuote
+            ? await estimateCost(client, '/v1/video/quote', {
+                model: args.model,
+                duration: args.duration,
+                aspect_ratio: args.aspect_ratio,
+                resolution: args.resolution,
+                upscale_factor: args.upscale_factor,
+                audio: args.audio,
+                video_url: body.video_url,
+                reference_image_count: args.reference_image_urls?.length,
+                reference_video_total_duration: referenceVideoSeconds,
+              })
+            : undefined
           const resp = await client.post<{ model?: string; queue_id?: string; download_url?: string }>(
             '/v1/video/queue',
             body
@@ -1546,10 +1678,10 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           'Queue-time download_url from venice_video_generate. Must be an https Venice host. Needed for VPS / Grok Imagine Private only when this process did not queue the job (retrieve returns COMPLETED without a URL).',
         ),
         delete_media_on_completion: z.boolean().optional().describe(
-          'Delete server-side media after an embedded MP4 has been buffered, before the tool result returns to the client. Ignored for download_url results: download first, then call venice_video_complete.',
+          'Delete server-side media after an embedded MP4 has been buffered, before the tool result returns to the client. For download_url results it runs only once the file is saved to VENICE_MEDIA_DIR; otherwise download first, then call venice_video_complete.',
         ),
       },
-      handler: async (args) => {
+      handler: async (args, ctx) => {
         try {
           const { download_url: queueDownloadUrl, ...retrieveArgs } = args
           const response = await client.postMixed<{
@@ -1667,7 +1799,13 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               )
             }
             if (store) {
-              const downloaded = await downloadVeniceUrl(url, cfg.maxVideoResponseBytes)
+              const downloaded = await downloadVeniceMedia(url, {
+                kind: 'video',
+                statusTool: 'venice_video_status',
+                maxBytes: cfg.maxVideoResponseBytes,
+                timeoutMs: cfg.timeoutMs,
+                signal: ctx?.signal,
+              })
               return mediaResult(store, {
                 kind: 'video',
                 buffer: downloaded.buffer,
@@ -1733,27 +1871,22 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
     {
       name: 'venice_video_wait',
       title: 'Venice Video Wait (poll until done)',
-      description: `Block until a queued video job completes, polling venice_video_status with backoff. Returns the same result as venice_video_status on completion. If timeout_seconds elapses first, returns status PROCESSING with the queue_id so you can call venice_video_wait or venice_video_status again; the job keeps running server-side.${X402_OK}${mediaDirNote}`,
+      description: `Block until a queued video job completes, polling venice_video_status with backoff. Returns the same result as venice_video_status on completion. If timeout_seconds elapses first, returns status PROCESSING with the queue_id so you can call venice_video_wait or venice_video_status again; the job keeps running server-side. Never deletes server-side media; call venice_video_complete once you have the result.${X402_OK}${mediaDirNote}`,
       inputSchema: {
         queue_id: z.string().min(1).describe('Returned by venice_video_generate.'),
         model: z.string().min(1).describe('Same model id used to queue.'),
         download_url: z.string().url().optional().describe('Queue-time download_url, only needed when another process queued the job.'),
-        delete_media_on_completion: z.boolean().optional(),
-        timeout_seconds: z.number().int().min(5).max(1800).optional().describe('Maximum wall-clock wait. Defaults to 300.'),
+        timeout_seconds: z.number().int().min(5).max(1800).optional().describe(
+          `Maximum wall-clock wait. Defaults to ${DEFAULT_WAIT_SECONDS}. Most MCP clients abandon a tool call after about 60s; raise this only if yours waits longer.`,
+        ),
       },
-      handler: async (args) => {
-        const { timeout_seconds, ...statusArgs } = args
-        const status = toolByName('venice_video_status')
-        const { result, timedOut, elapsedMs } = await pollUntilDone(
-          () => status.handler(statusArgs as never),
-          { timeoutMs: (timeout_seconds ?? 300) * 1000, initialDelayMs: 5_000, maxDelayMs: 30_000, sleep },
-        )
-        if (!timedOut) return result
-        return ok(
-          `Still PROCESSING after ${Math.round(elapsedMs / 1000)}s. The job continues server-side; call venice_video_wait or venice_video_status again with queue_id=${args.queue_id}, model=${args.model}.`,
-          { ...result.structuredContent, status: 'PROCESSING', queue_id: args.queue_id, model: args.model, timed_out: true, waited_seconds: Math.round(elapsedMs / 1000) },
-        )
-      },
+      handler: async (args, ctx) =>
+        waitForCompletion(
+          'venice_video_status',
+          { queue_id: args.queue_id, model: args.model, download_url: args.download_url },
+          args.timeout_seconds,
+          ctx,
+        ),
     },
 
     {
@@ -1970,10 +2103,10 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           const { instrumental, lyrics, ...queueArgs } = args
           const durationSeconds =
             typeof args.duration_seconds === 'string' ? Number(args.duration_seconds) : args.duration_seconds
-          const estimatedCost = await estimateMusicCost(client, {
+          const estimatedCost = await estimateCost(client, '/v1/audio/quote', {
             model: args.model,
             duration_seconds: durationSeconds,
-            character_count: args.lyrics_prompt?.length,
+            character_count: args.prompt.length,
           })
           const resp = await client.post<{ model?: string; queue_id?: string }>(
             '/v1/audio/queue',
@@ -2006,10 +2139,10 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
         queue_id: z.string().min(1),
         model: z.string().min(1),
         delete_media_on_completion: z.boolean().optional().describe(
-          'Delete server-side media after embedded audio has been buffered, before the tool result returns to the client. Ignored for download_url results: download first, then call venice_music_complete.',
+          'Delete server-side media after embedded audio has been buffered, before the tool result returns to the client. For download_url results it runs only once the file is saved to VENICE_MEDIA_DIR; otherwise download first, then call venice_music_complete.',
         ),
       },
-      handler: async (args) => {
+      handler: async (args, ctx) => {
         try {
           const response = await client.postMixed<{
             status?: 'PROCESSING' | 'COMPLETED'
@@ -2054,6 +2187,17 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               }
             }
           }
+          const queued = queueRequests.get(args.queue_id)
+          const musicMetadata = (extra: Record<string, unknown>) => ({
+            tool: 'venice_music_generate',
+            model: queued?.model ?? args.model,
+            queue_id: args.queue_id,
+            prompt: queued?.prompt,
+            params: queued?.params,
+            estimated_cost_usd: queued?.estimated_cost_usd,
+            queued_at: queued?.queued_at,
+            ...extra,
+          })
           if (response.kind === 'binary') {
             const mimeType = response.contentType.split(';', 1)[0].trim().toLowerCase()
             if (!mimeType.startsWith('audio/') || mimeType.length === 'audio/'.length) {
@@ -2076,7 +2220,6 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               )
             }
             if (store) {
-              const queued = queueRequests.get(args.queue_id)
               const durationHeader = Number(response.headers['x-venice-audio-duration'])
               const durationSeconds = Number.isFinite(durationHeader) && durationHeader > 0 ? durationHeader : undefined
               return mediaResult(store, {
@@ -2084,17 +2227,11 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
                 buffer: response.buffer,
                 mimeType,
                 label: queued?.prompt ?? args.queue_id,
-                metadata: {
-                  tool: 'venice_music_generate',
-                  model: queued?.model ?? args.model,
-                  queue_id: args.queue_id,
-                  prompt: queued?.prompt,
-                  params: queued?.params,
-                  estimated_cost_usd: queued?.estimated_cost_usd,
-                  queued_at: queued?.queued_at,
+                metadata: musicMetadata({
+                  delivery: 'stream',
                   audio_format: response.headers['x-venice-audio-format'],
                   duration_seconds: durationSeconds,
-                },
+                }),
                 inline: () => ({ type: 'text', text: '' }),
                 afterSave: () => cleanupAfterSuccess('Server-side media was deleted after the audio was written to disk.'),
                 extraText: `Completed music (${response.buffer.length} bytes).`,
@@ -2137,6 +2274,26 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           const resp = response.data
           const url = resp.download_url ?? resp.url
           if (resp.status === 'COMPLETED' && url) {
+            if (store) {
+              const downloaded = await downloadVeniceMedia(url, {
+                kind: 'audio',
+                statusTool: 'venice_music_status',
+                maxBytes: cfg.maxAudioResponseBytes,
+                timeoutMs: cfg.timeoutMs,
+                signal: ctx?.signal,
+              })
+              return mediaResult(store, {
+                kind: 'music',
+                buffer: downloaded.buffer,
+                mimeType: downloaded.contentType,
+                label: queued?.prompt ?? args.queue_id,
+                metadata: musicMetadata({ delivery: 'download_url', download_url: url }),
+                inline: () => ({ type: 'resource_link', uri: url, name: 'music', mimeType: downloaded.contentType }),
+                afterSave: () => cleanupAfterSuccess('Server-side media was deleted after the download was written to disk.'),
+                extraText: `Downloaded from ${url}.`,
+                structured: { status: 'COMPLETED', queue_id: args.queue_id, url, estimated_cost_usd: queued?.estimated_cost_usd },
+              })
+            }
             // The download URL stops working once the stored object is removed, so
             // cleanup must wait until the caller has fetched the bytes.
             const cleanupNote = args.delete_media_on_completion
@@ -2210,26 +2367,16 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
     {
       name: 'venice_music_wait',
       title: 'Venice Music Wait (poll until done)',
-      description: `Block until a queued music job completes, polling venice_music_status with backoff. Returns the same result as venice_music_status on completion. If timeout_seconds elapses first, returns status PROCESSING with the queue_id so you can call again; the job keeps running server-side.${X402_OK}${mediaDirNote}`,
+      description: `Block until a queued music job completes, polling venice_music_status with backoff. Returns the same result as venice_music_status on completion. If timeout_seconds elapses first, returns status PROCESSING with the queue_id so you can call again; the job keeps running server-side. Never deletes server-side media; call venice_music_complete once you have the result.${X402_OK}${mediaDirNote}`,
       inputSchema: {
         queue_id: z.string().min(1),
         model: z.string().min(1),
-        delete_media_on_completion: z.boolean().optional(),
-        timeout_seconds: z.number().int().min(5).max(1800).optional().describe('Maximum wall-clock wait. Defaults to 300.'),
+        timeout_seconds: z.number().int().min(5).max(1800).optional().describe(
+          `Maximum wall-clock wait. Defaults to ${DEFAULT_WAIT_SECONDS}. Most MCP clients abandon a tool call after about 60s; raise this only if yours waits longer.`,
+        ),
       },
-      handler: async (args) => {
-        const { timeout_seconds, ...statusArgs } = args
-        const status = toolByName('venice_music_status')
-        const { result, timedOut, elapsedMs } = await pollUntilDone(
-          () => status.handler(statusArgs as never),
-          { timeoutMs: (timeout_seconds ?? 300) * 1000, initialDelayMs: 5_000, maxDelayMs: 30_000, sleep },
-        )
-        if (!timedOut) return result
-        return ok(
-          `Still PROCESSING after ${Math.round(elapsedMs / 1000)}s. The job continues server-side; call venice_music_wait or venice_music_status again with queue_id=${args.queue_id}, model=${args.model}.`,
-          { ...result.structuredContent, status: 'PROCESSING', queue_id: args.queue_id, model: args.model, timed_out: true, waited_seconds: Math.round(elapsedMs / 1000) },
-        )
-      },
+      handler: async (args, ctx) =>
+        waitForCompletion('venice_music_status', { queue_id: args.queue_id, model: args.model }, args.timeout_seconds, ctx),
     },
 
     {

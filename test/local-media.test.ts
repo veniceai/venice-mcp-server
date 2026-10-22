@@ -49,6 +49,36 @@ async function readSidecar(r: ToolResult): Promise<Record<string, unknown>> {
   return JSON.parse(await readFile(sidecar_path, 'utf8'))
 }
 
+function box(type: string, payload: Buffer): Buffer {
+  const header = Buffer.alloc(8)
+  header.writeUInt32BE(8 + payload.length, 0)
+  header.write(type, 4, 'ascii')
+  return Buffer.concat([header, payload])
+}
+
+/** Minimal MP4: ftyp + moov/mvhd (version 0, timescale 1000). */
+function mp4WithDuration(seconds: number): Buffer {
+  const mvhd = Buffer.alloc(100)
+  mvhd.writeUInt32BE(1000, 12)
+  mvhd.writeUInt32BE(Math.round(seconds * 1000), 16)
+  const ftyp = box('ftyp', Buffer.concat([Buffer.from('isom'), Buffer.alloc(4), Buffer.from('isom')]))
+  return Buffer.concat([ftyp, box('moov', box('mvhd', mvhd))])
+}
+
+async function withFetch<T>(impl: typeof fetch, fn: () => Promise<T>): Promise<T> {
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = impl
+  try {
+    return await fn()
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+}
+
+function errorText(r: ToolResult): string {
+  return (r.content[0] as { text: string }).text
+}
+
 describe('MediaStore', () => {
   it('writes the file under <root>/<kind>/ with a mime-derived extension and a JSON sidecar', async () => {
     const store = new MediaStore(join(tmp, 'store'))
@@ -79,6 +109,15 @@ describe('MediaStore', () => {
     assert.equal(await readFile(b.path, 'utf8'), 'b')
   })
 
+  it('gives same-second saves that differ only by extension their own sidecars', async () => {
+    const store = new MediaStore(join(tmp, 'store-ext-collide'))
+    const mp3 = await store.save({ kind: 'music', buffer: Buffer.from('a'), mimeType: 'audio/mpeg', label: 'track', metadata: { n: 1 } })
+    const wav = await store.save({ kind: 'music', buffer: Buffer.from('b'), mimeType: 'audio/wav', label: 'track', metadata: { n: 2 } })
+    assert.notEqual(mp3.sidecarPath, wav.sidecarPath)
+    assert.equal(JSON.parse(await readFile(mp3.sidecarPath, 'utf8')).file, mp3.path)
+    assert.equal(JSON.parse(await readFile(wav.sidecarPath, 'utf8')).file, wav.path)
+  })
+
   it('maps mime types to editor-friendly extensions and falls back to bin', () => {
     assert.equal(extensionForMime('audio/mpeg'), 'mp3')
     assert.equal(extensionForMime('audio/wav; charset=binary'), 'wav')
@@ -100,6 +139,10 @@ describe('local media inputs', () => {
     assert.equal(localPathFromInput('https://example.com/x.png'), undefined)
     assert.equal(localPathFromInput('data:image/png;base64,AAAA'), undefined)
     assert.equal(localPathFromInput('relative/x.png'), undefined)
+  })
+
+  it('treats a Windows drive path as a local file, not a URL scheme', { skip: process.platform !== 'win32' }, () => {
+    assert.equal(localPathFromInput('C:\\clips\\take1.mp4'), 'C:\\clips\\take1.mp4')
   })
 
   it('inlines a local file as a data: URL with a mime type from its extension', async () => {
@@ -230,9 +273,40 @@ describe('video flow with VENICE_MEDIA_DIR', () => {
     assert.match((r.content[0] as { text: string }).text, /Estimated cost: \$0\.5000 USD/)
     const quote = stub.callsTo('/v1/video/quote')[0]
     assert.deepEqual(quote.body, { model: 'veo3.1-fast-image-to-video', duration: '4s' })
+    assert.equal(quote.timeoutMs, 5000)
     const queue = stub.callsTo('/v1/video/queue')[0].body as { image_url: string }
     assert.ok(queue.image_url.startsWith('data:image/png;base64,'))
     assert.ok(stub.calls.findIndex((c) => c.path === '/v1/video/quote') < stub.calls.findIndex((c) => c.path === '/v1/video/queue'))
+  })
+
+  it('venice_video_generate quotes the total length of local reference clips', async () => {
+    const a = join(tmp, 'ref-a.mp4')
+    const b = join(tmp, 'ref-b.mov')
+    await writeFile(a, mp4WithDuration(2.5))
+    await writeFile(b, mp4WithDuration(3))
+    const { get, stub } = setup()
+    await get('venice_video_generate').handler({
+      prompt: 'p', model: 'seedance-2-0-r2v', duration: '5s', reference_video_urls: [a, b],
+    } as never)
+    const quote = stub.callsTo('/v1/video/quote')[0].body as Record<string, unknown>
+    assert.equal(quote.reference_video_total_duration, 5.5)
+    assert.equal(JSON.stringify(quote).includes('data:'), false)
+  })
+
+  it('venice_video_generate skips the quote instead of under-quoting or re-uploading inline media', async () => {
+    const clip = join(tmp, 'source.mp4')
+    await writeFile(clip, mp4WithDuration(4))
+    for (const args of [
+      { reference_video_urls: ['https://example.com/ref.mp4'] },
+      { video_url: clip },
+    ]) {
+      const { get, stub } = setup()
+      const r = await get('venice_video_generate').handler({ prompt: 'p', model: 'm', duration: '5s', ...args } as never)
+      assert.equal(r.isError, undefined, JSON.stringify(r.content))
+      assert.equal(stub.callsTo('/v1/video/quote').length, 0, JSON.stringify(args))
+      assert.equal(stub.callsTo('/v1/video/queue').length, 1)
+      assert.equal(structured<{ estimated_cost_usd?: number }>(r).estimated_cost_usd, undefined)
+    }
   })
 
   it('venice_video_generate still queues when the quote endpoint fails', async () => {
@@ -305,6 +379,79 @@ describe('video flow with VENICE_MEDIA_DIR', () => {
     }
   })
 
+  it('venice_video_status follows Venice redirects manually when downloading', async () => {
+    const mp4 = mp4WithDuration(1)
+    const { get } = setup({
+      '/v1/video/retrieve': () => ({ status: 'COMPLETED', download_url: 'https://media.venice.ai/v.mp4' }),
+    })
+    const seen: Array<{ url: string; redirect?: RequestRedirect }> = []
+    const r = await withFetch((async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(url), redirect: init?.redirect })
+      return seen.length === 1
+        ? new Response(null, { status: 302, headers: { location: 'https://cdn.venice.ai/v.mp4' } })
+        : new Response(mp4, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+    }) as typeof fetch, () => get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never))
+    assert.equal(r.isError, undefined, JSON.stringify(r.content))
+    assert.deepEqual(seen, [
+      { url: 'https://media.venice.ai/v.mp4', redirect: 'manual' },
+      { url: 'https://cdn.venice.ai/v.mp4', redirect: 'manual' },
+    ])
+    assert.equal(structured<{ mime_type: string }>(r).mime_type, 'video/mp4')
+  })
+
+  for (const [name, retrieveUrl, respond] of [
+    ['a non-Venice download host', 'https://evil.example/v.mp4', () => new Response(mp4WithDuration(1))],
+    ['a redirect off Venice', 'https://media.venice.ai/v.mp4', () => new Response(null, { status: 302, headers: { location: 'http://evil.example/v.mp4' } })],
+    ['an HTML body', 'https://media.venice.ai/v.mp4', () => new Response('<html>oops</html>', { headers: { 'content-type': 'text/html' } })],
+    ['an empty body', 'https://media.venice.ai/v.mp4', () => new Response(new Uint8Array(0), { headers: { 'content-type': 'video/mp4' } })],
+    ['an untyped body that is not a video', 'https://media.venice.ai/v.mp4', () => new Response('not a video at all', { headers: { 'content-type': 'application/octet-stream' } })],
+  ] as const) {
+    it(`venice_video_status refuses ${name} without saving or deleting server media`, async () => {
+      const { get, stub, mediaDir } = setup({
+        '/v1/video/retrieve': () => ({ status: 'COMPLETED', download_url: retrieveUrl }),
+      })
+      const r = await withFetch((async () => respond()) as typeof fetch, () =>
+        get('venice_video_status').handler({ queue_id: 'q', model: 'm', delete_media_on_completion: true } as never))
+      assert.equal(r.isError, true)
+      assert.match(errorText(r), /queued media was not deleted/)
+      assert.equal(stub.callsTo('/v1/video/complete').length, 0)
+      await assert.rejects(readdir(join(mediaDir, 'video')))
+    })
+  }
+
+  it('venice_video_status stops reading an oversized download mid-stream and keeps the job retryable', async () => {
+    const { get, stub } = setup(
+      { '/v1/video/retrieve': () => ({ status: 'COMPLETED', download_url: 'https://media.venice.ai/v.mp4' }) },
+      { VENICE_MAX_VIDEO_RESPONSE_BYTES: '1024' },
+    )
+    let pulls = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1
+        controller.enqueue(new Uint8Array(512))
+      },
+    })
+    const r = await withFetch((async () => new Response(body, { headers: { 'content-type': 'video/mp4' } })) as typeof fetch, () =>
+      get('venice_video_status').handler({ queue_id: 'q', model: 'm', delete_media_on_completion: true } as never))
+    assert.equal(r.isError, true)
+    assert.equal(structured<{ error: string; retry_safe: boolean }>(r).error, 'video_response_too_large')
+    assert.ok(pulls <= 4, `read ${pulls} chunks`)
+    assert.equal(stub.callsTo('/v1/video/complete').length, 0)
+  })
+
+  it('venice_video_status times out a stalled download', async () => {
+    const { get } = setup(
+      { '/v1/video/retrieve': () => ({ status: 'COMPLETED', download_url: 'https://media.venice.ai/v.mp4' }) },
+      { VENICE_HTTP_TIMEOUT_MS: '20' },
+    )
+    const r = await withFetch(((_url: string | URL | Request, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+      })) as typeof fetch, () => get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never))
+    assert.equal(r.isError, true)
+    assert.match(errorText(r), /Timed out downloading completed video after 20ms/)
+  })
+
   it('venice_video_status keeps the embedded-blob shape and cleanup ordering when no media dir is set', async () => {
     const cfg = loadConfig({ VENICE_API_KEY: 'k' })
     const stub = new StubClient({
@@ -349,6 +496,39 @@ describe('video flow with VENICE_MEDIA_DIR', () => {
     assert.deepEqual(sleeps, [5000])
   })
 
+  it('venice_video_wait defaults to a 45s budget so it returns before typical client timeouts', async () => {
+    const { get, sleeps } = setup({ '/v1/video/retrieve': () => ({ status: 'PROCESSING' }) })
+    const r = await get('venice_video_wait').handler({ queue_id: 'q', model: 'm' } as never)
+    assert.equal(structured<{ timed_out: boolean }>(r).timed_out, true)
+    assert.deepEqual(sleeps, [5000, 7500, 11250, 16875])
+  })
+
+  it('venice_video_wait stops polling when the client cancels', async () => {
+    let calls = 0
+    const cfg = loadConfig({ VENICE_API_KEY: 'k' })
+    const stub = new StubClient({ '/v1/video/retrieve': () => { calls += 1; return { status: 'PROCESSING' } } })
+    const ac = new AbortController()
+    const tools = buildTools(stub.asClient(), cfg, { sleep: async () => { ac.abort() } })
+    const wait = tools.find((t) => t.name === 'venice_video_wait')!
+    const r = await wait.handler({ queue_id: 'q', model: 'm' } as never, { signal: ac.signal })
+    assert.equal(calls, 1)
+    const s = structured<{ status: string; cancelled: boolean; queue_id: string }>(r)
+    assert.equal(s.status, 'PROCESSING')
+    assert.equal(s.cancelled, true)
+    assert.equal(s.queue_id, 'q')
+  })
+
+  it('venice_video_wait never asks Venice to delete media, even if a caller passes the old flag', async () => {
+    const { get, stub } = setup({
+      '/v1/video/retrieve': () => ({ kind: 'binary', buffer: Buffer.from('done'), contentType: 'video/mp4' }),
+    })
+    assert.equal('delete_media_on_completion' in get('venice_video_wait').inputSchema, false)
+    const r = await get('venice_video_wait').handler({ queue_id: 'q', model: 'm', delete_media_on_completion: true } as never)
+    assert.equal(structured<{ status: string; server_media_deleted: boolean }>(r).server_media_deleted, false)
+    assert.equal(stub.callsTo('/v1/video/complete').length, 0)
+    assert.equal((stub.callsTo('/v1/video/retrieve')[0].body as { delete_media_on_completion: boolean }).delete_media_on_completion, false)
+  })
+
   it('venice_video_wait surfaces a status error immediately without further polling', async () => {
     let calls = 0
     const { get, sleeps } = setup({
@@ -362,13 +542,15 @@ describe('video flow with VENICE_MEDIA_DIR', () => {
 })
 
 describe('music flow with VENICE_MEDIA_DIR', () => {
-  it('venice_music_generate quotes with duration and lyric length and reports estimated_cost_usd', async () => {
+  it('venice_music_generate quotes with duration and prompt length (what Venice bills) and reports estimated_cost_usd', async () => {
     const { get, stub } = setup()
     const r = await get('venice_music_generate').handler({
-      prompt: 'lofi beat', model: 'elevenlabs-music', duration_seconds: '30', lyrics_prompt: 'la la la',
+      prompt: 'lofi beat', model: 'elevenlabs-music', duration_seconds: '30', lyrics_prompt: 'la la la la la',
     } as never)
     assert.equal(structured<{ estimated_cost_usd: number }>(r).estimated_cost_usd, 0.1)
-    assert.deepEqual(stub.callsTo('/v1/audio/quote')[0].body, { model: 'elevenlabs-music', duration_seconds: 30, character_count: 8 })
+    const quote = stub.callsTo('/v1/audio/quote')[0]
+    assert.deepEqual(quote.body, { model: 'elevenlabs-music', duration_seconds: 30, character_count: 9 })
+    assert.equal(quote.timeoutMs, 5000)
   })
 
   it('venice_music_status writes completed audio under music/ using the Venice audio headers and the queued prompt', async () => {
@@ -392,6 +574,51 @@ describe('music flow with VENICE_MEDIA_DIR', () => {
     assert.equal(sidecar.audio_format, 'wav')
     assert.equal(sidecar.duration_seconds, 30.5)
   })
+
+  it('venice_music_status downloads a COMPLETED download_url to disk, sniffing untyped audio, then runs cleanup', async () => {
+    const flac = Buffer.concat([Buffer.from('fLaC'), Buffer.alloc(32)])
+    const { get, stub } = setup({
+      '/v1/audio/retrieve': () => ({ status: 'COMPLETED', download_url: 'https://media.venice.ai/m' }),
+    })
+    await get('venice_music_generate').handler({ prompt: 'Night Drive', model: 'elevenlabs-music' } as never)
+    const seen: Array<RequestRedirect | undefined> = []
+    const r = await withFetch((async (_url: string | URL | Request, init?: RequestInit) => {
+      seen.push(init?.redirect)
+      return new Response(flac, { headers: { 'content-type': 'application/octet-stream' } })
+    }) as typeof fetch, () =>
+      get('venice_music_status').handler({ queue_id: 'mus-123', model: 'elevenlabs-music', delete_media_on_completion: true } as never))
+    assert.equal(r.isError, undefined, JSON.stringify(r.content))
+    assert.deepEqual(seen, ['manual'])
+    const s = structured<{ path: string; mime_type: string; server_media_deleted: boolean; representation: string }>(r)
+    assert.match(s.path, /\/music\/.*-night-drive\.flac$/)
+    assert.equal(s.mime_type, 'audio/flac')
+    assert.equal(s.representation, 'local file')
+    assert.equal(s.server_media_deleted, true)
+    assert.deepEqual(await readFile(s.path), flac)
+    const sidecar = await readSidecar(r)
+    assert.equal(sidecar.prompt, 'Night Drive')
+    assert.equal(sidecar.delivery, 'download_url')
+    const order = stub.calls.map((c) => c.path)
+    assert.ok(order.indexOf('/v1/audio/retrieve') < order.indexOf('/v1/audio/complete'))
+  })
+
+  for (const [name, retrieveUrl, respond] of [
+    ['a non-Venice download host', 'https://evil.example/m.mp3', () => new Response(Buffer.from('ID3xxxx'), { headers: { 'content-type': 'audio/mpeg' } })],
+    ['a video body', 'https://media.venice.ai/m', () => new Response(mp4WithDuration(1), { headers: { 'content-type': 'video/mp4' } })],
+    ['an HTML body', 'https://media.venice.ai/m', () => new Response('<html>oops</html>', { headers: { 'content-type': 'text/html' } })],
+  ] as const) {
+    it(`venice_music_status refuses ${name} without saving or deleting server media`, async () => {
+      const { get, stub, mediaDir } = setup({
+        '/v1/audio/retrieve': () => ({ status: 'COMPLETED', download_url: retrieveUrl }),
+      })
+      const r = await withFetch((async () => respond()) as typeof fetch, () =>
+        get('venice_music_status').handler({ queue_id: 'q', model: 'm', delete_media_on_completion: true } as never))
+      assert.equal(r.isError, true)
+      assert.match(errorText(r), /retry venice_music_status with the same queue_id/)
+      assert.equal(stub.callsTo('/v1/audio/complete').length, 0)
+      await assert.rejects(readdir(join(mediaDir, 'music')))
+    })
+  }
 
   it('venice_music_wait returns the saved file once the job completes', async () => {
     let calls = 0

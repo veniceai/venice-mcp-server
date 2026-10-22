@@ -225,7 +225,9 @@ const MAX_VALIDATION_ISSUES = 8
  */
 function formatValidationIssues(body: unknown): string | undefined {
   if (!isObject(body) || !Array.isArray(body.issues) || body.issues.length === 0) return undefined
-  const lines = (body.issues as ValidationIssue[]).slice(0, MAX_VALIDATION_ISSUES).map((issue) => {
+  const lines = (body.issues as Array<ValidationIssue | string>).slice(0, MAX_VALIDATION_ISSUES).map((issue) => {
+    if (typeof issue === 'string') return `  - ${issue}`
+    if (!isObject(issue)) return '  - (body): invalid'
     const path = Array.isArray(issue.path) && issue.path.length > 0 ? issue.path.join('.') : '(body)'
     const expected = issue.expected !== undefined ? ` (expected ${typeof issue.expected === 'string' ? issue.expected : JSON.stringify(issue.expected)})` : ''
     return `  - ${path}: ${issue.message ?? 'invalid'}${expected}`
