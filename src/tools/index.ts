@@ -353,32 +353,35 @@ interface QueueRequestRecord {
   estimated_cost_usd?: number
   queued_at: string
 }
-const queueRequests = new Map<string, { record: QueueRequestRecord; expiresAt: number }>()
+/** Per-server memory of what produced each queued job, so one MCP session never sees another's prompts. */
+class QueueRequestStore {
+  private readonly records = new Map<string, { record: QueueRequestRecord; expiresAt: number }>()
 
-function rememberQueueRequest(queueId: string, record: Omit<QueueRequestRecord, 'queued_at'>): void {
-  const now = Date.now()
-  for (const [id, entry] of queueRequests) {
-    if (entry.expiresAt <= now) queueRequests.delete(id)
+  remember(queueId: string, record: Omit<QueueRequestRecord, 'queued_at'>): void {
+    const now = Date.now()
+    this.prune(now)
+    // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
+    while (this.records.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
+      const oldest = this.records.keys().next()
+      if (oldest.done) break
+      this.records.delete(oldest.value)
+    }
+    this.records.set(queueId, {
+      record: { ...record, queued_at: new Date(now).toISOString() },
+      expiresAt: now + QUEUE_DOWNLOAD_URL_TTL_MS,
+    })
   }
-  while (queueRequests.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
-    const oldest = queueRequests.keys().next()
-    if (oldest.done) break
-    queueRequests.delete(oldest.value)
-  }
-  queueRequests.set(queueId, {
-    record: { ...record, queued_at: new Date(now).toISOString() },
-    expiresAt: now + QUEUE_DOWNLOAD_URL_TTL_MS,
-  })
-}
 
-function rememberedQueueRequest(queueId: string): QueueRequestRecord | undefined {
-  const entry = queueRequests.get(queueId)
-  if (!entry) return undefined
-  if (entry.expiresAt <= Date.now()) {
-    queueRequests.delete(queueId)
-    return undefined
+  get(queueId: string): QueueRequestRecord | undefined {
+    this.prune()
+    return this.records.get(queueId)?.record
   }
-  return entry.record
+
+  private prune(now = Date.now()): void {
+    for (const [queueId, entry] of this.records) {
+      if (entry.expiresAt <= now) this.records.delete(queueId)
+    }
+  }
 }
 
 /** Replace inline media payloads (data URLs) with placeholders before persisting params to a sidecar. */
@@ -960,6 +963,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
       : fail('VENICE_API_KEY is required for character discovery; x402 wallet authentication is not supported.')
   const asrResults = new AsrResultStore()
   const queueDownloadUrls = new QueueDownloadUrlStore()
+  const queueRequests = new QueueRequestStore()
   const store = cfg.mediaDir ? new MediaStore(cfg.mediaDir) : undefined
   const sleep = opts.sleep ?? defaultSleep
   const localInput = (label: string) => ({ label, maxBytes: cfg.maxLocalInputBytes })
@@ -1496,7 +1500,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned by Venice.')
           queueDownloadUrls.remember(id, resp.download_url)
-          rememberQueueRequest(id, { tool: 'venice_video_generate', model: resp.model ?? args.model, prompt: args.prompt, params: sanitizeParams(args), estimated_cost_usd: estimatedCost })
+          queueRequests.remember(id, { tool: 'venice_video_generate', model: resp.model ?? args.model, prompt: args.prompt, params: sanitizeParams(args), estimated_cost_usd: estimatedCost })
           const costNote = estimatedCost !== undefined ? ` Estimated cost: $${estimatedCost.toFixed(4)} USD.` : ''
           return ok(
             `Queued: queue_id=${id}, model=${resp.model}.${costNote}\n` +
@@ -1586,7 +1590,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               }
             }
           }
-          const queued = rememberedQueueRequest(args.queue_id)
+          const queued = queueRequests.get(args.queue_id)
           const videoMetadata = (extra: Record<string, unknown>) => ({
             tool: 'venice_video_generate',
             model: queued?.model ?? args.model,
@@ -1979,7 +1983,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned.')
-          rememberQueueRequest(id, { tool: 'venice_music_generate', model: resp.model ?? args.model, prompt: args.prompt, params: sanitizeParams(args), estimated_cost_usd: estimatedCost })
+          queueRequests.remember(id, { tool: 'venice_music_generate', model: resp.model ?? args.model, prompt: args.prompt, params: sanitizeParams(args), estimated_cost_usd: estimatedCost })
           const costNote = estimatedCost !== undefined ? ` Estimated cost: $${estimatedCost.toFixed(4)} USD.` : ''
           return ok(
             `Queued: queue_id=${id}, model=${resp.model}.${costNote}\n` +
@@ -2070,7 +2074,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               )
             }
             if (store) {
-              const queued = rememberedQueueRequest(args.queue_id)
+              const queued = queueRequests.get(args.queue_id)
               const durationHeader = Number(response.headers['x-venice-audio-duration'])
               const durationSeconds = Number.isFinite(durationHeader) && durationHeader > 0 ? durationHeader : undefined
               return mediaResult(store, {

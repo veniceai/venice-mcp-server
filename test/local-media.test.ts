@@ -267,6 +267,20 @@ describe('video flow with VENICE_MEDIA_DIR', () => {
     assert.ok(order.indexOf('/v1/video/retrieve') < order.indexOf('/v1/video/complete'))
   })
 
+  it('does not share queued prompts between separately built tool sets', async () => {
+    const mp4 = Buffer.from('mp4')
+    const routes = { '/v1/video/retrieve': () => ({ kind: 'binary', buffer: mp4, contentType: 'video/mp4' }) }
+    const first = setup(routes)
+    const second = setup(routes)
+    await first.get('venice_video_generate').handler({ prompt: 'Private prompt', model: 'm', duration: '4s' } as never)
+
+    const other = await second.get('venice_video_status').handler({ queue_id: 'vid-123', model: 'm' } as never)
+    assert.equal((await readSidecar(other)).prompt, undefined)
+
+    const own = await first.get('venice_video_status').handler({ queue_id: 'vid-123', model: 'm' } as never)
+    assert.equal((await readSidecar(own)).prompt, 'Private prompt')
+  })
+
   it('venice_video_status downloads a COMPLETED download_url to disk instead of returning the link', async () => {
     const mp4 = Buffer.from('downloaded-mp4')
     const { get } = setup({
