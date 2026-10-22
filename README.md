@@ -186,13 +186,20 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
-| `VENICE_MCP_AUTH` | `token` | HTTP-mode auth. `token`: one shared `VENICE_MCP_AUTH_TOKEN` and the server's own Venice credentials. `user-key`: every caller sends their own Venice API key (or `SIGN-IN-WITH-X` proof); stateless, and the server's credentials are never used. |
-| `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Shared bearer token for `token` mode; required when that mode binds outside loopback. Ignored in `user-key` mode, where the bearer is the caller's Venice API key. Use a long random value. |
+| `VENICE_MCP_AUTH` | `token` | HTTP-mode auth. `token`: one shared `VENICE_MCP_AUTH_TOKEN` and the server's own Venice credentials. `user-key`: every caller sends their own Venice API key (or `SIGN-IN-WITH-X` proof); stateless, and the server's credentials are never used. `oauth`: callers sign in through an OAuth authorization server; see [Sign in with OAuth](#sign-in-with-oauth-venice_mcp_authoauth). |
+| `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Shared bearer token for `token` mode; required when that mode binds outside loopback. Ignored in `user-key` and `oauth` modes, where the bearer is the caller's own credential. Use a long random value. |
 | `VENICE_MCP_ALLOWED_ORIGINS` | _(none)_ | Comma-separated origins accepted by the `/mcp` origin guard. Requests without an `Origin` header pass this guard; with no list set, a loopback-bound server only accepts loopback origins. This does not enable browser CORS access. |
+| `VENICE_MCP_RESOURCE_URL` | _(none)_ | `oauth` mode: canonical URL of this endpoint, e.g. `https://mcp.venice.ai/mcp`. Tokens must be issued for it. |
+| `VENICE_MCP_OAUTH_ISSUER` | _(none)_ | `oauth` mode: authorization server issuer URL(s) advertised in the resource metadata. |
+| `VENICE_MCP_OAUTH_INTROSPECTION_URL` | _(none)_ | `oauth` mode: RFC 7662 token introspection endpoint. |
+| `VENICE_MCP_OAUTH_CLIENT_ID` / `VENICE_MCP_OAUTH_CLIENT_SECRET` | _(none)_ | `oauth` mode: credentials for the introspection endpoint, sent as HTTP Basic. |
+| `VENICE_MCP_OAUTH_SCOPES` | _(none)_ | `oauth` mode: scopes every token must carry (comma or space separated). |
+| `VENICE_MCP_OAUTH_ALLOWED_CLIENTS` | _(none)_ | `oauth` mode: OAuth client IDs trusted when introspection returns no `aud`. Otherwise tokens must name `VENICE_MCP_RESOURCE_URL` in `aud`. |
+| `VENICE_MCP_KEY_RESOLVER_URL` / `VENICE_MCP_KEY_RESOLVER_TOKEN` | _(none)_ | `oauth` mode: endpoint that returns the Venice API key for a verified user, when introspection does not include `venice_api_key`. |
 | `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `0` | Emergency escape hatch for unauthenticated exposed HTTP mode. Use only behind a trusted authenticated proxy. |
 | `VENICE_MCP_MAX_SESSIONS` | `100` | Maximum active Streamable HTTP sessions. |
 | `VENICE_MCP_SESSION_TTL_MS` | `1800000` | Idle Streamable HTTP session lifetime before cleanup. |
-| `VENICE_MCP_MAX_CONCURRENT_REQUESTS` | `8` | Maximum active requests per process in `user-key` mode, shared by all callers. Excess requests return HTTP 503 with `Retry-After: 1`. Disconnected calls retain a slot until their work finishes. |
+| `VENICE_MCP_MAX_CONCURRENT_REQUESTS` | `8` | Maximum active requests per process in `user-key` and `oauth` modes, shared by all callers. Excess requests return HTTP 503 with `Retry-After: 1`. Disconnected calls retain a slot until their work finishes. |
 
 ## Self-hosting (Streamable HTTP)
 
@@ -227,6 +234,38 @@ In this mode:
 - Video generation includes the queue-time `download_url` in both text and structured output. Preserve it and pass it on every `venice_video_status` call when present. No queue URL is retained between requests.
 - ASR returns the complete result in one response, including all transcript text and timestamps, subject to the 1 MiB upstream response cap. There are no retained result handles or pages. Continuation handles and nonzero offsets are rejected before another transcription is submitted; `timestamp_limit` is ignored.
 - Requests are bounded by `VENICE_MCP_MAX_CONCURRENT_REQUESTS`; JSON-RPC batches are rejected. The limit is per process, not per caller. Public deployments should also apply rate limits at their proxy for fairness between callers.
+
+### Sign in with OAuth (`VENICE_MCP_AUTH=oauth`)
+
+For hosted connectors (ChatGPT, Claude.ai, Cursor, Grok), users connect with a "Log in with Venice" flow instead of pasting a key. The MCP server is an OAuth 2.1 *resource server*: an external authorization server (for example Clerk's OAuth provider) signs users in, and the server:
+
+1. Answers unauthenticated requests with `401` and `WWW-Authenticate: Bearer resource_metadata="…"`, and serves RFC 9728 metadata at `/.well-known/oauth-protected-resource` (and the path-specific `/.well-known/oauth-protected-resource/mcp`).
+2. Checks each bearer token with RFC 7662 introspection: it must be active, unexpired, carry `VENICE_MCP_OAUTH_SCOPES`, and name `VENICE_MCP_RESOURCE_URL` in `aud`. If your authorization server doesn't return `aud`, list the trusted client IDs in `VENICE_MCP_OAUTH_ALLOWED_CLIENTS`; tokens from any other client are rejected.
+3. Maps the token to the Venice API key that user's requests spend, from a `venice_api_key` introspection field or from `VENICE_MCP_KEY_RESOLVER_URL`. The client's token is never sent to the Venice API. Verified identities are cached for up to 60 s.
+4. Runs each request statelessly with the same protections as `user-key` mode: the `VENICE_MCP_MAX_CONCURRENT_REQUESTS` cap, no JSON-RPC batches, and a key check before any tool downloads a caller-supplied source.
+5. Marks every tool with `_meta.securitySchemes` (`oauth2`), adds a read-only `venice_get_profile` tool (`_meta["openai/profile"]: true`), and returns `_meta["mcp/www_authenticate"]` on tool errors when Venice rejects the key, so ChatGPT offers to reconnect.
+
+```bash
+VENICE_MCP_AUTH=oauth \
+VENICE_MCP_HOST=0.0.0.0 \
+VENICE_MCP_RESOURCE_URL=https://mcp.venice.ai/mcp \
+VENICE_MCP_OAUTH_ISSUER=https://auth.example.com \
+VENICE_MCP_OAUTH_INTROSPECTION_URL=https://auth.example.com/oauth/token_info \
+VENICE_MCP_OAUTH_CLIENT_ID=… VENICE_MCP_OAUTH_CLIENT_SECRET=… \
+VENICE_MCP_KEY_RESOLVER_URL=https://key-resolver.example.com/mcp/api-key \
+VENICE_MCP_KEY_RESOLVER_TOKEN=… \
+VENICE_MCP_PROFILE=hosted \
+npx @veniceai/mcp-server --http
+```
+
+The key resolver contract:
+
+```
+POST {VENICE_MCP_KEY_RESOLVER_URL}
+Authorization: Bearer {VENICE_MCP_KEY_RESOLVER_TOKEN}
+{ "subject": "<token sub>", "client_id": "<OAuth client id>" }
+→ 200 { "api_key": "<Venice API key for this user and client>" }
+```
 
 Or run from source — see [Development](#development) below.
 
