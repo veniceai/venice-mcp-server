@@ -31,6 +31,18 @@ describe('server discovery', () => {
     )
   })
 
+  it('calls the inference uncensored by default', async (t) => {
+    const client = await connect(t)
+    assert.match(client.getInstructions() ?? '', /exposes uncensored, privacy-respecting AI inference/)
+  })
+
+  it('drops "uncensored" from the instructions when VENICE_DISABLE_NSFW=1', async (t) => {
+    const client = await connect(t, { VENICE_DISABLE_NSFW: '1' })
+    const instructions = client.getInstructions() ?? ''
+    assert.match(instructions, /exposes privacy-respecting AI inference/)
+    assert.doesNotMatch(instructions, /uncensored/i)
+  })
+
   it('offers every prompt template by default', async (t) => {
     const client = await connect(t)
     const { prompts } = await client.listPrompts()

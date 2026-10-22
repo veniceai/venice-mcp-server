@@ -22,7 +22,7 @@ startCommand:
       VENICE_DISABLE_NSFW:
         type: string
         title: Disable NSFW capability advertising
-        description: Set to "1" to remove NSFW notes from tool descriptions and hide the uncensored research and NSFW creative writing prompts.
+        description: Set to "1" to remove NSFW notes from tool descriptions, hide the uncensored research and NSFW creative writing prompts, and drop "uncensored" from the server instructions.
   commandFunction: |-
     (config) => ({
       command: "node",
