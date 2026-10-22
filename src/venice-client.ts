@@ -15,7 +15,7 @@ export interface RequestInitJSON {
   responseType?: 'auto' | 'event-stream'
   /** Deprecated alias for `maxBytes`. */
   maxResponseBytes?: number
-  /** Reject a successful response body larger than this many bytes. */
+  /** Override the 16 MiB default limit for a successful response body. */
   maxBytes?: number
   /** Observe response metadata without changing the existing body-only return type. */
   onResponse?: (metadata: ResponseMetadata) => void
@@ -44,6 +44,8 @@ export type VeniceMixedResponse<T> =
   | ({ kind: 'json' } & VeniceResponse<T>)
   | ({ kind: 'binary' } & VeniceBinaryResponse)
 
+/** Default budget for decoded success bodies, including responses without Content-Length. */
+export const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 const MAX_MIXED_JSON_RESPONSE_BYTES = 1024 * 1024
 const MAX_UPSTREAM_ERROR_RESPONSE_BYTES = 64 * 1024
 // 402 bodies carry the top-up and auth instructions agents need, so they get the larger JSON budget.
@@ -66,7 +68,10 @@ export class VeniceResponseTooLargeError extends Error {
     /** Response headers, when known; crypto RPC reads billing headers from an oversized reply. */
     readonly headers: Record<string, string> = {},
   ) {
-    super(`Venice response on ${path} exceeds the configured ${maxBytes}-byte limit`)
+    super(
+      `Venice response on ${path} exceeds the configured ${maxBytes}-byte limit. ` +
+        'The request may have completed upstream. If this was a billable request, it may have been charged; check its result before retrying.',
+    )
     this.name = 'VeniceResponseTooLargeError'
   }
 }
@@ -168,18 +173,12 @@ export class VeniceClient {
       contentType = res.headers.get('content-type') ?? ''
       const maxBytes = init.maxBytes ?? init.maxResponseBytes
       if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status, maxBytes))
-      let text: string
-      try {
-        text =
-          maxBytes !== undefined
-            ? (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
-            : await res.text()
-      } catch (err) {
-        if (err instanceof VeniceResponseTooLargeError) {
-          throw new VeniceResponseTooLargeError(path, err.maxBytes, responseHeaders(res))
-        }
-        throw err
-      }
+      const successLimit = maxBytes ?? (
+        init.responseType === 'event-stream' ? DEFAULT_MAX_EVENT_STREAM_BYTES : DEFAULT_MAX_RESPONSE_BYTES
+      )
+      const buffer = await readBoundedResponseBuffer(res, path, successLimit)
+      // Keep the former fetch decoder after enforcing the byte budget.
+      const text = maxBytes === undefined ? await new Response(buffer).text() : buffer.toString('utf8')
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
       init.onResponse?.({ status: res.status, headers: responseHeaders(res) })
       if (init.responseType === 'event-stream') {
@@ -330,6 +329,7 @@ export class VeniceClient {
         }
         throw err
       }
+      if (ac.signal.aborted) throw timeoutError(timeoutMs)
       return {
         buffer,
         status: res.status,
@@ -373,16 +373,15 @@ export class VeniceClient {
 async function readBoundedResponseBuffer(
   res: Response,
   path: string,
-  maxBytes?: number,
+  maxBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
 ): Promise<Buffer> {
-  if (maxBytes === undefined) return Buffer.from(await res.arrayBuffer())
-
   const contentLength = res.headers.get('content-length')
   if (contentLength !== null) {
     const declaredBytes = Number(contentLength)
     if (Number.isFinite(declaredBytes) && declaredBytes > maxBytes) {
-      await res.body?.cancel()
-      throw new VeniceResponseTooLargeError(path, maxBytes)
+      // Cancellation is best-effort: a stalled/rejected cleanup must not hide the size error.
+      void res.body?.cancel().catch(() => {})
+      throw new VeniceResponseTooLargeError(path, maxBytes, responseHeaders(res))
     }
   }
 
@@ -396,11 +395,13 @@ async function readBoundedResponseBuffer(
       if (done) break
       total += value.byteLength
       if (total > maxBytes) {
-        await reader.cancel()
-        throw new VeniceResponseTooLargeError(path, maxBytes)
+        throw new VeniceResponseTooLargeError(path, maxBytes, responseHeaders(res))
       }
       chunks.push(value)
     }
+  } catch (err) {
+    void reader.cancel().catch(() => {})
+    throw err
   } finally {
     reader.releaseLock()
   }
@@ -526,7 +527,7 @@ function errorBodyLimit(status: number, maxBytes?: number): number {
  * an unreadable or aborted one degrades to an empty body, rather than turning the
  * failure into a timeout or size-limit error.
  */
-async function upstreamError(res: Response, path: string, maxBytes?: number): Promise<VeniceUpstreamError> {
+async function upstreamError(res: Response, path: string, maxBytes: number): Promise<VeniceUpstreamError> {
   const json = isJsonContentType(res.headers.get('content-type') ?? '')
   let body: unknown = json ? {} : ''
   try {
@@ -551,18 +552,13 @@ function isClassifiedClientError(err: unknown): boolean {
   return (
     err instanceof VeniceUpstreamError ||
     err instanceof VeniceMalformedResponseError ||
+    err instanceof VeniceJsonResponseTooLargeError ||
     err instanceof VeniceResponseTooLargeError
   )
 }
 
 function classifyRequestError(err: unknown, signal: AbortSignal, timeoutMs: number): unknown {
-  if (
-    err instanceof VeniceUpstreamError ||
-    err instanceof VeniceMalformedResponseError ||
-    err instanceof VeniceResponseTooLargeError
-  ) {
-    return err
-  }
+  if (isClassifiedClientError(err)) return err
   if (signal.aborted || (err as Error).name === 'AbortError') return timeoutError(timeoutMs)
   return err
 }
