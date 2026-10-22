@@ -966,11 +966,13 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
   const queueRequests = new QueueRequestStore()
   const store = cfg.mediaDir ? new MediaStore(cfg.mediaDir) : undefined
   const sleep = opts.sleep ?? defaultSleep
-  const localInput = (label: string) => ({ label, maxBytes: cfg.maxLocalInputBytes })
+  const localInput = (label: string) => ({ label, maxBytes: cfg.maxLocalInputBytes, allowLocal: cfg.localFiles })
   const mediaDirNote = store
     ? ` Output is saved under ${store.rootDir} and returned as a file:// link with a JSON sidecar; import that path into your editor.`
     : ''
-  const localPathNote = ' Local absolute file paths are accepted anywhere a URL is (they are inlined as data: URLs).'
+  const localPathNote = cfg.localFiles
+    ? ' Local absolute file paths are accepted anywhere a URL is (they are inlined as data: URLs).'
+    : ''
 
   const tools: ToolDef[] = [
     // ========================================================================

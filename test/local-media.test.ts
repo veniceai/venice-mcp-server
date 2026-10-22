@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildTools, toolsetFor, type ToolDef, type ToolResult } from '../src/tools/index.js'
-import { loadConfig, parseToolsets } from '../src/config.js'
+import { loadConfig, parseToolsets, remoteTransportConfig } from '../src/config.js'
 import { MediaStore, extensionForMime } from '../src/media/store.js'
 import { localPathFromInput, resolveMediaInput } from '../src/media/inputs.js'
 import { StubClient } from './helpers/stub-client.js'
@@ -445,6 +445,33 @@ describe('VENICE_TOOLSETS', () => {
 
   it('leaves the media dir empty when no media tool has run', async () => {
     const { mediaDir } = setup({}, { VENICE_TOOLSETS: 'media' })
+    await assert.rejects(readdir(mediaDir))
+  })
+})
+
+describe('remote transports', () => {
+  it('reject local file paths without reading them and never write to the media dir', async () => {
+    const src = join(tmp, 'remote-src.png')
+    await writeFile(src, PNG_1x1)
+    const mediaDir = join(tmp, 'remote-media')
+    const cfg = remoteTransportConfig(loadConfig({ VENICE_API_KEY: 'k', VENICE_MEDIA_DIR: mediaDir }))
+    assert.equal(cfg.mediaDir, undefined)
+    const stub = new StubClient({ '/v1/image/edit': () => ({ buffer: PNG_1x1, contentType: 'image/png' }) })
+    const tools = buildTools(stub.asClient(), cfg)
+    const get = (name: string) => tools.find((t) => t.name === name)!
+
+    for (const [name, args] of [
+      ['venice_image_edit', { image_url: src, prompt: 'make it blue' }],
+      ['venice_image_upscale', { image_url: `file://${src}` }],
+    ] as const) {
+      const r = await get(name).handler(args as never)
+      assert.equal(r.isError, true, name)
+      assert.match((r.content[0] as { text: string }).text, /only accepted when the server runs over stdio/, name)
+    }
+    assert.equal(stub.calls.length, 0)
+
+    const remote = await get('venice_image_edit').handler({ image_url: 'https://example.com/x.png', prompt: 'p' } as never)
+    assert.equal(remote.content[0].type, 'image')
     await assert.rejects(readdir(mediaDir))
   })
 })

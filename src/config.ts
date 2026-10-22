@@ -59,6 +59,8 @@ export interface Config {
   mediaDir: string | undefined
   /** Maximum bytes read from a local file passed as a media input. */
   maxLocalInputBytes: number
+  /** Accept local file paths as media inputs. Only safe when the caller owns the machine (stdio). */
+  localFiles: boolean
   /** Toolset filter. `undefined` = all tools. */
   toolsets: Set<Toolset> | undefined
   /** Server name advertised to MCP clients. */
@@ -141,8 +143,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     mediaDir: env.VENICE_MEDIA_DIR?.trim() || undefined,
     maxLocalInputBytes: parsePositiveInteger(env.VENICE_MAX_LOCAL_INPUT_BYTES, DEFAULT_MAX_LOCAL_INPUT_BYTES),
+    localFiles: true,
     toolsets: parseToolsets(env.VENICE_TOOLSETS),
     serverName: '@veniceai/mcp-server',
     serverVersion: PACKAGE_VERSION,
   }
+}
+
+/**
+ * Config for transports whose callers are remote. They must not read files from, or
+ * write files to, the machine running the server.
+ */
+export function remoteTransportConfig(cfg: Config): Config {
+  return { ...cfg, localFiles: false, mediaDir: undefined }
 }

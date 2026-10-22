@@ -4,6 +4,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { isIP } from 'node:net'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
 import { buildServer } from '../server.js'
+import { loadConfig, remoteTransportConfig } from '../config.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
@@ -77,6 +78,10 @@ function closeTransport(transport: StreamableHTTPServerTransport): void {
  * (Smithery, internal Cloud Run, etc.). Sessionful.
  */
 export async function runHttp(opts: { port?: number; host?: string } = {}): Promise<void> {
+  if (process.env.VENICE_MEDIA_DIR?.trim()) {
+    // eslint-disable-next-line no-console
+    console.error('[venice-mcp] VENICE_MEDIA_DIR is ignored in HTTP mode; media is returned inline.')
+  }
   const app = express()
   app.use(express.json({ limit: '10mb' }))
 
@@ -135,7 +140,7 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
         newTransport.onclose = () => {
           sessions.delete(sessionId)
         }
-        const server = buildServer()
+        const server = buildServer({ config: remoteTransportConfig(loadConfig()) })
         await server.connect(newTransport)
         entry = { transport: newTransport, lastSeen: Date.now() }
       }

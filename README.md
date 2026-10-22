@@ -66,7 +66,7 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 | Tool | Description |
 |---|---|
-| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs (URLs or local file paths), and the Seedance consent attestation flow where applicable. Returns `estimated_cost_usd` from the quote endpoint. |
+| `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs (URLs, or local file paths over stdio), and the Seedance consent attestation flow where applicable. Returns `estimated_cost_usd` from the quote endpoint. |
 | `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link. Pass the queue-time `download_url` for VPS / Grok Imagine Private models. With `VENICE_MEDIA_DIR` set, completed videos are written to disk and returned as a `file://` link. |
 | `venice_video_wait` | Block until the job completes, polling `venice_video_status` with backoff (default 300 s timeout). On timeout returns `PROCESSING` with the `queue_id` so you can call again. |
 | `venice_video_complete` | Mark a completed video as downloaded. Reports server-side deletion only when Venice confirms success. |
@@ -219,8 +219,8 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 | `VENICE_MAX_VIDEO_RESPONSE_BYTES` | `26214400` (25 MiB) | Maximum completed MP4 bytes buffered and base64-embedded by `venice_video_status`. |
 | `VENICE_MAX_IMAGE_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum response bytes buffered by `venice_image_generate`, `venice_image_edit`, `venice_image_multi_edit`, `venice_image_upscale`, and `venice_image_remove_bg`. Larger results are discarded with an error. |
 | `VENICE_MAX_AUDIO_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum audio bytes buffered and base64-embedded by `venice_tts` and `venice_music_status`. An oversized TTS result is discarded with an error; an oversized music result stays queued for a retry. |
-| `VENICE_MEDIA_DIR` | _(none)_ | Write generated images, video, music, and speech to `<dir>/<kind>/` with JSON sidecars and return `file://` links instead of inline base64. `~` is expanded. See [Timeline editors](#️-timeline-editors-davinci-resolve-premiere-final-cut-). |
-| `VENICE_MAX_LOCAL_INPUT_BYTES` | `52428800` (50 MiB) | Maximum size of a local file passed as a `*_url` input. |
+| `VENICE_MEDIA_DIR` | _(none)_ | Write generated images, video, music, and speech to `<dir>/<kind>/` with JSON sidecars and return `file://` links instead of inline base64. `~` is expanded. See [Timeline editors](#️-timeline-editors-davinci-resolve-premiere-final-cut-). Stdio only: ignored in HTTP mode, where media is returned inline. |
+| `VENICE_MAX_LOCAL_INPUT_BYTES` | `52428800` (50 MiB) | Maximum size of a local file passed as a `*_url` input. Local paths are only accepted over stdio; HTTP mode rejects them. |
 | `VENICE_TOOLSETS` | `all` | Comma-separated subset of tools to register: `media` (image, video, audio, music, catalog) or any of `chat`, `image`, `video`, `audio`, `music`, `augment`, `catalog`, `crypto`, `x402`, `account` (billing and API keys). Smaller tool lists save host context. |
 | `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
 | `PORT` | `3333` | HTTP-mode listener. |
