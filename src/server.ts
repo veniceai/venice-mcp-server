@@ -32,7 +32,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       instructions: [
         'Venice MCP exposes uncensored, privacy-respecting AI inference (LLM, image, video, TTS, ASR, music) via Venice.ai.',
         'Auth: set VENICE_API_KEY, or set VENICE_SIWX_TOKEN to a pre-signed EVM or Solana SIGN-IN-WITH-X payload.',
-        'See https://docs.venice.ai/mcp for full reference.',
+        'See https://docs.venice.ai/guides/integrations/venice-mcp for full reference.',
       ].join(' '),
     }
   )
