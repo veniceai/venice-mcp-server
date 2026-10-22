@@ -143,7 +143,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     mediaDir: env.VENICE_MEDIA_DIR?.trim() || undefined,
     maxLocalInputBytes: parsePositiveInteger(env.VENICE_MAX_LOCAL_INPUT_BYTES, DEFAULT_MAX_LOCAL_INPUT_BYTES),
-    localFiles: true,
+    localFiles: false,
     toolsets: parseToolsets(env.VENICE_TOOLSETS),
     serverName: '@veniceai/mcp-server',
     serverVersion: PACKAGE_VERSION,
@@ -156,4 +156,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
  */
 export function remoteTransportConfig(cfg: Config): Config {
   return { ...cfg, localFiles: false, mediaDir: undefined }
+}
+
+/** Config for the stdio transport, whose caller owns the machine and its files. */
+export function localTransportConfig(cfg: Config): Config {
+  return { ...cfg, localFiles: true }
 }

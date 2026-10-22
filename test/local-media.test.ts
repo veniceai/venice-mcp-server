@@ -4,7 +4,7 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { buildTools, toolsetFor, type ToolDef, type ToolResult } from '../src/tools/index.js'
-import { loadConfig, parseToolsets, remoteTransportConfig } from '../src/config.js'
+import { loadConfig, localTransportConfig, parseToolsets, remoteTransportConfig } from '../src/config.js'
 import { MediaStore, extensionForMime } from '../src/media/store.js'
 import { localPathFromInput, resolveMediaInput } from '../src/media/inputs.js'
 import { StubClient } from './helpers/stub-client.js'
@@ -24,7 +24,7 @@ after(async () => {
 
 function setup(overrides: ConstructorParameters<typeof StubClient>[0] = {}, env: Record<string, string> = {}) {
   const mediaDir = join(tmp, `run-${Math.random().toString(36).slice(2)}`)
-  const cfg = loadConfig({ VENICE_API_KEY: 'test-key', VENICE_MEDIA_DIR: mediaDir, ...env })
+  const cfg = localTransportConfig(loadConfig({ VENICE_API_KEY: 'test-key', VENICE_MEDIA_DIR: mediaDir, ...env }))
   const stub = new StubClient(overrides)
   const sleeps: number[] = []
   const tools = buildTools(stub.asClient(), cfg, { sleep: async (ms) => { sleeps.push(ms) } })
@@ -673,6 +673,22 @@ describe('VENICE_TOOLSETS', () => {
   it('leaves the media dir empty when no media tool has run', async () => {
     const { mediaDir } = setup({}, { VENICE_TOOLSETS: 'media' })
     await assert.rejects(readdir(mediaDir))
+  })
+})
+
+describe('library default', () => {
+  it('rejects local file paths unless the stdio transport enables them', async () => {
+    const src = join(tmp, 'default-src.png')
+    await writeFile(src, PNG_1x1)
+    const stub = new StubClient({ '/v1/image/edit': () => ({ buffer: PNG_1x1, contentType: 'image/png' }) })
+    const cfg = loadConfig({ VENICE_API_KEY: 'k' })
+    assert.equal(cfg.localFiles, false)
+    assert.equal(localTransportConfig(cfg).localFiles, true)
+    const edit = buildTools(stub.asClient(), cfg).find((t) => t.name === 'venice_image_edit')!
+    const r = await edit.handler({ image_url: src, prompt: 'make it blue' } as never)
+    assert.equal(r.isError, true)
+    assert.match((r.content[0] as { text: string }).text, /only accepted when the server runs over stdio/)
+    assert.equal(stub.calls.length, 0)
   })
 })
 
