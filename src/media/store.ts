@@ -5,9 +5,9 @@
  * etc.) can import the result directly. Without it, tools keep returning
  * inline base64 content.
  */
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { extname, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 export type MediaKind = 'image' | 'video' | 'music' | 'speech'
@@ -91,19 +91,30 @@ export class MediaStore {
     await mkdir(dir, { recursive: true })
     const ext = extensionForMime(input.mimeType)
     const base = `${timestamp()}-${slugify(input.label)}`
-    let path = join(dir, `${base}.${ext}`)
     // Two generations in the same second with the same label are plausible
-    // (image variants); `wx` refuses to clobber and we retry with a suffix.
-    for (let attempt = 1; ; attempt++) {
+    // (image variants, or mp3 + wav of one track). Files with different
+    // extensions share a sidecar name, so the sidecar is reserved with `wx`
+    // first, then the media; either collision retries with a suffix.
+    let path = ''
+    let sidecarPath = ''
+    for (let attempt = 0; ; attempt++) {
+      const stem = join(dir, attempt === 0 ? base : `${base}-${attempt}`)
+      path = `${stem}.${ext}`
+      sidecarPath = `${stem}.json`
+      try {
+        await writeFile(sidecarPath, '', { flag: 'wx' })
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || attempt >= 99) throw err
+        continue
+      }
       try {
         await writeFile(path, input.buffer, { flag: 'wx' })
         break
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || attempt > 99) throw err
-        path = join(dir, `${base}-${attempt}.${ext}`)
+        await rm(sidecarPath, { force: true })
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST' || attempt >= 99) throw err
       }
     }
-    const sidecarPath = `${path.slice(0, -extname(path).length)}.json`
     const sidecar = {
       file: path,
       mime_type: input.mimeType,
