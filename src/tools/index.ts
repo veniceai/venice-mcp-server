@@ -701,14 +701,21 @@ const responsesVeniceParametersSchema = z
   .optional()
   .describe('Venice-only options supported by /responses: web search, citations, scraping, system prompt control, characters.')
 
-export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
+export interface BuildToolsOptions {
+  stateless?: boolean
+  beforeUpload?: () => Promise<void>
+}
+
+export function buildTools(client: VeniceClient, cfg: Config, options: BuildToolsOptions = {}): ToolDef[] {
+  const { stateless = false } = options
+  const uploadAuth = stateless ? ' HTTP user-key mode requires a Venice API key for this upload operation.' : X402_OK
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
   const requireCharacterApiKey = (): ToolResult | undefined =>
     cfg.apiKey
       ? undefined
       : fail('VENICE_API_KEY is required for character discovery; x402 wallet authentication is not supported.')
-  const asrResults = new AsrResultStore()
-  const queueDownloadUrls = new QueueDownloadUrlStore()
+  const asrResults = stateless ? undefined : new AsrResultStore()
+  const queueDownloadUrls = stateless ? undefined : new QueueDownloadUrlStore()
 
   const tools: ToolDef[] = [
     // ========================================================================
@@ -1049,7 +1056,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_image_upscale',
       title: 'Venice Image Upscale',
-      description: `Upscale an image (2-4× scale). Endpoint requires base64 image; this tool fetches the URL and uploads it. Returns base64 PNG.${X402_OK}`,
+      description: `Upscale an image (2-4× scale). Endpoint requires base64 image; this tool fetches the URL and uploads it. Returns base64 PNG.${uploadAuth}`,
       inputSchema: {
         image_url: z.string().url(),
         scale: z.number().min(2).max(4).optional().describe('Upscale factor, 2 to 4. Defaults to 2. Large inputs are scaled down automatically to stay under the 4096x4096 output cap.'),
@@ -1062,6 +1069,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
+          await options.beforeUpload?.()
           const source = await fetchUploadSource(args.image_url, {
             label: 'image_url',
             fallbackContentType: 'image/png',
@@ -1115,7 +1123,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_generate',
       title: 'Venice Video Queue',
-      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details. Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
+      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} ${stateless ? 'Returns model, queue_id, and download_url when available. Keep the returned download_url and pass it with queue_id and model on every venice_video_status polling request; stateless mode does not retain it.' : 'Returns { model, queue_id }; poll with venice_video_status.'} NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details. Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
@@ -1155,10 +1163,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned by Venice.')
-          queueDownloadUrls.remember(id, resp.download_url)
+          queueDownloadUrls?.remember(id, resp.download_url)
           return ok(
             `Queued: queue_id=${id}, model=${resp.model}\n` +
-              'Poll with venice_video_status using queue_id and model. This process remembers download_url; pass it from structuredContent only if another process will poll. Do not invent a download_url.',
+              (stateless
+                ? (resp.download_url ? `download_url=${resp.download_url}\n` : '') +
+                  'Poll with venice_video_status using queue_id and model. Pass the returned download_url on every polling request when available; stateless mode does not retain it. Do not invent a download_url.'
+                : 'Poll with venice_video_status using queue_id and model. This process remembers download_url; pass it from structuredContent only if another process will poll. Do not invent a download_url.'),
             { queue_id: id, model: resp.model, download_url: resp.download_url }
           )
         } catch (err) {
@@ -1190,12 +1201,14 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_status',
       title: 'Venice Video Retrieve / Status',
-      description: `Check status of a queued video job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 video/mp4 MCP resource or a download_url resource link. For VPS / Grok Imagine Private models, retrieve returns COMPLETED JSON without a URL: this process reuses the queue-time download_url when venice_video_generate ran here, or accepts a Venice-host download_url argument. POST endpoint with body {model, queue_id}.${X402_OK}`,
+      description: `Check status of a queued video job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 video/mp4 MCP resource or a download_url resource link. ${stateless ? 'Pass the queue-time download_url from venice_video_generate on every polling request when available. Stateless mode does not retain it; VPS / Grok Imagine Private models return COMPLETED JSON without a URL and need this argument.' : 'For VPS / Grok Imagine Private models, retrieve returns COMPLETED JSON without a URL: this process reuses the queue-time download_url when venice_video_generate ran here, or accepts a Venice-host download_url argument.'} POST endpoint with body {model, queue_id}.${X402_OK}`,
       inputSchema: {
         queue_id: z.string().min(1).describe('Returned by venice_video_generate.'),
         model: z.string().min(1).describe('Same model id used to queue.'),
         download_url: z.string().url().optional().describe(
-          'Queue-time download_url from venice_video_generate. Must be an https Venice host. Needed for VPS / Grok Imagine Private only when this process did not queue the job (retrieve returns COMPLETED without a URL).',
+          stateless
+            ? 'Queue-time download_url from venice_video_generate. Must be an https Venice host. Pass it on every polling request when returned; stateless mode does not retain it, and VPS / Grok Imagine Private retrieve returns COMPLETED without a URL.'
+            : 'Queue-time download_url from venice_video_generate. Must be an https Venice host. Needed for VPS / Grok Imagine Private only when this process did not queue the job (retrieve returns COMPLETED without a URL).',
         ),
         delete_media_on_completion: z.boolean().optional().describe(
           'Delete server-side media after an embedded MP4 has been buffered, before the tool result returns to the client. Ignored for download_url results: download first, then call venice_video_complete.',
@@ -1235,7 +1248,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                     ' Assume the media is still stored server-side and retry with venice_video_complete.',
                 }
               }
-              queueDownloadUrls.delete(args.queue_id)
+              queueDownloadUrls?.delete(args.queue_id)
               return { deleted: true, cleanupNote: ` ${successNote}` }
             } catch (cleanupError) {
               return {
@@ -1283,7 +1296,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const url =
             resp.download_url ??
             resp.url ??
-            queueDownloadUrls.get(args.queue_id) ??
+            queueDownloadUrls?.get(args.queue_id) ??
             trustedQueueDownloadUrl(queueDownloadUrl)
           if (resp.status === 'COMPLETED') {
             if (!url) {
@@ -1357,7 +1370,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               { server_media_deleted: false },
             )
           }
-          queueDownloadUrls.delete(args.queue_id)
+          queueDownloadUrls?.delete(args.queue_id)
           return ok(`Marked ${args.queue_id} complete; server-side media removed.`, {
             server_media_deleted: true,
           })
@@ -1403,36 +1416,46 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_asr',
       title: 'Venice ASR (Speech-to-Text)',
-      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory. Timestamp arrays and transcripts longer than ${ASR_TEXT_PAGE_CHARS} characters are paged in the MCP result: such a transcription returns result_handle alongside the first page, and every later page must be requested with that handle so the clip is transcribed — and charged — exactly once. Handles are held in memory, per MCP session, for ${ASR_RESULT_TTL_MS / 60_000} minutes and only the ${ASR_RESULT_MAX_ENTRIES} most recent survive, after which paging fails and a fresh transcription is needed.${X402_OK}`,
+      description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory. ${stateless ? 'Stateless mode returns the complete upstream result as JSON text and structuredContent, including the full transcript and timestamp arrays without truncation. Plain-text responses are wrapped as { text }. No result handles are retained and pagination is unsupported: omit result_handle and leave timestamp_offset and text_offset at zero or unset. timestamp_limit is ignored. Continuation attempts are rejected before upload or transcription to avoid a repeat charge.' : `Timestamp arrays and transcripts longer than ${ASR_TEXT_PAGE_CHARS} characters are paged in the MCP result: such a transcription returns result_handle alongside the first page, and every later page must be requested with that handle so the clip is transcribed — and charged — exactly once. Handles are held in memory, per MCP session, for ${ASR_RESULT_TTL_MS / 60_000} minutes and only the ${ASR_RESULT_MAX_ENTRIES} most recent survive, after which paging fails and a fresh transcription is needed.`}${uploadAuth}`,
       inputSchema: {
-        audio_url: z.string().url().optional().describe('Audio to transcribe. Required unless result_handle is supplied.'),
+        audio_url: z.string().url().optional().describe(stateless ? 'Audio to transcribe. Required; stateless mode returns the complete result in one response.' : 'Audio to transcribe. Required unless result_handle is supplied.'),
         result_handle: z
           .string()
           .min(1)
           .optional()
-          .describe(`Handle returned by an earlier paged transcription. Pages that retained result without submitting another transcription, so audio_url is ignored when this is set. Expires after ${ASR_RESULT_TTL_MS / 60_000} minutes or once ${ASR_RESULT_MAX_ENTRIES} newer results are retained; an expired handle is an error rather than a silent re-transcription.`),
+          .describe(stateless ? 'Unsupported in stateless mode. Omit this field; the complete result is returned by the initial request, and continuation attempts are rejected without another transcription.' : `Handle returned by an earlier paged transcription. Pages that retained result without submitting another transcription, so audio_url is ignored when this is set. Expires after ${ASR_RESULT_TTL_MS / 60_000} minutes or once ${ASR_RESULT_MAX_ENTRIES} newer results are retained; an expired handle is an error rather than a silent re-transcription.`),
         model: z.string().optional(),
         language: z.string().optional(),
         response_format: z.enum(['json', 'text']).optional(),
         timestamps: z.boolean().optional().describe('Include word and character timestamps in JSON responses. Defaults to false.'),
-        timestamp_offset: z.number().int().min(0).optional().describe('Start index into each timestamp array (word/segment/char). Defaults to 0. Use result_handle to move past the first page.'),
-        timestamp_limit: z.number().int().min(1).max(ASR_TIMESTAMP_MAX_LIMIT).optional().describe(`Max entries returned per timestamp array. Defaults to ${ASR_TIMESTAMP_DEFAULT_LIMIT}. Follow next_timestamp_offset; it is null on the last page.`),
-        text_offset: z.number().int().min(0).optional().describe(`Start character of the transcript page (${ASR_TEXT_PAGE_CHARS} characters each). Defaults to 0. Use result_handle with next_text_offset to read past the first page.`),
+        timestamp_offset: z.number().int().min(0).optional().describe(stateless ? 'Pagination is unsupported in stateless mode. Omit or set to 0; nonzero offsets are rejected without another transcription.' : 'Start index into each timestamp array (word/segment/char). Defaults to 0. Use result_handle to move past the first page.'),
+        timestamp_limit: z.number().int().min(1).max(ASR_TIMESTAMP_MAX_LIMIT).optional().describe(stateless ? 'Ignored in stateless mode: all timestamp entries are returned, within the 1 MiB upstream response limit.' : `Max entries returned per timestamp array. Defaults to ${ASR_TIMESTAMP_DEFAULT_LIMIT}. Follow next_timestamp_offset; it is null on the last page.`),
+        text_offset: z.number().int().min(0).optional().describe(stateless ? 'Pagination is unsupported in stateless mode. Omit or set to 0; nonzero offsets are rejected without another transcription.' : `Start character of the transcript page (${ASR_TEXT_PAGE_CHARS} characters each). Defaults to 0. Use result_handle with next_text_offset to read past the first page.`),
       },
       handler: async (args) => {
         const offset = args.timestamp_offset ?? 0
         const limit = args.timestamp_limit ?? ASR_TIMESTAMP_DEFAULT_LIMIT
         const textOffset = args.text_offset ?? 0
+        if (stateless && (args.result_handle !== undefined || offset !== 0 || textOffset !== 0)) {
+          return fail(
+            'ASR pagination is unsupported in stateless mode. Use the complete result returned by the initial request. ' +
+              'Omit result_handle and leave timestamp_offset and text_offset at zero or unset only when requesting a fresh, charged transcription with audio_url. No upload or transcription was submitted.',
+            { error: 'asr_pagination_unsupported' },
+          )
+        }
         const respond = (body: AsrUpstreamBody, handle: string | undefined) => {
+          if (stateless) {
+            return ok(JSON.stringify(body), { ...body })
+          }
           const { text, structured, paged } = boundAsrResult(body, offset, limit, textOffset)
           const pageable = structured.timestamps_truncated || structured.next_text_offset != null
-          const resultHandle = handle ?? (pageable ? asrResults.remember(body) : undefined)
+          const resultHandle = handle ?? (pageable ? asrResults?.remember(body) : undefined)
           const full = resultHandle ? { ...structured, result_handle: resultHandle } : structured
           // Hosts that read only text content still need the page and its continuation handle.
           return ok(paged ? JSON.stringify(full) : text, full)
         }
         if (args.result_handle) {
-          const retained = asrResults.get(args.result_handle)
+          const retained = asrResults?.get(args.result_handle)
           if (!retained) {
             return fail(
               `Unknown or expired result_handle. Retained transcriptions are dropped after ${ASR_RESULT_TTL_MS / 60_000} minutes, or sooner once ${ASR_RESULT_MAX_ENTRIES} newer results are retained. ` +
@@ -1442,8 +1465,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           return respond(retained, args.result_handle)
         }
-        if (!args.audio_url) return fail('audio_url is required unless result_handle is supplied')
+        if (!args.audio_url) return fail(stateless ? 'audio_url is required in stateless mode' : 'audio_url is required unless result_handle is supplied')
         try {
+          await options.beforeUpload?.()
           const source = await fetchUploadSource(args.audio_url, {
             label: 'audio_url',
             fallbackContentType: 'audio/wav',
@@ -1469,7 +1493,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) {
             return fail(
-              'Transcription response exceeds 1 MiB. Disable timestamps or transcribe a shorter clip; timestamped word/character arrays are unbounded upstream.',
+              'Transcription response exceeds 1 MiB. Disable timestamps or transcribe a shorter clip; timestamped word/character arrays are unbounded upstream. ' +
+                'The transcription was already submitted and may have been charged; retrying submits another charged transcription.',
             )
           }
           return fail(formatToolError(err))
@@ -1480,7 +1505,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_voice_clone',
       title: 'Venice Voice Clone / List',
-      description: `Discover or clone TTS voices. Action 'list' reads live per-model voice metadata from auth-free GET /v1/models?type=tts. Action 'create' requires sample_url, then uploads the sample to POST /v1/audio/voices for the chosen cloning model. Cloned voices come back as a \`vv_<id>\` handle; pass it as venice_tts voice together with the same model.${X402_OK}`,
+      description: `Discover or clone TTS voices. Action 'list' reads live per-model voice metadata from auth-free GET /v1/models?type=tts. Action 'create' requires sample_url, then uploads the sample to POST /v1/audio/voices for the chosen cloning model. Cloned voices come back as a \`vv_<id>\` handle; pass it as venice_tts voice together with the same model.${uploadAuth}`,
       inputSchema: {
         action: z.enum(['list', 'create']).describe('list = fetch live TTS model voice metadata; create requires sample_url'),
         sample_url: z
@@ -1502,6 +1527,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           // action === 'create'
           if (!args.sample_url) return fail('sample_url is required for action=create')
+          await options.beforeUpload?.()
           const source = await fetchUploadSource(args.sample_url, {
             label: 'sample_url',
             fallbackContentType: 'audio/mpeg',
@@ -1810,12 +1836,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_text_parser',
       title: 'Venice Text Parser (PDF/DOCX/EPUB/PPTX/XLSX)',
-      description: `Extract text from a document URL. Fetches the URL server-side and uploads the file as multipart/form-data.${X402_OK}`,
+      description: `Extract text from a document URL. Fetches the URL server-side and uploads the file as multipart/form-data.${uploadAuth}`,
       inputSchema: {
         url: z.string().url(),
       },
       handler: async (args) => {
         try {
+          await options.beforeUpload?.()
           const source = await fetchUploadSource(args.url, {
             label: 'url',
             fallbackContentType: 'application/pdf',
