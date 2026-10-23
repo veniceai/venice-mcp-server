@@ -1051,7 +1051,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Image Upscale',
       description: `Upscale an image (2-4× scale). Endpoint requires base64 image; this tool fetches the URL and uploads it. Returns base64 PNG.${X402_OK}`,
       inputSchema: {
-        image_url: z.string().url(),
+        image_url: z.string().url().describe('Image to upscale: an http(s) URL or an inline base64 data URL.'),
         scale: z.number().min(2).max(4).optional().describe('Upscale factor, 2 to 4. Defaults to 2. Large inputs are scaled down automatically to stay under the 4096x4096 output cap.'),
         creativity: z
           .number()
@@ -1405,7 +1405,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice ASR (Speech-to-Text)',
       description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory. Timestamp arrays and transcripts longer than ${ASR_TEXT_PAGE_CHARS} characters are paged in the MCP result: such a transcription returns result_handle alongside the first page, and every later page must be requested with that handle so the clip is transcribed — and charged — exactly once. Handles are held in memory, per MCP session, for ${ASR_RESULT_TTL_MS / 60_000} minutes and only the ${ASR_RESULT_MAX_ENTRIES} most recent survive, after which paging fails and a fresh transcription is needed.${X402_OK}`,
       inputSchema: {
-        audio_url: z.string().url().optional().describe('Audio to transcribe. Required unless result_handle is supplied.'),
+        audio_url: z.string().url().optional().describe('Audio to transcribe, as an http(s) URL or an inline base64 data URL. Required unless result_handle is supplied.'),
         result_handle: z
           .string()
           .min(1)
@@ -1487,7 +1487,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           .string()
           .url()
           .optional()
-          .describe('Required for action=create. Audio sample URL; tts-chatterbox-hd accepts MP3/WAV/FLAC/M4A, tts-minimax-speech-02-hd MP3/WAV only.'),
+          .describe('Required for action=create. Audio sample as an http(s) URL or an inline base64 data URL; tts-chatterbox-hd accepts MP3/WAV/FLAC/M4A, tts-minimax-speech-02-hd MP3/WAV only.'),
         model: z
           .enum(VOICE_CLONE_MODELS)
           .optional()
@@ -1812,7 +1812,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Text Parser (PDF/DOCX/EPUB/PPTX/XLSX)',
       description: `Extract text from a document URL. Fetches the URL server-side and uploads the file as multipart/form-data.${X402_OK}`,
       inputSchema: {
-        url: z.string().url(),
+        url: z.string().url().describe('Document to parse: an http(s) URL or an inline base64 data URL.'),
       },
       handler: async (args) => {
         try {

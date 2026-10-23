@@ -33,6 +33,9 @@ export interface UploadSource {
 }
 
 export async function fetchUploadSource(url: string, opts: FetchUploadSourceOptions): Promise<UploadSource> {
+  const inline = decodeDataUrl(url)
+  if (inline) return resolveInlineSource(inline, opts)
+
   const ac = new AbortController()
   const timeout = setTimeout(() => ac.abort(), opts.timeoutMs)
   const fetchImpl = opts.fetchImpl ?? fetch
@@ -95,6 +98,76 @@ export async function fetchUploadSource(url: string, opts: FetchUploadSourceOpti
 function cancelResponseBody(res: Response | undefined): void {
   // Cancellation starts immediately; a failing or stalled cleanup must not mask the result.
   void res?.body?.cancel().catch(() => {})
+}
+
+export interface DecodedDataUrl {
+  buffer: Buffer
+  contentType: string
+}
+
+const DATA_URL_PATTERN = /^data:([^,]*),(.*)$/s
+
+/**
+ * Decode a `data:` URL into raw bytes.
+ *
+ * The MCP tool schemas use `z.string().url()`, which accepts `data:` URLs, but
+ * the upload path only ever understood http/https. Every tool that advertises
+ * an inline-base64 alternative (image upscale, ASR, voice clone, document
+ * parsing) therefore failed with "unsupported scheme: data:".
+ *
+ * A data URL carries no hostname, so it bypasses DNS and the private-address
+ * check by construction. Returns `undefined` for anything that is not a data
+ * URL so callers can fall through to the network path.
+ */
+export function decodeDataUrl(url: string): DecodedDataUrl | undefined {
+  const match = DATA_URL_PATTERN.exec(url)
+  if (!match) return undefined
+
+  const [, rawMeta, rawBody] = match
+  const isBase64 = /;base64$/i.test(rawMeta)
+  // An omitted media type stays empty rather than defaulting to text/plain, so
+  // a typeless data URL falls through to magic-byte sniffing exactly like a
+  // response that arrived without a Content-Type header.
+  const contentType = isBase64 ? rawMeta.replace(/;base64$/i, '') : rawMeta
+  // Percent-decoding applies only to the non-base64 form; `%` is not a valid
+  // base64 character, so decoding base64 first would corrupt the bodies that
+  // base64url produces.
+  const decodedBody = isBase64 ? rawBody : safeDecodeURIComponent(rawBody)
+
+  return { buffer: Buffer.from(decodedBody, isBase64 ? 'base64' : 'utf8'), contentType }
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
+/**
+ * Apply the same byte budget, emptiness and content-type rules to an inline
+ * data URL that the network path applies to a fetched body, so a caller cannot
+ * smuggle a mismatched payload past validation by inlining it.
+ */
+function resolveInlineSource(decoded: DecodedDataUrl, opts: FetchUploadSourceOptions): UploadSource {
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_UPLOAD_BYTES
+  if (decoded.buffer.length > maxBytes) {
+    throw new Error(`Could not fetch ${opts.label}: response is larger than ${maxBytes} bytes`)
+  }
+  if (decoded.buffer.length === 0) throw new Error(`Could not fetch ${opts.label}: empty response body`)
+
+  // A media type written into the data URL is authoritative, exactly like a
+  // Content-Type header is on the wire. Only a typeless data URL is treated as
+  // headerless, and only then does the magic-byte signature decide the type.
+  const mediaTypeOmitted = decoded.contentType === ''
+  assertAllowedContentType(decoded.contentType, opts.allowedContentTypes, opts.label, decoded.buffer, mediaTypeOmitted)
+
+  return {
+    buffer: decoded.buffer,
+    contentType: mediaTypeOmitted ? opts.fallbackContentType : decoded.contentType,
+    filename: opts.fallbackFilename,
+  }
 }
 
 export async function validateRemoteUrl(url: URL, lookupAddresses: LookupAddresses = lookupHostname): Promise<void> {
