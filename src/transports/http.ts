@@ -16,11 +16,21 @@ interface SessionEntry {
   lastSeen: number
 }
 
+const BEARER_SCHEME_PATTERN = /^Bearer\s+(.+)$/i
+
 export function isAuthorizedBearerHeader(header: string | undefined, expectedToken: string | undefined): boolean {
-  if (!expectedToken) return true
-  if (!header?.startsWith('Bearer ')) return false
-  const actual = Buffer.from(header.slice('Bearer '.length))
-  const expected = Buffer.from(expectedToken)
+  const token = expectedToken?.trim()
+  if (!token) return true
+
+  // RFC 7235 makes the auth scheme case-insensitive and allows more than one
+  // space (and, for obs-fold, tabs) between the scheme and the token. A strict
+  // startsWith('Bearer ') rejected "bearer", "BEARER" and extra spacing, which
+  // several HTTP clients emit.
+  const match = header === undefined ? null : BEARER_SCHEME_PATTERN.exec(header)
+  if (!match) return false
+
+  const actual = Buffer.from(match[1])
+  const expected = Buffer.from(token)
   return actual.length === expected.length && timingSafeEqual(actual, expected)
 }
 
