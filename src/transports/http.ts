@@ -78,6 +78,27 @@ export function isValidSessionId(sessionId: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)
 }
 
+/**
+ * Startup warning describing how exposed the listener is, or undefined when the
+ * posture is fully guarded.
+ *
+ * A loopback bind with no token is the quiet case worth naming: it cannot fail
+ * validation, so it starts silently, yet any local process can call the
+ * endpoint and spend the server's Venice credentials.
+ */
+export function httpAuthWarning(host: string, authToken: string | undefined): string | undefined {
+  const token = authToken?.trim()
+  if (token) {
+    return isLoopbackHost(host)
+      ? undefined
+      : `bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`
+  }
+
+  return isLoopbackHost(host)
+    ? 'no VENICE_MCP_AUTH_TOKEN set — any local process can call it and spend the server\'s Venice credentials.'
+    : 'no VENICE_MCP_AUTH_TOKEN set — the server is reachable beyond loopback and any caller can spend its Venice credentials.'
+}
+
 async function closeTransport(transport: StreamableHTTPServerTransport): Promise<void> {
   try {
     await transport.close()
@@ -295,9 +316,10 @@ export async function runHttp(opts: {
   const address = listener.address()
   // eslint-disable-next-line no-console
   console.error(`[venice-mcp] listening on http://${host}:${typeof address === 'object' && address ? address.port : port}/mcp`)
-  if (!isLoopbackHost(host)) {
+  const warning = httpAuthWarning(host, authToken)
+  if (warning) {
     // eslint-disable-next-line no-console
-    console.error(`[venice-mcp] WARNING: bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`)
+    console.error(`[venice-mcp] WARNING: ${warning}`)
   }
   return listener
 }
