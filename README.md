@@ -195,6 +195,8 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 
 `/mcp` is a credential-backed tool execution endpoint: callers can spend the configured Venice API key or x402 balance. When HTTP mode binds outside loopback, startup fails unless `VENICE_MCP_AUTH_TOKEN` is set, or `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1` is explicitly set behind a trusted authenticated proxy.
 
+A loopback bind needs no token and starts without one, but it is not guarded by default: any local process can then call `/mcp` and spend the server's Venice credentials. Startup warns whenever the posture is unguarded, so set `VENICE_MCP_AUTH_TOKEN` even for local HTTP when more than one user or process shares the machine.
+
 ```bash
 docker run -p 3333:3333 \
   -e VENICE_API_KEY=<your-venice-api-key> \

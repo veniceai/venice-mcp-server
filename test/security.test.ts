@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { isAuthorizedBearerHeader, isLoopbackHost, isValidSessionId, validateHttpAuthConfig } from '../src/transports/http.js'
+import { httpAuthWarning, isAuthorizedBearerHeader, isLoopbackHost, isValidSessionId, validateHttpAuthConfig } from '../src/transports/http.js'
 import { fetchUploadSource, validateRemoteUrl } from '../src/tools/remote-fetch.js'
 
 const publicLookup = async () => ['93.184.216.34']
@@ -17,6 +17,21 @@ describe('HTTP MCP bearer auth', () => {
     assert.equal(isAuthorizedBearerHeader('Basic secret', 'secret'), false)
     assert.equal(isAuthorizedBearerHeader('Bearer wrong', 'secret'), false)
     assert.equal(isAuthorizedBearerHeader('Bearer secret', 'secret'), true)
+  })
+
+  it('accepts any auth-scheme casing and surrounding whitespace', () => {
+    // RFC 7235 makes the scheme case-insensitive and allows 1*SP after it.
+    for (const header of ['bearer secret', 'BEARER secret', 'BeArEr secret', 'Bearer  secret', 'Bearer secret ']) {
+      assert.equal(isAuthorizedBearerHeader(header, 'secret'), true, header)
+    }
+  })
+
+  it('keeps the scheme strict about the exact token', () => {
+    assert.equal(isAuthorizedBearerHeader('bearer  wrong', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer ', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Token secret', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer secret extra', 'secret'), false)
   })
 
   it('requires a strong token when HTTP mode is exposed beyond loopback', () => {
@@ -288,5 +303,31 @@ describe('remote upload fetch security', () => {
 
     assert.deepEqual(pinned, ['assets.example:93.184.216.34'])
     assert.equal(source.filename, 'image.png')
+  })
+})
+
+describe('HTTP auth startup warning', () => {
+  it('warns when a loopback bind has no token', () => {
+    const warning = httpAuthWarning('127.0.0.1', undefined)
+    assert.match(warning ?? '', /no VENICE_MCP_AUTH_TOKEN/)
+    assert.match(warning ?? '', /local process/)
+  })
+
+  it('stays quiet when a loopback bind is token-guarded', () => {
+    assert.equal(httpAuthWarning('127.0.0.1', '0123456789abcdef'), undefined)
+  })
+
+  it('warns about reachability when exposed with a token', () => {
+    assert.match(httpAuthWarning('0.0.0.0', '0123456789abcdef') ?? '', /reachable beyond loopback/)
+  })
+
+  it('names both exposures when bound outward with no token', () => {
+    const warning = httpAuthWarning('0.0.0.0', undefined) ?? ''
+    assert.match(warning, /no VENICE_MCP_AUTH_TOKEN/)
+    assert.match(warning, /beyond loopback/)
+  })
+
+  it('treats a blank token as absent', () => {
+    assert.match(httpAuthWarning('127.0.0.1', '   ') ?? '', /no VENICE_MCP_AUTH_TOKEN/)
   })
 })

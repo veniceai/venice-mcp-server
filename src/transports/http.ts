@@ -14,10 +14,19 @@ interface SessionEntry {
   lastSeen: number
 }
 
+const BEARER_SCHEME_PATTERN = /^Bearer\s+(.+)$/i
+
 export function isAuthorizedBearerHeader(header: string | undefined, expectedToken: string | undefined): boolean {
   if (!expectedToken) return true
-  if (!header?.startsWith('Bearer ')) return false
-  const actual = Buffer.from(header.slice('Bearer '.length))
+
+  // RFC 7235 makes the auth scheme case-insensitive and allows more than one
+  // space (and, for obs-fold, tabs) between the scheme and the token. A strict
+  // startsWith('Bearer ') rejected "bearer", "BEARER" and extra spacing, which
+  // several HTTP clients emit.
+  const match = header === undefined ? null : BEARER_SCHEME_PATTERN.exec(header)
+  if (!match) return false
+
+  const actual = Buffer.from(match[1].trimEnd())
   const expected = Buffer.from(expectedToken)
   return actual.length === expected.length && timingSafeEqual(actual, expected)
 }
@@ -65,6 +74,27 @@ export function validateHttpAuthConfig(
 
 export function isValidSessionId(sessionId: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)
+}
+
+/**
+ * Startup warning describing how exposed the listener is, or undefined when the
+ * posture is fully guarded.
+ *
+ * A loopback bind with no token is the quiet case worth naming: it cannot fail
+ * validation, so it starts silently, yet any local process can call the
+ * endpoint and spend the server's Venice credentials.
+ */
+export function httpAuthWarning(host: string, authToken: string | undefined): string | undefined {
+  const token = authToken?.trim()
+  if (token) {
+    return isLoopbackHost(host)
+      ? undefined
+      : `bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`
+  }
+
+  return isLoopbackHost(host)
+    ? 'no VENICE_MCP_AUTH_TOKEN set — any local process can call it and spend the server\'s Venice credentials.'
+    : 'no VENICE_MCP_AUTH_TOKEN set — the server is reachable beyond loopback and any caller can spend its Venice credentials.'
 }
 
 function closeTransport(transport: StreamableHTTPServerTransport): void {
@@ -155,7 +185,8 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
   // Default to loopback-only for safety. Opt in to all-interfaces via VENICE_MCP_HOST=0.0.0.0
   // (useful for Docker containers and intentional LAN exposure).
   const host = opts.host ?? process.env.VENICE_MCP_HOST ?? '127.0.0.1'
-  validateHttpAuthConfig(host, process.env.VENICE_MCP_AUTH_TOKEN)
+  const authToken = process.env.VENICE_MCP_AUTH_TOKEN
+  validateHttpAuthConfig(host, authToken)
   await new Promise<void>((resolve, reject) => {
     const listener = app.listen(port, host)
     listener.once('listening', () => resolve())
@@ -163,8 +194,9 @@ export async function runHttp(opts: { port?: number; host?: string } = {}): Prom
   })
   // eslint-disable-next-line no-console
   console.error(`[venice-mcp] listening on http://${host}:${port}/mcp`)
-  if (!isLoopbackHost(host)) {
+  const warning = httpAuthWarning(host, authToken)
+  if (warning) {
     // eslint-disable-next-line no-console
-    console.error(`[venice-mcp] WARNING: bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`)
+    console.error(`[venice-mcp] WARNING: ${warning}`)
   }
 }
