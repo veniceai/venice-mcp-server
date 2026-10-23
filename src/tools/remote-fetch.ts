@@ -306,6 +306,22 @@ function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
 }
 
+/**
+ * How much trust the declared content type deserves.
+ *
+ * `declared` means a concrete type arrived, `typeless` means the body carried
+ * no media type at all, and `generic` means the sender fell back to
+ * application/octet-stream — the cheapest thing to claim. The three deserve
+ * different treatment because two of them are free to forge.
+ */
+type DeclaredContentType = 'declared' | 'typeless' | 'generic'
+
+function classifyDeclaredContentType(contentType: string): DeclaredContentType {
+  if (!contentType) return 'typeless'
+  if (contentType.split(';', 1)[0].trim().toLowerCase() === 'application/octet-stream') return 'generic'
+  return 'declared'
+}
+
 function assertAllowedContentType(
   contentType: string,
   allowed: string[] | undefined,
@@ -314,17 +330,49 @@ function assertAllowedContentType(
   usedFallbackContentType: boolean,
 ): void {
   if (!allowed || allowed.length === 0) return
+
   const normalized = contentType.split(';', 1)[0].trim().toLowerCase()
   if (normalized === 'application/octet-stream' && allowed.some((entry) => entry.toLowerCase() === 'application/octet-stream')) return
-  if ((!normalized || normalized === 'application/octet-stream' || usedFallbackContentType) && isAllowedByMagicBytes(buffer, allowed)) return
 
-  const ok = allowed.some((entry) => {
-    const allowedType = entry.toLowerCase()
-    return normalized.startsWith(allowedType)
-  })
-  if (!ok) throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
-  if (usedFallbackContentType) throw new Error(`Could not fetch ${label}: missing content-type did not match allowed file signatures`)
-  if (normalized === 'application/octet-stream') throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
+  // A type the sender actually declared gets the benefit of an exact match.
+  // When the caller substituted a fallback, the declared value is the caller's
+  // guess rather than the sender's claim, so it does not get that shortcut.
+  const kind: DeclaredContentType = usedFallbackContentType ? 'typeless' : classifyDeclaredContentType(normalized)
+  if (kind === 'declared') {
+    if (allowed.some((entry) => normalized.startsWith(entry.toLowerCase()))) return
+    throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
+  }
+
+  // Absent and generic types are both forgeable, so decide on the body itself.
+  if (!isAllowedByMagicBytes(buffer, allowed)) {
+    throw new Error(
+      kind === 'typeless'
+        ? `Could not fetch ${label}: missing content-type did not match allowed file signatures`
+        : `Could not fetch ${label}: unsupported content-type ${contentType}`,
+    )
+  }
+
+  // The signature passes the allowlist, but a declared type is a claim the
+  // sender is free to mint. When it disagrees with the bytes, prefer the bytes:
+  // a real payload mislabelled octet-stream is far likelier than a spoofed
+  // signature that happens to match.
+  if (kind === 'generic' && !typeAgreesWithSignature(normalized, buffer, allowed)) {
+    throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
+  }
+}
+
+/** True when the body identifies itself as the declared type's family. */
+function typeAgreesWithSignature(normalized: string, buffer: Buffer, allowed: string[]): boolean {
+  const allowedTypes = allowed.map((entry) => entry.toLowerCase())
+  const withinAllowlist = allowedTypes.some((entry) => normalized.startsWith(entry))
+  // A declared type outside the allowlist has no family to corroborate, so its
+  // match was reached through the signature; accept that rather than
+  // double-counting the same check.
+  if (!withinAllowlist) return true
+  if (normalized.startsWith('image/')) return isImage(buffer)
+  if (normalized.startsWith('audio/')) return isAudio(buffer)
+  if (normalized.startsWith('video/')) return isVideo(buffer)
+  return true
 }
 
 function filenameFromUrl(url: URL, fallback: string): string {
