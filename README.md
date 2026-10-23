@@ -38,7 +38,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**45 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer). The voices resource is built live from each TTS model's catalog metadata.
+**45 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer; `VENICE_DISABLE_NSFW=1` hides the first two). The voices resource is built live from each TTS model's catalog metadata.
 
 Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` annotations to help hosts decide when to request approval. Video and music status tools are marked destructive because their optional `delete_media_on_completion` argument can delete stored media before returning the result. Hints describe a tool's possible behavior; hosts should still enforce their own approval policy.
 
@@ -178,7 +178,7 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 | `VENICE_DEFAULT_IMAGE_MODEL` | `flux-2-pro` | |
 | `VENICE_DEFAULT_TTS_MODEL` | `tts-kokoro` | |
 | `VENICE_DEFAULT_ASR_MODEL` | `openai/whisper-large-v3` | |
-| `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions. |
+| `VENICE_DISABLE_NSFW` | `0` | Set to `1` to remove NSFW capability notes from tool descriptions, hide the uncensored research and NSFW creative writing prompt templates, and drop "uncensored" from the server instructions. |
 | `VENICE_HTTP_TIMEOUT_MS` | `60000` | |
 | `VENICE_MAX_VIDEO_RESPONSE_BYTES` | `26214400` (25 MiB) | Maximum completed MP4 bytes buffered and base64-embedded by `venice_video_status`. |
 | `VENICE_MAX_IMAGE_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum response bytes buffered by `venice_image_generate`, `venice_image_edit`, `venice_image_multi_edit`, `venice_image_upscale`, and `venice_image_remove_bg`. Larger results are discarded with an error. |
@@ -468,9 +468,9 @@ If the key is missing or blank, the server falls back to x402 mode and returns a
 
 ---
 
-## Disclaimer
+## Support
 
-Community-maintained. Provided **as-is**, with no warranty or SLA from Venice AI. Use at your own risk.
+Maintained by Venice AI. Report bugs and request features in [GitHub issues](https://github.com/veniceai/venice-mcp-server/issues). For account or billing help, email support@venice.ai.
 
 ## License
 
