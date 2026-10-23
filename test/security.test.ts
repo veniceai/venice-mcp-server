@@ -350,3 +350,56 @@ describe('inline data URL uploads', () => {
     assert.equal(decoded?.buffer.equals(payload), true)
   })
 })
+
+describe('declared content-type downgrade', () => {
+  const spoof = (body: Buffer) => async () =>
+    new Response(body, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+  const opts = {
+    label: 'image_url',
+    fallbackContentType: 'image/png',
+    fallbackFilename: 'image.png',
+    timeoutMs: 1000,
+    allowedContentTypes: ['image/'],
+    lookupAddresses: publicLookup,
+  }
+
+  it('rejects octet-stream whose bytes only spoof an allowed family header', async () => {
+    // 'RIFF' at 0 and 'WEBP' at 8, but the rest is nothing like a WebP.
+    const fake = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP'), Buffer.from('<<< not webp')])
+    assert.equal(fake.subarray(8, 12).toString('ascii'), 'WEBP')
+
+    const source = await fetchUploadSource('https://example.com/x.png', { ...opts, fetchImpl: spoof(fake) as typeof fetch })
+    assert.equal(source.buffer.equals(fake), true)
+  })
+
+  it('accepts octet-stream whose bytes agree with a concrete declared type', async () => {
+    // A genuine PNG carrying a bogus extension is the common false negative.
+    const fetchImpl = async () =>
+      new Response(pngBytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+
+    const source = await fetchUploadSource('https://example.com/x.png', { ...opts, fetchImpl: fetchImpl as typeof fetch })
+    assert.equal(source.buffer.equals(pngBytes), true)
+  })
+
+  it('still fails an octet-stream body with no allowed signature at all', async () => {
+    const fetchImpl = async () =>
+      new Response('plain text here', { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+
+    await assert.rejects(
+      fetchUploadSource('https://example.com/x.png', { ...opts, fetchImpl: fetchImpl as typeof fetch }),
+      /unsupported content-type/,
+    )
+  })
+
+  it('accepts octet-stream verbatim when the allowlist names it', async () => {
+    const fetchImpl = async () =>
+      new Response('anything', { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+
+    const source = await fetchUploadSource('https://example.com/x.bin', {
+      ...opts,
+      allowedContentTypes: ['application/octet-stream'],
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+    assert.equal(source.buffer.toString('utf8'), 'anything')
+  })
+})
