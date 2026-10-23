@@ -1,10 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { isAuthorizedBearerHeader, isLoopbackHost, isValidSessionId, validateHttpAuthConfig } from '../src/transports/http.js'
-import { fetchUploadSource, validateRemoteUrl } from '../src/tools/remote-fetch.js'
+import { decodeDataUrl, fetchUploadSource, validateRemoteUrl } from '../src/tools/remote-fetch.js'
 
 const publicLookup = async () => ['93.184.216.34']
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const inlineOpts = { label: 'image_url', fallbackContentType: 'image/png', fallbackFilename: 'image.png', timeoutMs: 1000 }
 
 describe('HTTP MCP bearer auth', () => {
   it('allows requests when no auth token is configured', () => {
@@ -288,5 +289,64 @@ describe('remote upload fetch security', () => {
 
     assert.deepEqual(pinned, ['assets.example:93.184.216.34'])
     assert.equal(source.filename, 'image.png')
+  })
+})
+
+describe('inline data URL uploads', () => {
+  it('decodes a base64 data URL without touching the network', async () => {
+    const url = `data:image/png;base64,${pngBytes.toString('base64')}`
+    const source = await fetchUploadSource(url, { ...inlineOpts })
+
+    assert.equal(source.buffer.equals(pngBytes), true)
+    assert.equal(source.contentType, 'image/png')
+    assert.equal(source.filename, 'image.png')
+  })
+
+  it('decodes a percent-encoded plain data URL', async () => {
+    const source = await fetchUploadSource('data:text/plain,hello%20world', {
+      ...inlineOpts,
+      fallbackContentType: 'text/plain',
+      allowedContentTypes: ['text/'],
+    })
+
+    assert.equal(source.buffer.toString('utf8'), 'hello world')
+    assert.equal(source.contentType, 'text/plain')
+  })
+
+  it('falls back to magic bytes when the data URL omits a media type', async () => {
+    const source = await fetchUploadSource(`data:;base64,${pngBytes.toString('base64')}`, {
+      ...inlineOpts,
+      allowedContentTypes: ['image/'],
+    })
+
+    assert.equal(source.buffer.equals(pngBytes), true)
+  })
+
+  it('honours the byte budget and empty-body rules for inline sources', async () => {
+    await assert.rejects(
+      fetchUploadSource(`data:image/png;base64,${pngBytes.toString('base64')}`, { ...inlineOpts, maxBytes: 4 }),
+      /larger than 4 bytes/,
+    )
+    await assert.rejects(fetchUploadSource('data:image/png;base64,', inlineOpts), /empty response body/)
+  })
+
+  it('rejects an inline payload whose declared type is not allowed', async () => {
+    await assert.rejects(
+      fetchUploadSource('data:text/html,hi', { ...inlineOpts, allowedContentTypes: ['image/'] }),
+      /unsupported content-type/,
+    )
+  })
+
+  it('decodes only data URLs and leaves everything else to the network path', () => {
+    assert.equal(decodeDataUrl('https://example.com/x.png'), undefined)
+    assert.equal(decodeDataUrl('file:///etc/passwd'), undefined)
+    assert.equal(decodeDataUrl('data:,plain')?.buffer.toString('utf8'), 'plain')
+  })
+
+  it('base64-decodes a payload that contains percent characters', () => {
+    // '%' is not a base64 character, so percent-decoding first would corrupt these bytes.
+    const payload = Buffer.from([0xfb, 0xff, 0x3e, 0x3d])
+    const decoded = decodeDataUrl(`data:application/octet-stream;base64,${payload.toString('base64')}`)
+    assert.equal(decoded?.buffer.equals(payload), true)
   })
 })
