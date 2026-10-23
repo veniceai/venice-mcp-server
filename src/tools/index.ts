@@ -41,7 +41,9 @@ import {
   fitJson,
   fitJsonList,
   formatToolError,
+  MAX_TEXT_CHARS,
   truncate,
+  truncationMetadata,
   type AsrUpstreamBody,
 } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
@@ -718,7 +720,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. Completion id and actual model, when returned upstream, are available in structured content. Responses marked X-Venice-TEE: true also include a JSON text block for venice_tee_signature. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. Completion text longer than ${MAX_TEXT_CHARS} characters is truncated and the result reports omitted_chars in structured content. Completion id and actual model, when returned upstream, are available in structured content. Responses marked X-Venice-TEE: true also include a JSON text block for venice_tee_signature. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -787,9 +789,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             ...(typeof resp.id === 'string' ? { id: resp.id } : {}),
             ...(typeof resp.model === 'string' ? { model: resp.model } : {}),
           }
+          const fitted = truncate(text)
           return ok(
-            truncate(text),
-            { ...metadata, message, usage: resp.usage },
+            fitted.text,
+            { ...metadata, message, usage: resp.usage, ...truncationMetadata(fitted.truncatedChars) },
             headers['x-venice-tee'] === 'true' && Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
           )
         } catch (err) {
@@ -823,7 +826,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             { ...args, model: args.model ?? cfg.defaultChatModel }
           )
           const text = resp.output_text ?? JSON.stringify(resp.output ?? resp, null, 2)
-          return ok(truncate(text))
+          const fitted = truncate(text)
+          return ok(fitted.text, truncationMetadata(fitted.truncatedChars))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1800,7 +1804,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             '/v1/augment/scrape',
             args
           )
-          return ok(truncate(resp.markdown ?? resp.content ?? JSON.stringify(resp)))
+          const fitted = truncate(resp.markdown ?? resp.content ?? JSON.stringify(resp))
+          return ok(fitted.text, truncationMetadata(fitted.truncatedChars))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1833,7 +1838,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const form = new FormData()
           form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
           const resp = await client.postMultipart<{ text?: string }>('/v1/augment/text-parser', form)
-          return ok(truncate(resp.text ?? JSON.stringify(resp)))
+          const fitted = truncate(resp.text ?? JSON.stringify(resp))
+          return ok(fitted.text, truncationMetadata(fitted.truncatedChars))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -2324,9 +2330,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             ...(typeof resp.id === 'string' ? { id: resp.id } : {}),
             ...(typeof resp.model === 'string' ? { model: resp.model } : {}),
           }
+          const fitted = truncate(text)
           return ok(
-            truncate(text),
-            { ...metadata, usage: resp.usage },
+            fitted.text,
+            { ...metadata, usage: resp.usage, ...truncationMetadata(fitted.truncatedChars) },
             headers['x-venice-tee'] === 'true' && Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
           )
         } catch (err) {
@@ -2391,7 +2398,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'apiKey' },
           )
-          return ok(truncate(JSON.stringify(resp, null, 2)))
+          const fitted = truncate(JSON.stringify(resp, null, 2))
+          return ok(fitted.text, truncationMetadata(fitted.truncatedChars))
         } catch (err) {
           return fail(formatToolError(err))
         }

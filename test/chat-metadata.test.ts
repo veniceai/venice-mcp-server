@@ -111,6 +111,9 @@ describe('chat completion metadata', () => {
         if (tee) assert.deepEqual(JSON.parse(textAt(result, 1)), metadata)
         assert.equal(result.structuredContent?.id, metadata.id)
         assert.equal(result.structuredContent?.model, metadata.model)
+        // Truncation must be visible without parsing the inline marker.
+        assert.equal(result.structuredContent?.truncated, true)
+        assert.equal(result.structuredContent?.omitted_chars, 1000)
         if (name === 'venice_chat') assert.deepEqual(result.structuredContent?.message, message)
       })
 
