@@ -218,7 +218,7 @@ export function formatToolError(err: unknown): string {
   return `Error: ${String(err)}`
 }
 
-const MAX_TEXT_CHARS = 8000
+export const MAX_TEXT_CHARS = 8000
 const TRUNCATION_MARKER = '…[truncated]'
 const MIN_SHORTENED_STRING_CHARS = 32
 // Only these keys hold free text; anything else (ids, slugs, URLs, addresses, hashes) must stay byte-exact.
@@ -239,10 +239,21 @@ const PROSE_KEYS = new Set([
   'text',
 ])
 
-/** Truncate large strings for safe inclusion in tool responses. */
-export function truncate(s: string, max = MAX_TEXT_CHARS): string {
-  if (s.length <= max) return s
-  return `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`
+/**
+ * Truncate large strings for safe inclusion in tool responses.
+ *
+ * Returns the dropped character count so a handler can report truncation in
+ * structured content. The inline marker is easy to miss when a host renders
+ * only part of the text, or when an agent reads `structuredContent` alone.
+ */
+export function truncate(s: string, max = MAX_TEXT_CHARS): { text: string; truncatedChars: number } {
+  if (s.length <= max) return { text: s, truncatedChars: 0 }
+  return { text: `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`, truncatedChars: s.length - max }
+}
+
+/** Report a truncated text result in structured content, or undefined when it fit. */
+export function truncationMetadata(truncatedChars: number): { truncated: true; omitted_chars: number } | undefined {
+  return truncatedChars > 0 ? { truncated: true, omitted_chars: truncatedChars } : undefined
 }
 
 /**

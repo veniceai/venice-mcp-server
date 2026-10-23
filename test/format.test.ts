@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { ASR_TEXT_PAGE_CHARS, ASR_TIMESTAMP_DEFAULT_LIMIT, boundAsrResult, fitJson, fitJsonList, formatToolError, truncate } from '../src/format.js'
+import { ASR_TEXT_PAGE_CHARS, ASR_TIMESTAMP_DEFAULT_LIMIT, boundAsrResult, fitJson, fitJsonList, formatToolError, truncate, truncationMetadata } from '../src/format.js'
 import { VeniceUpstreamError } from '../src/types.js'
 
 describe('formatToolError', () => {
@@ -184,13 +184,23 @@ describe('formatToolError', () => {
 
 describe('truncate', () => {
   it('passes through short strings', () => {
-    assert.equal(truncate('hello', 1000), 'hello')
+    assert.deepEqual(truncate('hello', 1000), { text: 'hello', truncatedChars: 0 })
   })
   it('cuts at the limit and appends a marker', () => {
     const s = 'x'.repeat(100)
     const out = truncate(s, 10)
-    assert.equal(out.startsWith('xxxxxxxxxx'), true)
-    assert.match(out, /truncated 90 chars/)
+    assert.equal(out.text.startsWith('xxxxxxxxxx'), true)
+    assert.match(out.text, /truncated 90 chars/)
+    assert.equal(out.truncatedChars, 90)
+  })
+})
+
+describe('truncationMetadata', () => {
+  it('is omitted when nothing was dropped', () => {
+    assert.equal(truncationMetadata(0), undefined)
+  })
+  it('reports the dropped character count', () => {
+    assert.deepEqual(truncationMetadata(90), { truncated: true, omitted_chars: 90 })
   })
 })
 
