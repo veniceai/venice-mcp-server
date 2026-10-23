@@ -19,6 +19,21 @@ describe('HTTP MCP bearer auth', () => {
     assert.equal(isAuthorizedBearerHeader('Bearer secret', 'secret'), true)
   })
 
+  it('accepts any auth-scheme casing and surrounding whitespace', () => {
+    // RFC 7235 makes the scheme case-insensitive and allows 1*SP after it.
+    for (const header of ['bearer secret', 'BEARER secret', 'BeArEr secret', 'Bearer  secret', 'Bearer secret ']) {
+      assert.equal(isAuthorizedBearerHeader(header, 'secret'), true, header)
+    }
+  })
+
+  it('keeps the scheme strict about the exact token', () => {
+    assert.equal(isAuthorizedBearerHeader('bearer  wrong', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer ', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Token secret', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer secret extra', 'secret'), false)
+  })
+
   it('requires a strong token when HTTP mode is exposed beyond loopback', () => {
     assert.equal(isLoopbackHost('127.0.0.1'), true)
     assert.equal(isLoopbackHost('localhost'), true)
