@@ -123,6 +123,17 @@ function assertJsonError(result: HttpResult, status: number, error: string) {
   assert.deepEqual(JSON.parse(result.text), { error })
 }
 
+const ALLOWLISTS = { Host: 'VENICE_MCP_ALLOWED_HOSTS', Origin: 'VENICE_MCP_ALLOWED_ORIGINS' } as const
+
+function assertForbidden(result: HttpResult, header: keyof typeof ALLOWLISTS) {
+  assert.equal(result.status, 403, result.text)
+  assert.match(result.headers['content-type'] ?? '', /^application\/json/)
+  assert.deepEqual(JSON.parse(result.text), {
+    error: 'forbidden',
+    message: `${header} not allowed. Add it to ${ALLOWLISTS[header]}.`,
+  })
+}
+
 describe('HTTP Host and Origin boundary', () => {
   for (const token of [undefined, TOKEN]) {
     it(`blocks hostile headers before parsing, auth, and dispatch (${token ? 'token configured' : 'no token'})`, async (t) => {
@@ -145,9 +156,9 @@ describe('HTTP Host and Origin boundary', () => {
         `${host},attacker.example`, '',
       ]
       for (const authorization of token ? [undefined, `Bearer ${token}`] : [undefined]) {
-        for (const hostile of [
-          ...origins.map((origin) => ({ host, origin })),
-          ...hosts.map((value) => ({ host: value, origin: `http://localhost:${f.port}` })),
+        for (const [hostile, rejected] of [
+          ...origins.map((origin) => [{ host, origin }, 'Origin'] as const),
+          ...hosts.map((value) => [{ host: value, origin: `http://localhost:${f.port}` }, 'Host'] as const),
         ]) {
           const result = await f.request({
             headers: {
@@ -158,7 +169,7 @@ describe('HTTP Host and Origin boundary', () => {
             body: '{malformed-private-marker',
           })
           assert.equal(result.status, 403, JSON.stringify(hostile))
-          assertJsonError(result, 403, 'forbidden')
+          assertForbidden(result, rejected)
         }
       }
       assert.equal(f.builds(), 0)
@@ -173,7 +184,10 @@ describe('HTTP Host and Origin boundary', () => {
       const session = initialized.headers['mcp-session-id'] as string
       assert.ok(session)
       for (let repeat = 0; repeat < 3; repeat++) {
-        for (const hostile of [{ host: 'attacker.example' }, { origin: 'https://attacker.example' }]) {
+        for (const [hostile, rejected] of [
+          [{ host: 'attacker.example' }, 'Host'],
+          [{ origin: 'https://attacker.example' }, 'Origin'],
+        ] as const) {
           for (const method of ['POST', 'GET', 'DELETE']) {
             const result = await f.request({
               method, headers: { ...auth, ...hostile, 'mcp-session-id': session },
@@ -182,7 +196,7 @@ describe('HTTP Host and Origin boundary', () => {
                 params: { name: 'venice_chat', arguments: { messages: [{ role: 'user', content: 'blocked' }] } },
               }) : '',
             })
-            assertJsonError(result, 403, 'forbidden')
+            assertForbidden(result, rejected)
           }
         }
       }
@@ -222,8 +236,8 @@ describe('HTTP Host and Origin boundary', () => {
     for (const env of [{ VENICE_MCP_AUTH_TOKEN: TOKEN }, { VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP: '1' }]) {
       const f = await fixture(t, { host: '0.0.0.0', env })
       const headers = env.VENICE_MCP_AUTH_TOKEN ? { authorization: `Bearer ${TOKEN}` } : {}
-      assertJsonError(await f.request({ headers: { ...headers, host: 'proxy.example' } }), 403, 'forbidden')
-      assertJsonError(await f.request({ headers: { ...headers, origin: 'http://localhost:6274' } }), 403, 'forbidden')
+      assertForbidden(await f.request({ headers: { ...headers, host: 'proxy.example' } }), 'Host')
+      assertForbidden(await f.request({ headers: { ...headers, origin: 'http://localhost:6274' } }), 'Origin')
       assert.equal((await f.request({ headers })).status, 200)
     }
   })
@@ -241,15 +255,15 @@ describe('HTTP Host and Origin boundary', () => {
         assert.equal(result.status, 200, result.text)
       }
     }
-    for (const headers of [
-      { host: 'mcp.example.attacker.example', origin: 'https://app.example' },
-      { host: 'mcp.example:8443' }, { host: 'proxy.example' },
-      { host: 'mcp.example', origin: 'https://app.example.attacker.example' },
-      { host: 'mcp.example', origin: 'http://localhost:6275' },
-      { host: 'mcp.example', origin: `http://localhost:${f.port}` },
-      { host: `127.0.0.1:${f.port}`, 'x-forwarded-host': 'mcp.example' },
-    ]) {
-      assertJsonError(await f.request({ headers: { ...auth, ...headers } }), 403, 'forbidden')
+    for (const [headers, rejected] of [
+      [{ host: 'mcp.example.attacker.example', origin: 'https://app.example' }, 'Host'],
+      [{ host: 'mcp.example:8443' }, 'Host'], [{ host: 'proxy.example' }, 'Host'],
+      [{ host: 'mcp.example', origin: 'https://app.example.attacker.example' }, 'Origin'],
+      [{ host: 'mcp.example', origin: 'http://localhost:6275' }, 'Origin'],
+      [{ host: 'mcp.example', origin: `http://localhost:${f.port}` }, 'Origin'],
+      [{ host: `127.0.0.1:${f.port}`, 'x-forwarded-host': 'mcp.example' }, 'Host'],
+    ] as const) {
+      assertForbidden(await f.request({ headers: { ...auth, ...headers } }), rejected)
     }
   })
 
@@ -293,10 +307,10 @@ describe('HTTP authentication, parsing, and allocation', () => {
         assertJsonError(result, 401, 'unauthorized')
         assert.equal(result.headers['www-authenticate'], 'Bearer')
       }
-      assertJsonError(await f.request({
+      assertForbidden(await f.request({
         body, incompleteBody: body.length > 1024,
         headers: { host: 'attacker.example', authorization: `Bearer ${TOKEN}` },
-      }), 403, 'forbidden')
+      }), 'Host')
     }
     assert.equal(f.builds(), 0)
   })

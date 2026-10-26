@@ -177,10 +177,14 @@ export async function runHttp(opts: {
     const authority = normalizeAuthority(req.header('host') ?? '')
     const originHeader = req.header('origin')
     const origin = originHeader === undefined ? undefined : normalizeOrigin(originHeader)
-    if (headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority) ||
-        headerCount(req, 'origin') > 1 ||
-        (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))) {
-      res.status(403).json({ error: 'forbidden' })
+    const hostRejected = headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority)
+    const originRejected = headerCount(req, 'origin') > 1 ||
+      (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))
+    if (hostRejected || originRejected) {
+      const [header, allowlist] = hostRejected
+        ? ['Host', 'VENICE_MCP_ALLOWED_HOSTS']
+        : ['Origin', 'VENICE_MCP_ALLOWED_ORIGINS']
+      res.status(403).json({ error: 'forbidden', message: `${header} not allowed. Add it to ${allowlist}.` })
       return
     }
     if (!isAuthorizedBearerHeader(req.header('authorization'), authToken)) {
