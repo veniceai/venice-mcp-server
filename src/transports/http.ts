@@ -10,6 +10,8 @@ import { buildServer } from '../server.js'
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
 const MIN_EXPOSED_AUTH_TOKEN_LENGTH = 16
+const MAX_LOGGED_REJECTIONS = 100
+const MAX_LOGGED_HEADER_CHARS = 200
 
 interface SessionEntry {
   transport: StreamableHTTPServerTransport
@@ -129,6 +131,11 @@ function headerCount(req: Request, name: string): number {
   return count
 }
 
+function describeHeader(req: Request, name: 'host' | 'origin'): string {
+  if (headerCount(req, name) > 1) return '(repeated)'
+  return JSON.stringify((req.header(name) ?? '').slice(0, MAX_LOGGED_HEADER_CHARS))
+}
+
 /**
  * Run the server over Streamable HTTP for hosted deployments
  * (Smithery, internal Cloud Run, etc.). Sessionful.
@@ -151,6 +158,7 @@ export async function runHttp(opts: {
   const parseJson = express.json({ limit: '10mb' })
 
   const sessions = new Map<string, SessionEntry>()
+  const loggedRejections = new Set<string>()
   const maxSessions = parsePositiveInt(env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS)
   const sessionTtlMs = parsePositiveInt(env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS)
 
@@ -184,6 +192,12 @@ export async function runHttp(opts: {
       const [header, allowlist] = hostRejected
         ? ['Host', 'VENICE_MCP_ALLOWED_HOSTS']
         : ['Origin', 'VENICE_MCP_ALLOWED_ORIGINS']
+      const line = `[venice-mcp] 403: ${header} ${describeHeader(req, hostRejected ? 'host' : 'origin')} is not allowed (${allowlist})`
+      // Unauthenticated callers choose these values, so each is logged once and the total is capped.
+      if (loggedRejections.size < MAX_LOGGED_REJECTIONS && !loggedRejections.has(line)) {
+        loggedRejections.add(line)
+        console.error(line)
+      }
       res.status(403).json({ error: 'forbidden', message: `${header} not allowed. Add it to ${allowlist}.` })
       return
     }

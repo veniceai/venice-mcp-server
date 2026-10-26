@@ -125,6 +125,16 @@ function assertJsonError(result: HttpResult, status: number, error: string) {
 
 const ALLOWLISTS = { Host: 'VENICE_MCP_ALLOWED_HOSTS', Origin: 'VENICE_MCP_ALLOWED_ORIGINS' } as const
 
+function captureRejectionLogs(t: TestContext): string[] {
+  const lines: string[] = []
+  t.mock.method(console, 'error', (...args: unknown[]) => { lines.push(args.map(String).join(' ')) })
+  return lines
+}
+
+function rejectionLines(lines: string[]): string[] {
+  return lines.filter((line) => line.startsWith('[venice-mcp] 403:'))
+}
+
 function assertForbidden(result: HttpResult, header: keyof typeof ALLOWLISTS) {
   assert.equal(result.status, 403, result.text)
   assert.match(result.headers['content-type'] ?? '', /^application\/json/)
@@ -265,6 +275,39 @@ describe('HTTP Host and Origin boundary', () => {
     ] as const) {
       assertForbidden(await f.request({ headers: { ...auth, ...headers } }), rejected)
     }
+  })
+
+  it('logs each rejected Host or Origin value once, escaped and cut to 200 characters', async (t) => {
+    const logged = captureRejectionLogs(t)
+    const f = await fixture(t)
+    const long = `"${'a'.repeat(300)}`
+    for (const headers of [
+      { host: 'attacker.example' }, { host: 'attacker.example' },
+      { origin: 'https://attacker.example' }, { host: long },
+    ]) {
+      assert.equal((await f.request({ headers })).status, 403)
+    }
+    const repeated = await rawRequest(f.port, [
+      `Host: 127.0.0.1:${f.port}`, `Origin: http://127.0.0.1:${f.port}`, 'Origin: https://attacker.example',
+    ])
+    assert.equal(repeated.status, 403)
+    assert.deepEqual(rejectionLines(logged), [
+      '[venice-mcp] 403: Host "attacker.example" is not allowed (VENICE_MCP_ALLOWED_HOSTS)',
+      '[venice-mcp] 403: Origin "https://attacker.example" is not allowed (VENICE_MCP_ALLOWED_ORIGINS)',
+      `[venice-mcp] 403: Host ${JSON.stringify(long.slice(0, 200))} is not allowed (VENICE_MCP_ALLOWED_HOSTS)`,
+      '[venice-mcp] 403: Origin (repeated) is not allowed (VENICE_MCP_ALLOWED_ORIGINS)',
+    ])
+  })
+
+  it('stops logging rejected values after the first 100 distinct ones', async (t) => {
+    const logged = captureRejectionLogs(t)
+    const f = await fixture(t)
+    for (let i = 0; i <= 100; i++) {
+      assert.equal((await f.request({ headers: { host: `attacker-${i}.example` } })).status, 403)
+    }
+    const lines = rejectionLines(logged)
+    assert.equal(lines.length, 100)
+    assert.ok(lines.every((line) => !line.includes('attacker-100.example')))
   })
 
   it('fails startup for invalid allowlists', async () => {
