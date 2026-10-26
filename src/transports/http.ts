@@ -177,10 +177,23 @@ export async function runHttp(opts: {
     const authority = normalizeAuthority(req.header('host') ?? '')
     const originHeader = req.header('origin')
     const origin = originHeader === undefined ? undefined : normalizeOrigin(originHeader)
-    if (headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority) ||
-        headerCount(req, 'origin') > 1 ||
-        (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))) {
-      res.status(403).json({ error: 'forbidden' })
+    const hostRejected = headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority)
+    const originRejected = headerCount(req, 'origin') > 1 ||
+      (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))
+    if (hostRejected || originRejected) {
+      const [header, allowlist] = hostRejected
+        ? ['Host', 'VENICE_MCP_ALLOWED_HOSTS']
+        : ['Origin', 'VENICE_MCP_ALLOWED_ORIGINS']
+      // parseAllowlist refuses anything but one well-formed value, so only those can be added.
+      const listable = hostRejected
+        ? headerCount(req, 'host') === 1 && authority !== undefined
+        : headerCount(req, 'origin') === 1 && origin !== undefined
+      const message = listable
+        ? `${header} not allowed. Add it to ${allowlist}.`
+        : hostRejected
+          ? 'Host header is missing, repeated, or not an exact host authority.'
+          : 'Origin header is repeated or not an exact HTTP(S) origin.'
+      res.status(403).json({ error: 'forbidden', message })
       return
     }
     if (!isAuthorizedBearerHeader(req.header('authorization'), authToken)) {
