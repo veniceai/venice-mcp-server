@@ -9,6 +9,7 @@ import { buildTools, type BuildToolsOptions } from './tools/index.js'
 import { TOOL_ANNOTATIONS } from './tools/annotations.js'
 import { buildResources } from './resources.js'
 import { buildPrompts } from './prompts.js'
+import { profileTool, securitySchemes, withReauthChallenge, type ToolAuthContext } from './auth/tool-auth.js'
 
 export interface BuildOptions extends BuildToolsOptions {
   config?: Config
@@ -16,6 +17,8 @@ export interface BuildOptions extends BuildToolsOptions {
   client?: VeniceClient
   /** Tracks work that can outlive a disconnected HTTP response. */
   trackOperation?: (operation: Promise<unknown>) => void
+  /** Set when the server runs behind OAuth: adds ChatGPT auth metadata and the profile tool. */
+  auth?: ToolAuthContext
 }
 
 export function buildServer(opts: BuildOptions = {}): McpServer {
@@ -52,7 +55,9 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     return operation
   }
 
+  const auth = opts.auth
   for (const t of buildTools(client, cfg, opts)) {
+    const handler = auth ? withReauthChallenge(t.handler, auth) : t.handler
     srv.registerTool(
       t.name,
       {
@@ -60,8 +65,25 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         description: t.description,
         inputSchema: t.inputSchema,
         annotations: TOOL_ANNOTATIONS[t.name],
+        ...(auth ? { _meta: { securitySchemes: securitySchemes(auth) } } : {}),
       },
-      async (args: unknown) => track(t.handler(args as never))
+      async (args: unknown) => track(handler(args as never))
+    )
+  }
+
+  if (auth) {
+    const profile = profileTool(auth)
+    srv.registerTool(
+      profile.name,
+      {
+        title: profile.title,
+        description: profile.description,
+        inputSchema: profile.inputSchema,
+        outputSchema: profile.outputSchema,
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+        _meta: { securitySchemes: securitySchemes(auth), 'openai/profile': true },
+      },
+      async () => track(profile.handler({} as never))
     )
   }
 
