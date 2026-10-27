@@ -1768,11 +1768,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_web_search',
       title: 'Venice Web Search',
-      description: `Search the web with Brave Search (default, Zero Data Retention) or Google Search (proxied and anonymized by Venice). Returns structured results with titles, URLs, snippets, and dates.${X402_OK}`,
+      description: `Search the web with Brave Search (default, Zero Data Retention), Google Search (proxied and anonymized by Venice), or Exa (Zero Data Retention). Returns structured results with titles, URLs, snippets, and dates.${X402_OK}`,
       inputSchema: {
         query: z.string().min(1).max(400),
         limit: z.number().int().min(1).max(20).optional(),
-        search_provider: z.enum(['brave', 'google']).optional().describe('brave (default) uses Zero Data Retention; google is proxied/anonymized by Venice.'),
+        search_provider: z.enum(['brave', 'google', 'exa']).optional().describe('brave (default) and exa use Zero Data Retention; google is proxied/anonymized by Venice.'),
       },
       handler: async (args) => {
         try {

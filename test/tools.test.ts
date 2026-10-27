@@ -217,6 +217,15 @@ describe('tools registry', () => {
       assert.equal(quote.safeParse({ model: 'm', duration_seconds }).success, false)
     }
   })
+
+  it('venice_web_search accepts every Venice search provider', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_web_search').inputSchema)
+    for (const search_provider of ['brave', 'google', 'exa']) {
+      assert.equal(schema.safeParse({ query: 'q', search_provider }).success, true, search_provider)
+    }
+    assert.equal(schema.safeParse({ query: 'q', search_provider: 'bing' }).success, false)
+  })
 })
 
 // ----------------------------------------------------------------------------
