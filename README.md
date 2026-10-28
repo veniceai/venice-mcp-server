@@ -188,6 +188,8 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
 | `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Bearer token required by `/mcp` whenever HTTP mode binds outside loopback. Use a long random value. |
 | `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP` | `0` | Emergency escape hatch for unauthenticated exposed HTTP mode. Use only behind a trusted authenticated proxy. |
+| `VENICE_MCP_ALLOWED_HOSTS` | Localhost authorities on the listener port | Comma-separated exact HTTP Host values, including non-default ports. Set this for a reverse proxy, LAN hostname, or mapped port. No wildcards. |
+| `VENICE_MCP_ALLOWED_ORIGINS` | Localhost HTTP origins on the listener port | Comma-separated exact browser origins, including scheme and non-default port. Requests without Origin are accepted for native clients. No wildcards or `null` origins. |
 | `VENICE_MCP_MAX_SESSIONS` | `100` | Maximum active Streamable HTTP sessions. |
 | `VENICE_MCP_SESSION_TTL_MS` | `1800000` | Idle Streamable HTTP session lifetime before cleanup. |
 
@@ -204,6 +206,10 @@ docker run -p 3333:3333 \
 ```
 
 Clients should send `Authorization: Bearer <choose-a-long-random-token>` with HTTP MCP requests. HTTP clients should create new sessions without an `mcp-session-id` header and then reuse the server-issued session ID; unknown or malformed caller-provided session IDs are rejected. For reproducible production installs, pin the npm package version as shown in the examples instead of using an unversioned `latest` install path.
+
+HTTP requests to `/mcp` must also use an allowed Host and, when present, an allowed Origin. The defaults support `localhost`, `127.0.0.1`, and `[::1]` on the listener port. Configure the public authority in `VENICE_MCP_ALLOWED_HOSTS` when using a reverse proxy or another hostname, and the browser application's origin in `VENICE_MCP_ALLOWED_ORIGINS` when needed. Each configured list replaces its default list, so include any local entries you still use. Forwarded headers do not grant trust. These checks also apply when bearer authentication is configured; `/healthz` remains available for health probes. Set a bearer token even for local HTTP when possible.
+
+The Origin allowlist is a request validation rule; it does not enable CORS or handle browser preflight requests. Cross-origin browser clients need a separately configured trusted proxy or server-side MCP connection.
 
 Or run from source — see [Development](#development) below.
 
@@ -418,6 +424,8 @@ test/
 ```
 
 The integration suite spawns the compiled CLI and speaks JSON-RPC on its stdin/stdout, exercising `initialize` → `tools/list` → `tools/call` → `resources/list` → `resources/read` against a real HTTP mock Venice in three auth scenarios (API key only, SIWX only, no auth).
+
+Security regression tests exercise HTTP Host/Origin validation, pre-parser authentication and transport cleanup using local fixtures and synthetic credentials.
 
 ### End-to-end with live Venice + Base EVM harness
 
