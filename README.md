@@ -92,7 +92,7 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 
 | Tool | Description |
 |---|---|
-| `venice_web_search` | Search with Brave (default, Zero Data Retention) or Google (proxied/anonymized by Venice). Returns the parsed `{ query, results }` as structured content. |
+| `venice_web_search` | Search with Brave (default, Zero Data Retention), Google (proxied/anonymized by Venice), or Exa (Zero Data Retention). Returns the parsed `{ query, results }` as structured content. |
 | `venice_web_scrape` | Scrape one URL into markdown text. |
 | `venice_text_parser` | Extract text from a document URL (PDF, DOCX, EPUB, PPTX, XLSX, …). |
 
