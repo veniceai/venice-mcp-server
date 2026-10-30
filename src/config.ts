@@ -48,7 +48,7 @@ export interface Config {
   maxImageResponseBytes: number
   /** Maximum TTS and completed music audio bytes buffered for an MCP result. */
   maxAudioResponseBytes: number
-  /** Whether to advertise NSFW capability in tool descriptions. */
+  /** Whether to advertise NSFW capability in tool descriptions, prompt templates and server instructions. */
   enableNsfw: boolean
   /** Server name advertised to MCP clients. */
   serverName: string
