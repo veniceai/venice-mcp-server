@@ -239,6 +239,8 @@ Venice supports **EVM SIWE or Solana SIWX wallet authentication** backed by prep
 
 The MCP server forwards the existing `VENICE_SIWX_TOKEN` env format using Venice's preferred `SIGN-IN-WITH-X` header.
 
+> **Known limitation:** Venice accepts each signed SIWX message only once, and only within 5 minutes of signing. The server sends the same `VENICE_SIWX_TOKEN` on every call, so only the first wallet-authenticated request succeeds; later calls return `401` until you sign a new token and restart the server ([#96](https://github.com/veniceai/venice-mcp-server/issues/96)). Use `VENICE_API_KEY` for anything beyond a one-off call.
+
 ### How it works
 
 ```
