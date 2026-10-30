@@ -24,7 +24,7 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.3.0"],
+      "args": ["-y", "@veniceai/mcp-server@0.3.1"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
@@ -198,12 +198,14 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 `/mcp` is a credential-backed tool execution endpoint: callers can spend the configured Venice API key or x402 balance. When HTTP mode binds outside loopback, startup fails unless `VENICE_MCP_AUTH_TOKEN` is set, or `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1` is explicitly set behind a trusted authenticated proxy.
 
 ```bash
-docker run -p 3333:3333 \
-  -e VENICE_API_KEY=<your-venice-api-key> \
-  -e VENICE_MCP_AUTH_TOKEN=<choose-a-long-random-token> \
-  ghcr.io/veniceai/venice-mcp-server:latest
+VENICE_API_KEY=<your-venice-api-key> \
+VENICE_MCP_AUTH_TOKEN=<choose-a-long-random-token> \
+VENICE_MCP_HOST=0.0.0.0 \
+npx -y @veniceai/mcp-server@0.3.1 --http
 # server at http://localhost:3333/mcp
 ```
+
+`VENICE_MCP_HOST=0.0.0.0` makes the server reachable beyond loopback; leave it out to stay on loopback. No container image is published yet, so to run it in a container, build one from this repo's `Dockerfile`.
 
 Clients should send `Authorization: Bearer <choose-a-long-random-token>` with HTTP MCP requests. HTTP clients should create new sessions without an `mcp-session-id` header and then reuse the server-issued session ID; unknown or malformed caller-provided session IDs are rejected. For reproducible production installs, pin the npm package version as shown in the examples instead of using an unversioned `latest` install path.
 
@@ -228,7 +230,7 @@ Venice supports **EVM SIWE or Solana SIWX wallet authentication** backed by prep
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.3.0"],
+      "args": ["-y", "@veniceai/mcp-server@0.3.1"],
       "env": { "VENICE_SIWX_TOKEN": "<base64 signed SIWX payload>" }
     }
   }
@@ -236,6 +238,8 @@ Venice supports **EVM SIWE or Solana SIWX wallet authentication** backed by prep
 ```
 
 The MCP server forwards the existing `VENICE_SIWX_TOKEN` env format using Venice's preferred `SIGN-IN-WITH-X` header.
+
+> **Known limitation:** Venice accepts each signed SIWX message only once, and only within 5 minutes of signing. The server sends the same `VENICE_SIWX_TOKEN` on every call, so only the first wallet-authenticated request succeeds; later calls return `401` until you sign a new token and restart the server ([#96](https://github.com/veniceai/venice-mcp-server/issues/96)). Use `VENICE_API_KEY` for anything beyond a one-off call.
 
 ### How it works
 
@@ -474,7 +478,7 @@ The most common cause is that `VENICE_API_KEY` isn't being forwarded to the MCP 
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.3.0"],
+      "args": ["-y", "@veniceai/mcp-server@0.3.1"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
