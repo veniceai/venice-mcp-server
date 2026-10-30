@@ -198,12 +198,14 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 `/mcp` is a credential-backed tool execution endpoint: callers can spend the configured Venice API key or x402 balance. When HTTP mode binds outside loopback, startup fails unless `VENICE_MCP_AUTH_TOKEN` is set, or `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1` is explicitly set behind a trusted authenticated proxy.
 
 ```bash
-docker run -p 3333:3333 \
-  -e VENICE_API_KEY=<your-venice-api-key> \
-  -e VENICE_MCP_AUTH_TOKEN=<choose-a-long-random-token> \
-  ghcr.io/veniceai/venice-mcp-server:latest
+VENICE_API_KEY=<your-venice-api-key> \
+VENICE_MCP_AUTH_TOKEN=<choose-a-long-random-token> \
+VENICE_MCP_HOST=0.0.0.0 \
+npx -y @veniceai/mcp-server@0.3.1 --http
 # server at http://localhost:3333/mcp
 ```
+
+`VENICE_MCP_HOST=0.0.0.0` makes the server reachable beyond loopback; leave it out to stay on loopback. No container image is published yet, so to run it in a container, build one from this repo's `Dockerfile`.
 
 Clients should send `Authorization: Bearer <choose-a-long-random-token>` with HTTP MCP requests. HTTP clients should create new sessions without an `mcp-session-id` header and then reuse the server-issued session ID; unknown or malformed caller-provided session IDs are rejected. For reproducible production installs, pin the npm package version as shown in the examples instead of using an unversioned `latest` install path.
 
