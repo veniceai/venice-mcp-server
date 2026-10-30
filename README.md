@@ -409,6 +409,8 @@ Commit matching versions in `package.json` and `package-lock.json` before creati
 
 Build and publication run in separate jobs using Node.js 24 and npm 11.5.1 or newer. Release packing uses the same npm minimum as trusted publishing. This also excludes npm 10, which can run `prepare` despite `--ignore-scripts`. The build job has read-only repository permissions, tests the package, and uploads its archive. The publish job verifies the archive's checksum and publishes that exact archive using npm trusted publishing. Already-published versions are skipped. A failed build or version check requires fixing the release inputs before publication.
 
+Published packages also bundle every production dependency at the version in `package-lock.json` (`bundleDependencies`), so `npx @veniceai/mcp-server@<version>` runs exactly the tested release and resolves nothing from the registry at install time.
+
 ### Test layout
 
 ```

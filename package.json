@@ -64,6 +64,7 @@
     "express": "^4.22.3",
     "zod": "^3.25.28"
   },
+  "bundleDependencies": true,
   "devDependencies": {
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.2",
