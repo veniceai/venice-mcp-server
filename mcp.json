@@ -5,7 +5,7 @@
   "description": "Uncensored, private, crypto-native AI inference (LLM, image, video, TTS, ASR, music, characters) by Venice AI. Pay-per-call via x402, optional API key, no account required. Maintained by Venice AI.",
   "homepage": "https://venice.ai",
   "license": "MIT",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "keywords": [
     "uncensored",
     "privacy",
@@ -26,7 +26,7 @@
       "command": "npx",
       "args": [
         "-y",
-        "@veniceai/mcp-server@0.3.0"
+        "@veniceai/mcp-server@0.3.1"
       ],
       "env": {
         "VENICE_API_KEY": "${VENICE_API_KEY}",
