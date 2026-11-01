@@ -3466,6 +3466,91 @@ describe('video tool schemas', () => {
 
     assert.equal(result.success, true)
   })
+
+  it('keeps quote pricing fields that Venice uses to price the job', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+    const input = {
+      model: 'wan-2.7-video-to-video',
+      duration: 'Auto',
+      video_url: 'https://example.com/clip.mp4',
+      resolution: '1080p',
+      aspect_ratio: '16:9',
+      upscale_factor: 2,
+      audio: true,
+      reference_video_total_duration: 12.5,
+      enhancement_model: 'Proteus',
+      target_fps: 60,
+      slowdown_factor: 2 as const,
+    }
+
+    assert.deepEqual(schema.parse(input), input)
+    assert.deepEqual(schema.parse({ ...input, prompt: 'not a quote field' }), input)
+    assert.deepEqual(schema.parse({ model: 'veo3.1-fast-text-to-video', duration: '4s' }), {
+      model: 'veo3.1-fast-text-to-video',
+      duration: '4s',
+    })
+  })
+
+  it('accepts the same overlapping video fields as venice_video_generate', () => {
+    const { get } = setup()
+    const generate = z.object(get('venice_video_generate').inputSchema)
+    const quote = z.object(get('venice_video_quote').inputSchema)
+    const shared = {
+      model: 'veo3.1-fast-text-to-video',
+      duration: '4s',
+      aspect_ratio: '9:21',
+      resolution: '4k',
+      upscale_factor: 4,
+      audio: false,
+      video_url: 'data:video/mp4;base64,AAAA',
+    }
+
+    assert.equal(generate.safeParse({ prompt: 'a sunset', ...shared }).success, true)
+    assert.deepEqual(quote.parse(shared), shared)
+  })
+
+  it('rejects out-of-range quote-only pricing fields', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_quote').inputSchema)
+    const base = { model: 'wan-2.7-video-to-video', duration: 'Auto' }
+
+    assert.equal(schema.safeParse({ ...base, video_url: 'clip.mp4' }).success, false)
+    assert.equal(schema.safeParse({ ...base, reference_video_total_duration: -1 }).success, false)
+    assert.equal(schema.safeParse({ ...base, reference_video_total_duration: Number.POSITIVE_INFINITY }).success, false)
+    assert.equal(schema.safeParse({ ...base, reference_video_total_duration: 0 }).success, true)
+    assert.equal(schema.safeParse({ ...base, enhancement_model: '' }).success, false)
+    assert.equal(schema.safeParse({ ...base, target_fps: 15 }).success, false)
+    assert.equal(schema.safeParse({ ...base, target_fps: 121 }).success, false)
+    assert.equal(schema.safeParse({ ...base, target_fps: 16 }).success, true)
+    assert.equal(schema.safeParse({ ...base, target_fps: 120 }).success, true)
+    assert.equal(schema.safeParse({ ...base, slowdown_factor: 3 }).success, false)
+    for (const slowdown_factor of [1, 2, 4, 8]) {
+      assert.equal(schema.safeParse({ ...base, slowdown_factor }).success, true, String(slowdown_factor))
+    }
+  })
+
+  it('forwards parsed quote pricing fields to POST /v1/video/quote', async () => {
+    const { get, stub } = setup()
+    const tool = get('venice_video_quote')
+    const args = z.object(tool.inputSchema).parse({
+      model: 'wan-2.7-video-to-video',
+      duration: 'Auto',
+      video_url: 'https://example.com/clip.mp4',
+      resolution: '4k',
+      aspect_ratio: '16:9',
+      audio: false,
+      reference_video_total_duration: 5,
+    })
+
+    const result = await tool.handler(args)
+    assert.equal(result.isError, undefined)
+    assert.equal(stub.calls.length, 1)
+    assert.equal(stub.calls[0].method, 'POST')
+    assert.equal(stub.calls[0].path, '/v1/video/quote')
+    assert.deepEqual(stub.calls[0].body, args)
+    assert.match((result.content[0] as { text: string }).text, /"quote": 0\.5/)
+  })
 })
 describe('tool annotations', () => {
   it('every tool has explicit readOnly, destructive, idempotent and openWorld hints', () => {
