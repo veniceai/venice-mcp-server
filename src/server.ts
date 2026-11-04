@@ -5,15 +5,17 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { VeniceClient } from './venice-client.js'
 import { loadConfig, type Config } from './config.js'
-import { buildTools } from './tools/index.js'
+import { buildTools, type BuildToolsOptions } from './tools/index.js'
 import { TOOL_ANNOTATIONS } from './tools/annotations.js'
 import { buildResources } from './resources.js'
 import { buildPrompts } from './prompts.js'
 
-export interface BuildOptions {
+export interface BuildOptions extends BuildToolsOptions {
   config?: Config
   /** Inject an alternate client for tests. */
   client?: VeniceClient
+  /** Tracks work that can outlive a disconnected HTTP response. */
+  trackOperation?: (operation: Promise<unknown>) => void
 }
 
 export function buildServer(opts: BuildOptions = {}): McpServer {
@@ -45,7 +47,12 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     registerPrompt: (name: string, def: unknown, handler: unknown) => void
   }
 
-  for (const t of buildTools(client, cfg)) {
+  const track = <T>(operation: Promise<T>): Promise<T> => {
+    opts.trackOperation?.(operation)
+    return operation
+  }
+
+  for (const t of buildTools(client, cfg, opts)) {
     srv.registerTool(
       t.name,
       {
@@ -54,7 +61,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         inputSchema: t.inputSchema,
         annotations: TOOL_ANNOTATIONS[t.name],
       },
-      async (args: unknown) => t.handler(args as never)
+      async (args: unknown) => track(t.handler(args as never))
     )
   }
 
@@ -68,7 +75,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         description: r.description,
         mimeType: r.mimeType,
       },
-      async () => ({ contents: [await r.read()] })
+      async () => ({ contents: [await track(r.read())] })
     )
   }
 
