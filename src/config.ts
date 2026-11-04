@@ -6,12 +6,18 @@
  *   - VENICE_SIWX_TOKEN     → forwarded as `SIGN-IN-WITH-X` (base64-encoded
  *                              signed EVM SIWE or Solana SIWX payload).
  *                              Pre-generate this in the caller's wallet.
+ *                              Venice accepts each signed message once, so
+ *                              a static token covers a single request.
+ *   - VENICE_SIWX_SIGNER_COMMAND → run before every wallet-authenticated
+ *                              request; its stdout is sent as a freshly
+ *                              signed `SIGN-IN-WITH-X`. The wallet key stays
+ *                              in the signer. Wins over VENICE_SIWX_TOKEN.
  *
  * x402 reality check
  * ──────────────────
  * Venice's x402 is a *prepaid balance* model, not per-call HTTP-402 settlement:
  *
- *   1. Client signs an EVM SIWE or Solana SIWX message once → SIWX token.
+ *   1. Client signs an EVM SIWE or Solana SIWX message per request → SIWX header.
  *   2. Client tops up balance via `POST /api/v1/x402/top-up` with the
  *      `PAYMENT-SIGNATURE` header (signed Base or Solana USDC payment).
  *   3. Subsequent inference calls send `SIGN-IN-WITH-X` (NOT a payment header).
@@ -32,6 +38,13 @@ export interface Config {
    * Authenticates a wallet against an existing X402CreditAccount with prepaid balance.
    */
   siwxToken: string | undefined
+  /**
+   * Optional shell command that prints a freshly signed `SIGN-IN-WITH-X` value.
+   * Run once per wallet-authenticated request; takes precedence over `siwxToken`.
+   */
+  siwxSignerCommand: string | undefined
+  /** Timeout (ms) for one run of the SIWX signer command. */
+  siwxSignerTimeoutMs: number
   /** Default model for chat completions when caller does not specify. */
   defaultChatModel: string
   /** Default model for image generation when caller does not specify. */
@@ -59,6 +72,7 @@ export interface Config {
 const PACKAGE_VERSION: string = createRequire(import.meta.url)('../package.json').version
 
 const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_SIWX_SIGNER_TIMEOUT_MS = 15_000
 const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 25 * 1024 * 1024
 const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 const DEFAULT_MAX_AUDIO_RESPONSE_BYTES = 32 * 1024 * 1024
@@ -79,6 +93,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     baseUrl: env.VENICE_TEST_BASE_URL?.trim() || 'https://api.venice.ai/api',
     apiKey: env.VENICE_API_KEY,
     siwxToken: env.VENICE_SIWX_TOKEN,
+    siwxSignerCommand: env.VENICE_SIWX_SIGNER_COMMAND?.trim() || undefined,
+    siwxSignerTimeoutMs: parsePositiveNumber(env.VENICE_SIWX_SIGNER_TIMEOUT_MS, DEFAULT_SIWX_SIGNER_TIMEOUT_MS),
     defaultChatModel: env.VENICE_DEFAULT_CHAT_MODEL ?? 'deepseek-v4-flash-0731',
     defaultImageModel: env.VENICE_DEFAULT_IMAGE_MODEL ?? 'flux-2-pro',
     defaultTtsModel: env.VENICE_DEFAULT_TTS_MODEL ?? 'tts-kokoro',

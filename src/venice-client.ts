@@ -1,5 +1,6 @@
 import type { Config } from './config.js'
-import { VeniceUpstreamError } from './types.js'
+import { runSiwxSigner } from './siwx-signer.js'
+import { VeniceUpstreamError, type SiwxSource } from './types.js'
 
 export interface RequestInitJSON {
   method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
@@ -91,7 +92,9 @@ export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
 /**
  * Thin HTTP client over the Venice API.
  * - Adds `Authorization: Bearer` when API key is configured (preferred).
- * - Otherwise adds the canonical `SIGN-IN-WITH-X` when a SIWX token is configured.
+ * - Otherwise adds the canonical `SIGN-IN-WITH-X` when SIWX auth is configured:
+ *   a fresh value from `VENICE_SIWX_SIGNER_COMMAND` for every request, or the
+ *   static `VENICE_SIWX_TOKEN`.
  * - Never follows redirects: credentials and POST bodies stay at the configured upstream.
  * - Surfaces 402 responses as `VeniceUpstreamError(isPaymentRequired)` so tools
  *   can format a helpful top-up message back to the MCP host.
@@ -101,6 +104,30 @@ export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
  */
 export class VeniceClient {
   constructor(private readonly cfg: Config) {}
+
+  private hasSiwx(): boolean {
+    return Boolean(this.cfg.siwxSignerCommand || this.cfg.siwxToken)
+  }
+
+  /**
+   * The SIGN-IN-WITH-X value for one request. Venice accepts each signed
+   * message once, so a configured signer command is run for every request.
+   */
+  private async siwxHeader(
+    method: string,
+    path: string,
+  ): Promise<{ value: string; source: SiwxSource } | undefined> {
+    if (this.cfg.siwxSignerCommand) {
+      const value = await runSiwxSigner(
+        this.cfg.siwxSignerCommand,
+        { method, path, baseUrl: this.cfg.baseUrl },
+        { timeoutMs: this.cfg.siwxSignerTimeoutMs },
+      )
+      return { value, source: 'signer' }
+    }
+    if (this.cfg.siwxToken) return { value: this.cfg.siwxToken, source: 'token' }
+    return undefined
+  }
 
   async request<T = unknown>(path: string, init: RequestInitJSON = {}): Promise<T> {
     return (await this.requestWithMetadata<T>(path, init)).data
@@ -121,7 +148,16 @@ export class VeniceClient {
       ...(init.headers ?? {}),
     }
     if (init.json !== undefined) headers['Content-Type'] = 'application/json'
+    const method = init.method ?? (init.json !== undefined ? 'POST' : 'GET')
     const auth = init.auth ?? 'default'
+    let siwxSource: SiwxSource | undefined
+    const addSiwx = async () => {
+      if (headers['SIGN-IN-WITH-X']) return
+      const siwx = await this.siwxHeader(method, path)
+      if (!siwx) return
+      headers['SIGN-IN-WITH-X'] = siwx.value
+      siwxSource = siwx.source
+    }
     if (auth === 'apiKey') {
       for (const key of Object.keys(headers)) {
         if (
@@ -144,13 +180,11 @@ export class VeniceClient {
     } else if (auth === 'siwx') {
       delete headers.Authorization
       delete headers.authorization
-      if (this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
-        headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
-      }
+      await addSiwx()
     } else if (auth === 'default' && this.cfg.apiKey && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    } else if (auth === 'default' && this.cfg.siwxToken && !headers['SIGN-IN-WITH-X']) {
-      headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
+    } else if (auth === 'default' && this.hasSiwx() && !headers['SIGN-IN-WITH-X']) {
+      await addSiwx()
     }
 
     const ac = new AbortController()
@@ -163,7 +197,7 @@ export class VeniceClient {
     let headersReceived = false
     try {
       res = await fetch(url, {
-        method: init.method ?? (init.json !== undefined ? 'POST' : 'GET'),
+        method,
         headers,
         body: init.json !== undefined ? JSON.stringify(init.json) : undefined,
         signal: ac.signal,
@@ -172,7 +206,7 @@ export class VeniceClient {
       headersReceived = true
       contentType = res.headers.get('content-type') ?? ''
       const maxBytes = init.maxBytes ?? init.maxResponseBytes
-      if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status, maxBytes))
+      if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status, maxBytes), siwxSource)
       const successLimit = maxBytes ?? (
         init.responseType === 'event-stream' ? DEFAULT_MAX_EVENT_STREAM_BYTES : DEFAULT_MAX_RESPONSE_BYTES
       )
@@ -264,8 +298,15 @@ export class VeniceClient {
       Accept: 'application/json',
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
     }
+    let siwxSource: SiwxSource | undefined
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
+    else {
+      const siwx = await this.siwxHeader('POST', path)
+      if (siwx) {
+        headers['SIGN-IN-WITH-X'] = siwx.value
+        siwxSource = siwx.source
+      }
+    }
     // NOTE: don't set Content-Type — fetch sets the boundary automatically.
 
     const ac = new AbortController()
@@ -274,7 +315,7 @@ export class VeniceClient {
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
       const res = await fetch(url, { method: 'POST', headers, body: form, signal: ac.signal, redirect: 'manual' })
-      const body = await parseResponse<T>(res, path, opts.maxBytes)
+      const body = await parseResponse<T>(res, path, opts.maxBytes, siwxSource)
       if (ac.signal.aborted) throw timeoutError(timeoutMs)
       return body
     } catch (err) {
@@ -299,8 +340,15 @@ export class VeniceClient {
     const headers: Record<string, string> = {
       'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
     }
+    let siwxSource: SiwxSource | undefined
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
-    else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
+    else {
+      const siwx = await this.siwxHeader('POST', path)
+      if (siwx) {
+        headers['SIGN-IN-WITH-X'] = siwx.value
+        siwxSource = siwx.source
+      }
+    }
 
     let body: any
     if ('form' in init) {
@@ -316,7 +364,7 @@ export class VeniceClient {
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
     try {
       const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal, redirect: 'manual' })
-      if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status))
+      if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status), siwxSource)
 
       const contentType = res.headers.get('content-type') ?? 'application/octet-stream'
       const jsonMaxBytes = isJsonContentType(contentType) ? opts.jsonMaxBytes : undefined
@@ -527,7 +575,12 @@ function errorBodyLimit(status: number, maxBytes?: number): number {
  * an unreadable or aborted one degrades to an empty body, rather than turning the
  * failure into a timeout or size-limit error.
  */
-async function upstreamError(res: Response, path: string, maxBytes: number): Promise<VeniceUpstreamError> {
+async function upstreamError(
+  res: Response,
+  path: string,
+  maxBytes: number,
+  siwxSource?: SiwxSource,
+): Promise<VeniceUpstreamError> {
   const json = isJsonContentType(res.headers.get('content-type') ?? '')
   let body: unknown = json ? {} : ''
   try {
@@ -544,6 +597,7 @@ async function upstreamError(res: Response, path: string, maxBytes: number): Pro
     status: res.status,
     body,
     headers: responseHeaders(res),
+    siwxSource,
   })
 }
 
@@ -575,8 +629,13 @@ function responseHeaders(res: Response): Record<string, string> {
  * Response parser used by `postMultipart`.
  * Handles JSON vs text content, surfaces 402 / 4xx / 5xx as VeniceUpstreamError.
  */
-async function parseResponse<T>(res: Response, path: string, maxBytes?: number): Promise<T> {
-  if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status, maxBytes))
+async function parseResponse<T>(
+  res: Response,
+  path: string,
+  maxBytes?: number,
+  siwxSource?: SiwxSource,
+): Promise<T> {
+  if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status, maxBytes), siwxSource)
   const text = (await readBoundedResponseBuffer(res, path, maxBytes)).toString('utf8')
   return (isJsonContentType(res.headers.get('content-type') ?? '') ? parseSuccessJson(text, path) : text) as T
 }

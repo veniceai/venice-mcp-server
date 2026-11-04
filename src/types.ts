@@ -1,8 +1,13 @@
+/** Where the request's SIGN-IN-WITH-X value came from, when one was sent. */
+export type SiwxSource = 'token' | 'signer'
+
 /** Canonical error wrapping for upstream failures. */
 export class VeniceUpstreamError extends Error {
   readonly status: number
   readonly body: unknown
   readonly headers: Record<string, string>
+  /** Set when the failed request carried SIGN-IN-WITH-X. */
+  readonly siwxSource: SiwxSource | undefined
   /** True when the upstream returned 402 Payment Required (x402). */
   readonly isPaymentRequired: boolean
 
@@ -11,12 +16,14 @@ export class VeniceUpstreamError extends Error {
     status: number
     body: unknown
     headers?: Record<string, string>
+    siwxSource?: SiwxSource
   }) {
     super(opts.message)
     this.name = 'VeniceUpstreamError'
     this.status = opts.status
     this.body = opts.body
     this.headers = opts.headers ?? {}
+    this.siwxSource = opts.siwxSource
     this.isPaymentRequired = opts.status === 402
   }
 }

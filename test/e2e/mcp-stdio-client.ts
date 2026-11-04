@@ -7,7 +7,8 @@ import { resolve } from 'node:path'
 
 export type McpAuth =
   | { mode: 'apikey'; apiKey: string }
-  | { mode: 'x402'; siwxToken: string }
+  | { mode: 'x402'; siwxToken: string; siwxSignerCommand?: undefined }
+  | { mode: 'x402'; siwxSignerCommand: string; siwxToken?: undefined }
 
 export interface McpClient {
   call(method: string, params?: unknown): Promise<any>
@@ -19,7 +20,12 @@ export interface McpClient {
 }
 
 export function spawnMcp(auth: McpAuth, env: NodeJS.ProcessEnv = {}): McpClient {
-  const credential = auth.mode === 'apikey' ? auth.apiKey : auth.siwxToken
+  const [credentialEnv, credential] =
+    auth.mode === 'apikey'
+      ? ['VENICE_API_KEY', auth.apiKey]
+      : auth.siwxSignerCommand !== undefined
+        ? ['VENICE_SIWX_SIGNER_COMMAND', auth.siwxSignerCommand]
+        : ['VENICE_SIWX_TOKEN', auth.siwxToken]
   if (!credential) throw new Error(`An explicit ${auth.mode} credential is required`)
 
   // Keep runtime settings, but never let inherited or overridden credentials
@@ -27,7 +33,8 @@ export function spawnMcp(auth: McpAuth, env: NodeJS.ProcessEnv = {}): McpClient 
   const childEnv: NodeJS.ProcessEnv = { ...process.env, ...env, NODE_ENV: 'test', VENICE_MCP_HTTP: '0' }
   delete childEnv.VENICE_API_KEY
   delete childEnv.VENICE_SIWX_TOKEN
-  childEnv[auth.mode === 'apikey' ? 'VENICE_API_KEY' : 'VENICE_SIWX_TOKEN'] = credential
+  delete childEnv.VENICE_SIWX_SIGNER_COMMAND
+  childEnv[credentialEnv] = credential
 
   const cliPath = resolve(process.cwd(), 'dist/cli.js')
   const proc = spawn(process.execPath, [cliPath], {

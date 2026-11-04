@@ -18,7 +18,13 @@
  *   - SKIP:       tools that need real-world setup we can't fake (voice clone, x402 cleanup)
  */
 import { spawnMcp, type McpAuth } from './mcp-stdio-client.js'
-import { loadOrCreateWallet, buildSiwxHeader } from './wallet-helper.js'
+import { fileURLToPath } from 'node:url'
+import { loadOrCreateWallet } from './wallet-helper.js'
+
+function e2eSiwxSignerCommand(): string {
+  const signer = fileURLToPath(new URL('./siwx-signer.ts', import.meta.url))
+  return `${JSON.stringify(process.execPath)} --import tsx ${JSON.stringify(signer)}`
+}
 
 const VENICE_API = process.env.VENICE_API_URL || 'https://api.venice.ai'
 const BASE_URL = VENICE_API.replace(/\/?$/, '/api').replace(/\/api\/api$/, '/api')
@@ -400,8 +406,9 @@ async function runMode(mode: 'apikey' | 'x402', walletAddr: string): Promise<Too
     if (!process.env.VENICE_API_KEY) throw new Error('VENICE_API_KEY not set')
     auth = { mode, apiKey: process.env.VENICE_API_KEY }
   } else {
-    const wallet = loadOrCreateWallet()
-    auth = { mode, siwxToken: await buildSiwxHeader(wallet) }
+    // Venice accepts each signed SIWX message once, so the server signs per request.
+    loadOrCreateWallet()
+    auth = { mode, siwxSignerCommand: e2eSiwxSignerCommand() }
   }
 
   const mcp = spawnMcp(auth, env)
