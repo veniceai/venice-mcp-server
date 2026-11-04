@@ -10,6 +10,8 @@ import { buildServer } from '../server.js'
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
 const MIN_EXPOSED_AUTH_TOKEN_LENGTH = 16
+const MAX_LOGGED_REJECTIONS = 100
+const MAX_LOGGED_HEADER_CHARS = 200
 
 interface SessionEntry {
   transport: StreamableHTTPServerTransport
@@ -150,6 +152,11 @@ function headerCount(req: Request, name: string): number {
   return count
 }
 
+function describeHeader(req: Request, name: 'host' | 'origin'): string {
+  if (headerCount(req, name) > 1) return '(repeated)'
+  return JSON.stringify((req.header(name) ?? '').slice(0, MAX_LOGGED_HEADER_CHARS))
+}
+
 /**
  * Run the server over Streamable HTTP for hosted deployments
  * (Smithery, internal Cloud Run, etc.). Sessionful.
@@ -172,6 +179,7 @@ export async function runHttp(opts: {
   const parseJson = express.json({ limit: '10mb' })
 
   const sessions = new Map<string, SessionEntry>()
+  const loggedRejections = new Set<string>()
   const maxSessions = parsePositiveInt(env.VENICE_MCP_MAX_SESSIONS, DEFAULT_MAX_HTTP_SESSIONS)
   const sessionTtlMs = parsePositiveInt(env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS)
 
@@ -198,10 +206,32 @@ export async function runHttp(opts: {
     const authority = normalizeAuthority(req.header('host') ?? '')
     const originHeader = req.header('origin')
     const origin = originHeader === undefined ? undefined : normalizeOrigin(originHeader)
-    if (headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority) ||
-        headerCount(req, 'origin') > 1 ||
-        (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))) {
-      res.status(403).json({ error: 'forbidden' })
+    const hostRejected = headerCount(req, 'host') !== 1 || !authority || !allowedHosts.has(authority)
+    const originRejected = headerCount(req, 'origin') > 1 ||
+      (originHeader !== undefined && (!origin || !allowedOrigins.has(origin)))
+    if (hostRejected || originRejected) {
+      const [header, allowlist] = hostRejected
+        ? ['Host', 'VENICE_MCP_ALLOWED_HOSTS']
+        : ['Origin', 'VENICE_MCP_ALLOWED_ORIGINS']
+      // parseAllowlist refuses anything but one well-formed value, so only those can be added.
+      const listable = hostRejected
+        ? headerCount(req, 'host') === 1 && authority !== undefined
+        : headerCount(req, 'origin') === 1 && origin !== undefined
+      const value = describeHeader(req, hostRejected ? 'host' : 'origin')
+      const line = listable
+        ? `[venice-mcp] 403: ${header} ${value} is not allowed (${allowlist})`
+        : `[venice-mcp] 403: invalid ${header} ${value}`
+      // Unauthenticated callers choose these values, so each is logged once and the total is capped.
+      if (loggedRejections.size < MAX_LOGGED_REJECTIONS && !loggedRejections.has(line)) {
+        loggedRejections.add(line)
+        console.error(line)
+      }
+      const message = listable
+        ? `${header} not allowed. Add it to ${allowlist}.`
+        : hostRejected
+          ? 'Host header is missing, repeated, or not an exact host authority.'
+          : 'Origin header is repeated or not an exact HTTP(S) origin.'
+      res.status(403).json({ error: 'forbidden', message })
       return
     }
     if (!isAuthorizedBearerHeader(req.header('authorization'), authToken)) {
