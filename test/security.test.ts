@@ -343,11 +343,54 @@ describe('inline data URL uploads', () => {
     assert.equal(decodeDataUrl('data:,plain')?.buffer.toString('utf8'), 'plain')
   })
 
-  it('base64-decodes a payload that contains percent characters', () => {
-    // '%' is not a base64 character, so percent-decoding first would corrupt these bytes.
+  it('decodes binary bytes from a base64 data URL', () => {
     const payload = Buffer.from([0xfb, 0xff, 0x3e, 0x3d])
     const decoded = decodeDataUrl(`data:application/octet-stream;base64,${payload.toString('base64')}`)
     assert.equal(decoded?.buffer.equals(payload), true)
+  })
+
+  it('percent-decodes base64 before decoding its binary payload', () => {
+    const payload = Buffer.from([0xfb, 0xff, 0x3e, 0x3d])
+    const encoded = encodeURIComponent(payload.toString('base64'))
+    assert.match(encoded, /%2B/)
+    assert.match(encoded, /%2F/)
+    assert.match(encoded, /%3D/)
+    assert.deepEqual(decodeDataUrl(`data:application/octet-stream;base64,${encoded}`)?.buffer, payload)
+  })
+
+  it('preserves all percent-encoded byte values without UTF-8 conversion', () => {
+    const payload = Buffer.from(Array.from({ length: 256 }, (_, i) => i))
+    const encoded = [...payload].map((byte) => `%${byte.toString(16).padStart(2, '0')}`).join('')
+    assert.deepEqual(decodeDataUrl(`data:application/octet-stream,${encoded}`)?.buffer, payload)
+    assert.deepEqual(decodeDataUrl('data:text/plain;charset=iso-8859-1,caf%E9')?.buffer, Buffer.from('636166e9', 'hex'))
+  })
+
+  it('decodes percent escapes once while preserving plus signs and invalid escapes', () => {
+    const decoded = decodeDataUrl('data:text/plain,%2520+%00%ff%GG%2%')
+    assert.deepEqual(decoded?.buffer, Buffer.concat([Buffer.from('%20+'), Buffer.from([0, 255]), Buffer.from('%GG%2%')]))
+    assert.deepEqual(decodeDataUrl('data:text/plain,café')?.buffer, Buffer.from('café'))
+  })
+
+  it('accepts case-insensitive data schemes and excludes URL fragments', () => {
+    assert.deepEqual(decodeDataUrl('DaTa:text/plain,hello%23world#fragment')?.buffer, Buffer.from('hello#world'))
+    assert.deepEqual(decodeDataUrl('data:text/plain;BASE64,aGk=#fragment')?.buffer, Buffer.from('hi'))
+    assert.deepEqual(decodeDataUrl('data:text/plain,a?b#fragment')?.buffer, Buffer.from('a?b'))
+  })
+
+  it('accepts unpadded and whitespace-containing base64', () => {
+    assert.deepEqual(decodeDataUrl('data:text/plain;base64,aGk')?.buffer, Buffer.from('hi'))
+    assert.deepEqual(decodeDataUrl('data:text/plain;base64,aG%20k%3D%0A')?.buffer, Buffer.from('hi'))
+    assert.deepEqual(decodeDataUrl('data:text/plain; base64,aGk=')?.buffer, Buffer.from('hi'))
+  })
+
+  it('rejects malformed base64 instead of silently uploading partial bytes', async () => {
+    for (const payload of ['a', 'aGk===', 'aGk!stuff', '%FF', 'aGk%GG', '-_8=']) {
+      await assert.rejects(
+        fetchUploadSource(`data:image/png;base64,${payload}`, inlineOpts),
+        /malformed base64 payload/,
+      )
+    }
+    assert.throws(() => decodeDataUrl('data:text/plain'), /missing comma/)
   })
 })
 
@@ -372,8 +415,7 @@ describe('declared content-type downgrade', () => {
     assert.equal(source.buffer.equals(fake), true)
   })
 
-  it('accepts octet-stream whose bytes agree with a concrete declared type', async () => {
-    // A genuine PNG carrying a bogus extension is the common false negative.
+  it('accepts octet-stream with an allowed PNG signature', async () => {
     const fetchImpl = async () =>
       new Response(pngBytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
 

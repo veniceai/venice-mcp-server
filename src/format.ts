@@ -239,13 +239,7 @@ const PROSE_KEYS = new Set([
   'text',
 ])
 
-/**
- * Truncate large strings for safe inclusion in tool responses.
- *
- * Returns the dropped character count so a handler can report truncation in
- * structured content. The inline marker is easy to miss when a host renders
- * only part of the text, or when an agent reads `structuredContent` alone.
- */
+/** Truncate response text and return the omitted character count for structured content. */
 export function truncate(s: string, max = MAX_TEXT_CHARS): { text: string; truncatedChars: number } {
   if (s.length <= max) return { text: s, truncatedChars: 0 }
   return { text: `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`, truncatedChars: s.length - max }

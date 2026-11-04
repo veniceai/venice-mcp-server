@@ -7,8 +7,7 @@ import { StubClient } from './helpers/stub-client.js'
 const cfg = loadConfig({ VENICE_API_KEY: 'test-key' })
 const docxType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
 
-// Genuine fixtures copied from outputs/mcp-pr94-pr95-review-20261023:
-// parser-repro/sample.pdf (589 bytes) and sample.docx (838 bytes).
+// Minimal PDF and DOCX fixtures.
 const pdf = Buffer.from(
   'JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5kb2JqCjIgMCBvYmoKPDwgL1R5cGUg' +
   'L1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4KZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAg' +
@@ -157,7 +156,7 @@ describe('explicit inline MIME declarations preserve existing upload metadata', 
     { name: 'WAV voice clone', caller: clone, bytes: wav, type: 'audio/wav', filename: 'sample' },
     { name: 'MP4 container', caller: asr, bytes: mp4, type: 'audio/mp4', filename: 'audio' },
     { name: 'ID3 with declared MPEG audio', caller: clone, bytes: id3, type: 'audio/mpeg', filename: 'sample' },
-    { name: 'JPEG bytes with an authoritative WebP declaration', caller: upscale, bytes: jpeg, type: 'image/webp', filename: 'image.png' },
+    { name: 'JPEG bytes with an explicit WebP declaration', caller: upscale, bytes: jpeg, type: 'image/webp', filename: 'image.png' },
   ]
   for (const { name, caller, bytes, type, filename } of cases) {
     it(`${name} retains its declared MIME, existing filename, and bytes`, async (t) => {

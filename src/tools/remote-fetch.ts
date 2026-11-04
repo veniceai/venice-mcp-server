@@ -100,56 +100,52 @@ function cancelResponseBody(res: Response | undefined): void {
   void res?.body?.cancel().catch(() => {})
 }
 
-export interface DecodedDataUrl {
+interface DecodedDataUrl {
   buffer: Buffer
   contentType: string
 }
 
-const DATA_URL_PATTERN = /^data:([^,]*),(.*)$/s
-
-/**
- * Decode a `data:` URL into raw bytes.
- *
- * The MCP tool schemas use `z.string().url()`, which accepts `data:` URLs, but
- * the upload path only ever understood http/https. Every tool that advertises
- * an inline-base64 alternative (image upscale, ASR, voice clone, document
- * parsing) therefore failed with "unsupported scheme: data:".
- *
- * A data URL carries no hostname, so it bypasses DNS and the private-address
- * check by construction. Returns `undefined` for anything that is not a data
- * URL so callers can fall through to the network path.
- */
+/** Decode an inline data URL; return undefined for the network path. */
 export function decodeDataUrl(url: string): DecodedDataUrl | undefined {
-  const match = DATA_URL_PATTERN.exec(url)
-  if (!match) return undefined
+  if (!/^data:/i.test(url)) return undefined
+  const serialized = new URL(url).href.split('#', 1)[0].slice('data:'.length)
+  const match = /^([^,]*),(.*)$/s.exec(serialized)
+  if (!match) throw new Error('Invalid data URL: missing comma')
 
   const [, rawMeta, rawBody] = match
-  const isBase64 = /;base64$/i.test(rawMeta)
-  // An omitted media type stays empty rather than defaulting to text/plain, so
-  // a typeless data URL falls through to magic-byte sniffing exactly like a
-  // response that arrived without a Content-Type header.
-  const contentType = isBase64 ? rawMeta.replace(/;base64$/i, '') : rawMeta
-  // Percent-decoding applies only to the non-base64 form; `%` is not a valid
-  // base64 character, so decoding base64 first would corrupt the bodies that
-  // base64url produces.
-  const decodedBody = isBase64 ? rawBody : safeDecodeURIComponent(rawBody)
+  const metadata = rawMeta.trim()
+  const isBase64 = /; *base64$/i.test(metadata)
+  // Keep an omitted media type empty so signature detection can identify it.
+  const contentType = isBase64 ? metadata.replace(/; *base64$/i, '') : metadata
+  const decodedBody = decodePercentBytes(rawBody)
 
-  return { buffer: Buffer.from(decodedBody, isBase64 ? 'base64' : 'utf8'), contentType }
-}
+  if (!isBase64) return { buffer: decodedBody, contentType }
 
-function safeDecodeURIComponent(value: string): string {
   try {
-    return decodeURIComponent(value)
+    return { buffer: Buffer.from(atob(decodedBody.toString('latin1')), 'latin1'), contentType }
   } catch {
-    return value
+    throw new Error('Invalid data URL: malformed base64 payload')
   }
 }
 
-/**
- * Apply the same byte budget, emptiness and content-type rules to an inline
- * data URL that the network path applies to a fetched body, so a caller cannot
- * smuggle a mismatched payload past validation by inlining it.
- */
+function decodePercentBytes(value: string): Buffer {
+  const bytes = Buffer.from(value, 'utf8')
+  let length = 0
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] === 0x25 && i + 2 < bytes.length) {
+      const hex = bytes.subarray(i + 1, i + 3).toString('latin1')
+      if (/^[0-9a-f]{2}$/i.test(hex)) {
+        bytes[length++] = Number.parseInt(hex, 16)
+        i += 2
+        continue
+      }
+    }
+    bytes[length++] = bytes[i]
+  }
+  return bytes.subarray(0, length)
+}
+
+/** Apply upload limits and MIME rules to inline bytes. */
 function resolveInlineSource(decoded: DecodedDataUrl, opts: FetchUploadSourceOptions): UploadSource {
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_UPLOAD_BYTES
   if (decoded.buffer.length > maxBytes) {
@@ -336,14 +332,6 @@ function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
 }
 
-/**
- * How much trust the declared content type deserves.
- *
- * `declared` means a concrete type arrived, `typeless` means the body carried
- * no media type at all, and `generic` means the sender fell back to
- * application/octet-stream — the cheapest thing to claim. The three deserve
- * different treatment because two of them are free to forge.
- */
 type DeclaredContentType = 'declared' | 'typeless' | 'generic'
 
 function classifyDeclaredContentType(contentType: string): DeclaredContentType {
@@ -365,16 +353,13 @@ function assertAllowedContentType(
   const normalized = contentType.split(';', 1)[0].trim().toLowerCase()
   if (normalized === 'application/octet-stream' && allowed.some((entry) => entry.toLowerCase() === 'application/octet-stream')) return
 
-  // A type the sender actually declared gets the benefit of an exact match.
-  // When the caller substituted a fallback, the declared value is the caller's
-  // guess rather than the sender's claim, so it does not get that shortcut.
-  const kind: DeclaredContentType = usedFallbackContentType ? 'typeless' : classifyDeclaredContentType(normalized)
+  // Fallback types must pass signature checks even if they match the allowlist.
+  const kind = usedFallbackContentType ? 'typeless' : classifyDeclaredContentType(normalized)
   if (kind === 'declared') {
     if (allowed.some((entry) => normalized.startsWith(entry.toLowerCase()))) return
     throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
   }
 
-  // Absent and generic types are both forgeable, so decide on the body itself.
   if (!isAllowedByMagicBytes(buffer, allowed)) {
     throw new Error(
       kind === 'typeless'
