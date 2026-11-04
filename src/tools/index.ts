@@ -41,7 +41,9 @@ import {
   fitJson,
   fitJsonList,
   formatToolError,
+  MAX_TEXT_CHARS,
   truncate,
+  truncationMetadata,
   type AsrUpstreamBody,
 } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
@@ -718,7 +720,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_chat',
       title: 'Venice Chat (LLM)',
-      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. Completion id and actual model, when returned upstream, are available in structured content. Responses marked X-Venice-TEE: true also include a JSON text block for venice_tee_signature. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
+      description: `Run an OpenAI-compatible chat completion via Venice's text-model catalog. Calls are non-streaming plaintext. Completion text longer than ${MAX_TEXT_CHARS} characters is truncated and the result reports omitted_chars in structured content. Completion id and actual model, when returned upstream, are available in structured content. Responses marked X-Venice-TEE: true also include a JSON text block for venice_tee_signature. enable_e2ee is rejected: this server does not encrypt chat.${nsfwNote}${X402_OK}`,
       inputSchema: {
         messages: z
           .array(chatMessageSchema)
@@ -787,9 +789,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             ...(typeof resp.id === 'string' ? { id: resp.id } : {}),
             ...(typeof resp.model === 'string' ? { model: resp.model } : {}),
           }
+          const fitted = truncate(text)
           return ok(
-            truncate(text),
-            { ...metadata, message, usage: resp.usage },
+            fitted.text,
+            { ...metadata, message, usage: resp.usage, ...truncationMetadata(fitted.truncatedChars) },
             headers['x-venice-tee'] === 'true' && Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
           )
         } catch (err) {
@@ -823,7 +826,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             { ...args, model: args.model ?? cfg.defaultChatModel }
           )
           const text = resp.output_text ?? JSON.stringify(resp.output ?? resp, null, 2)
-          return ok(truncate(text))
+          const fitted = truncate(text)
+          return ok(fitted.text, truncationMetadata(fitted.truncatedChars))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1051,7 +1055,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Image Upscale',
       description: `Upscale an image (2-4× scale). Endpoint requires base64 image; this tool fetches the URL and uploads it. Returns base64 PNG.${X402_OK}`,
       inputSchema: {
-        image_url: z.string().url(),
+        image_url: z.string().url().describe('Image to upscale: an http(s) URL or an inline base64 data URL. Include a concrete media type in data URLs, e.g. image/jpeg.'),
         scale: z.number().min(2).max(4).optional().describe('Upscale factor, 2 to 4. Defaults to 2. Large inputs are scaled down automatically to stay under the 4096x4096 output cap.'),
         creativity: z
           .number()
@@ -1405,7 +1409,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice ASR (Speech-to-Text)',
       description: `Transcribe audio. Fetches the URL server-side and forwards as multipart/form-data file upload. Upstream transcription JSON larger than 1 MiB is rejected so word/character timestamps cannot exhaust memory. Timestamp arrays and transcripts longer than ${ASR_TEXT_PAGE_CHARS} characters are paged in the MCP result: such a transcription returns result_handle alongside the first page, and every later page must be requested with that handle so the clip is transcribed — and charged — exactly once. Handles are held in memory, per MCP session, for ${ASR_RESULT_TTL_MS / 60_000} minutes and only the ${ASR_RESULT_MAX_ENTRIES} most recent survive, after which paging fails and a fresh transcription is needed.${X402_OK}`,
       inputSchema: {
-        audio_url: z.string().url().optional().describe('Audio to transcribe. Required unless result_handle is supplied.'),
+        audio_url: z.string().url().optional().describe('Audio to transcribe, as an http(s) URL or an inline base64 data URL. Include a concrete media type in data URLs, e.g. audio/mpeg for MP3 or audio/mp4 for M4A. Required unless result_handle is supplied.'),
         result_handle: z
           .string()
           .min(1)
@@ -1487,7 +1491,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           .string()
           .url()
           .optional()
-          .describe('Required for action=create. Audio sample URL; tts-chatterbox-hd accepts MP3/WAV/FLAC/M4A, tts-minimax-speech-02-hd MP3/WAV only.'),
+          .describe('Required for action=create. Audio sample as an http(s) URL or an inline base64 data URL; tts-chatterbox-hd accepts MP3/WAV/FLAC/M4A, tts-minimax-speech-02-hd MP3/WAV only. Include a concrete media type in data URLs, e.g. audio/mpeg for MP3 or audio/mp4 for M4A.'),
         model: z
           .enum(VOICE_CLONE_MODELS)
           .optional()
@@ -1800,7 +1804,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             '/v1/augment/scrape',
             args
           )
-          return ok(truncate(resp.markdown ?? resp.content ?? JSON.stringify(resp)))
+          const fitted = truncate(resp.markdown ?? resp.content ?? JSON.stringify(resp))
+          return ok(fitted.text, truncationMetadata(fitted.truncatedChars))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -1812,7 +1817,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Text Parser (PDF/DOCX/EPUB/PPTX/XLSX)',
       description: `Extract text from a document URL. Fetches the URL server-side and uploads the file as multipart/form-data.${X402_OK}`,
       inputSchema: {
-        url: z.string().url(),
+        url: z.string().url().describe('Document to parse: an http(s) URL or an inline base64 data URL. Include a concrete media type in data URLs, e.g. application/pdf or application/vnd.openxmlformats-officedocument.wordprocessingml.document for DOCX.'),
       },
       handler: async (args) => {
         try {
@@ -1833,7 +1838,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const form = new FormData()
           form.set('file', new Blob([source.buffer], { type: source.contentType }), source.filename)
           const resp = await client.postMultipart<{ text?: string }>('/v1/augment/text-parser', form)
-          return ok(truncate(resp.text ?? JSON.stringify(resp)))
+          const fitted = truncate(resp.text ?? JSON.stringify(resp))
+          return ok(fitted.text, truncationMetadata(fitted.truncatedChars))
         } catch (err) {
           return fail(formatToolError(err))
         }
@@ -2324,9 +2330,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             ...(typeof resp.id === 'string' ? { id: resp.id } : {}),
             ...(typeof resp.model === 'string' ? { model: resp.model } : {}),
           }
+          const fitted = truncate(text)
           return ok(
-            truncate(text),
-            { ...metadata, usage: resp.usage },
+            fitted.text,
+            { ...metadata, usage: resp.usage, ...truncationMetadata(fitted.truncatedChars) },
             headers['x-venice-tee'] === 'true' && Object.keys(metadata).length > 0 ? [JSON.stringify(metadata)] : [],
           )
         } catch (err) {
@@ -2391,7 +2398,8 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             undefined,
             { auth: 'apiKey' },
           )
-          return ok(truncate(JSON.stringify(resp, null, 2)))
+          const fitted = truncate(JSON.stringify(resp, null, 2))
+          return ok(fitted.text, truncationMetadata(fitted.truncatedChars))
         } catch (err) {
           return fail(formatToolError(err))
         }

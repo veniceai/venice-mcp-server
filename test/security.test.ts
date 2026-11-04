@@ -1,10 +1,11 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { isAuthorizedBearerHeader, isLoopbackHost, isValidSessionId, validateHttpAuthConfig } from '../src/transports/http.js'
-import { fetchUploadSource, validateRemoteUrl } from '../src/tools/remote-fetch.js'
+import { decodeDataUrl, fetchUploadSource, validateRemoteUrl } from '../src/tools/remote-fetch.js'
 
 const publicLookup = async () => ['93.184.216.34']
 const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+const inlineOpts = { label: 'image_url', fallbackContentType: 'image/png', fallbackFilename: 'image.png', timeoutMs: 1000 }
 
 describe('HTTP MCP bearer auth', () => {
   it('allows requests when no auth token is configured', () => {
@@ -288,5 +289,159 @@ describe('remote upload fetch security', () => {
 
     assert.deepEqual(pinned, ['assets.example:93.184.216.34'])
     assert.equal(source.filename, 'image.png')
+  })
+})
+
+describe('inline data URL uploads', () => {
+  it('decodes a base64 data URL without touching the network', async () => {
+    const url = `data:image/png;base64,${pngBytes.toString('base64')}`
+    const source = await fetchUploadSource(url, { ...inlineOpts })
+
+    assert.equal(source.buffer.equals(pngBytes), true)
+    assert.equal(source.contentType, 'image/png')
+    assert.equal(source.filename, 'image.png')
+  })
+
+  it('decodes a percent-encoded plain data URL', async () => {
+    const source = await fetchUploadSource('data:text/plain,hello%20world', {
+      ...inlineOpts,
+      fallbackContentType: 'text/plain',
+      allowedContentTypes: ['text/'],
+    })
+
+    assert.equal(source.buffer.toString('utf8'), 'hello world')
+    assert.equal(source.contentType, 'text/plain')
+  })
+
+  it('falls back to magic bytes when the data URL omits a media type', async () => {
+    const source = await fetchUploadSource(`data:;base64,${pngBytes.toString('base64')}`, {
+      ...inlineOpts,
+      allowedContentTypes: ['image/'],
+    })
+
+    assert.equal(source.buffer.equals(pngBytes), true)
+  })
+
+  it('honours the byte budget and empty-body rules for inline sources', async () => {
+    await assert.rejects(
+      fetchUploadSource(`data:image/png;base64,${pngBytes.toString('base64')}`, { ...inlineOpts, maxBytes: 4 }),
+      /larger than 4 bytes/,
+    )
+    await assert.rejects(fetchUploadSource('data:image/png;base64,', inlineOpts), /empty response body/)
+  })
+
+  it('rejects an inline payload whose declared type is not allowed', async () => {
+    await assert.rejects(
+      fetchUploadSource('data:text/html,hi', { ...inlineOpts, allowedContentTypes: ['image/'] }),
+      /unsupported content-type/,
+    )
+  })
+
+  it('decodes only data URLs and leaves everything else to the network path', () => {
+    assert.equal(decodeDataUrl('https://example.com/x.png'), undefined)
+    assert.equal(decodeDataUrl('file:///etc/passwd'), undefined)
+    assert.equal(decodeDataUrl('data:,plain')?.buffer.toString('utf8'), 'plain')
+  })
+
+  it('decodes binary bytes from a base64 data URL', () => {
+    const payload = Buffer.from([0xfb, 0xff, 0x3e, 0x3d])
+    const decoded = decodeDataUrl(`data:application/octet-stream;base64,${payload.toString('base64')}`)
+    assert.equal(decoded?.buffer.equals(payload), true)
+  })
+
+  it('percent-decodes base64 before decoding its binary payload', () => {
+    const payload = Buffer.from([0xfb, 0xff, 0x3e, 0x3d])
+    const encoded = encodeURIComponent(payload.toString('base64'))
+    assert.match(encoded, /%2B/)
+    assert.match(encoded, /%2F/)
+    assert.match(encoded, /%3D/)
+    assert.deepEqual(decodeDataUrl(`data:application/octet-stream;base64,${encoded}`)?.buffer, payload)
+  })
+
+  it('preserves all percent-encoded byte values without UTF-8 conversion', () => {
+    const payload = Buffer.from(Array.from({ length: 256 }, (_, i) => i))
+    const encoded = [...payload].map((byte) => `%${byte.toString(16).padStart(2, '0')}`).join('')
+    assert.deepEqual(decodeDataUrl(`data:application/octet-stream,${encoded}`)?.buffer, payload)
+    assert.deepEqual(decodeDataUrl('data:text/plain;charset=iso-8859-1,caf%E9')?.buffer, Buffer.from('636166e9', 'hex'))
+  })
+
+  it('decodes percent escapes once while preserving plus signs and invalid escapes', () => {
+    const decoded = decodeDataUrl('data:text/plain,%2520+%00%ff%GG%2%')
+    assert.deepEqual(decoded?.buffer, Buffer.concat([Buffer.from('%20+'), Buffer.from([0, 255]), Buffer.from('%GG%2%')]))
+    assert.deepEqual(decodeDataUrl('data:text/plain,café')?.buffer, Buffer.from('café'))
+  })
+
+  it('accepts case-insensitive data schemes and excludes URL fragments', () => {
+    assert.deepEqual(decodeDataUrl('DaTa:text/plain,hello%23world#fragment')?.buffer, Buffer.from('hello#world'))
+    assert.deepEqual(decodeDataUrl('data:text/plain;BASE64,aGk=#fragment')?.buffer, Buffer.from('hi'))
+    assert.deepEqual(decodeDataUrl('data:text/plain,a?b#fragment')?.buffer, Buffer.from('a?b'))
+  })
+
+  it('accepts unpadded and whitespace-containing base64', () => {
+    assert.deepEqual(decodeDataUrl('data:text/plain;base64,aGk')?.buffer, Buffer.from('hi'))
+    assert.deepEqual(decodeDataUrl('data:text/plain;base64,aG%20k%3D%0A')?.buffer, Buffer.from('hi'))
+    assert.deepEqual(decodeDataUrl('data:text/plain; base64,aGk=')?.buffer, Buffer.from('hi'))
+  })
+
+  it('rejects malformed base64 instead of silently uploading partial bytes', async () => {
+    for (const payload of ['a', 'aGk===', 'aGk!stuff', '%FF', 'aGk%GG', '-_8=']) {
+      await assert.rejects(
+        fetchUploadSource(`data:image/png;base64,${payload}`, inlineOpts),
+        /malformed base64 payload/,
+      )
+    }
+    assert.throws(() => decodeDataUrl('data:text/plain'), /missing comma/)
+  })
+})
+
+describe('declared content-type downgrade', () => {
+  const spoof = (body: Buffer) => async () =>
+    new Response(body, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+  const opts = {
+    label: 'image_url',
+    fallbackContentType: 'image/png',
+    fallbackFilename: 'image.png',
+    timeoutMs: 1000,
+    allowedContentTypes: ['image/'],
+    lookupAddresses: publicLookup,
+  }
+
+  it('accepts octet-stream whose first bytes match an allowed signature, even when the rest does not', async () => {
+    // 'RIFF' at 0 and 'WEBP' at 8, but the rest is nothing like a WebP.
+    const fake = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP'), Buffer.from('<<< not webp')])
+    assert.equal(fake.subarray(8, 12).toString('ascii'), 'WEBP')
+
+    const source = await fetchUploadSource('https://example.com/x.png', { ...opts, fetchImpl: spoof(fake) as typeof fetch })
+    assert.equal(source.buffer.equals(fake), true)
+  })
+
+  it('accepts octet-stream with an allowed PNG signature', async () => {
+    const fetchImpl = async () =>
+      new Response(pngBytes, { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+
+    const source = await fetchUploadSource('https://example.com/x.png', { ...opts, fetchImpl: fetchImpl as typeof fetch })
+    assert.equal(source.buffer.equals(pngBytes), true)
+  })
+
+  it('still fails an octet-stream body with no allowed signature at all', async () => {
+    const fetchImpl = async () =>
+      new Response('plain text here', { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+
+    await assert.rejects(
+      fetchUploadSource('https://example.com/x.png', { ...opts, fetchImpl: fetchImpl as typeof fetch }),
+      /unsupported content-type/,
+    )
+  })
+
+  it('accepts octet-stream verbatim when the allowlist names it', async () => {
+    const fetchImpl = async () =>
+      new Response('anything', { status: 200, headers: { 'content-type': 'application/octet-stream' } })
+
+    const source = await fetchUploadSource('https://example.com/x.bin', {
+      ...opts,
+      allowedContentTypes: ['application/octet-stream'],
+      fetchImpl: fetchImpl as typeof fetch,
+    })
+    assert.equal(source.buffer.toString('utf8'), 'anything')
   })
 })

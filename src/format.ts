@@ -218,7 +218,7 @@ export function formatToolError(err: unknown): string {
   return `Error: ${String(err)}`
 }
 
-const MAX_TEXT_CHARS = 8000
+export const MAX_TEXT_CHARS = 8000
 const TRUNCATION_MARKER = '…[truncated]'
 const MIN_SHORTENED_STRING_CHARS = 32
 // Only these keys hold free text; anything else (ids, slugs, URLs, addresses, hashes) must stay byte-exact.
@@ -239,10 +239,15 @@ const PROSE_KEYS = new Set([
   'text',
 ])
 
-/** Truncate large strings for safe inclusion in tool responses. */
-export function truncate(s: string, max = MAX_TEXT_CHARS): string {
-  if (s.length <= max) return s
-  return `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`
+/** Truncate response text and return the omitted character count for structured content. */
+export function truncate(s: string, max = MAX_TEXT_CHARS): { text: string; truncatedChars: number } {
+  if (s.length <= max) return { text: s, truncatedChars: 0 }
+  return { text: `${s.slice(0, max)}\n…[truncated ${s.length - max} chars]`, truncatedChars: s.length - max }
+}
+
+/** Report a truncated text result in structured content, or undefined when it fit. */
+export function truncationMetadata(truncatedChars: number): { truncated: true; omitted_chars: number } | undefined {
+  return truncatedChars > 0 ? { truncated: true, omitted_chars: truncatedChars } : undefined
 }
 
 /**

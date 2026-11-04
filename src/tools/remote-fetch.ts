@@ -33,6 +33,9 @@ export interface UploadSource {
 }
 
 export async function fetchUploadSource(url: string, opts: FetchUploadSourceOptions): Promise<UploadSource> {
+  const inline = decodeDataUrl(url)
+  if (inline) return resolveInlineSource(inline, opts)
+
   const ac = new AbortController()
   const timeout = setTimeout(() => ac.abort(), opts.timeoutMs)
   const fetchImpl = opts.fetchImpl ?? fetch
@@ -95,6 +98,102 @@ export async function fetchUploadSource(url: string, opts: FetchUploadSourceOpti
 function cancelResponseBody(res: Response | undefined): void {
   // Cancellation starts immediately; a failing or stalled cleanup must not mask the result.
   void res?.body?.cancel().catch(() => {})
+}
+
+interface DecodedDataUrl {
+  buffer: Buffer
+  contentType: string
+}
+
+/** Decode an inline data URL; return undefined for the network path. */
+export function decodeDataUrl(url: string): DecodedDataUrl | undefined {
+  if (!/^data:/i.test(url)) return undefined
+  const serialized = new URL(url).href.split('#', 1)[0].slice('data:'.length)
+  const match = /^([^,]*),(.*)$/s.exec(serialized)
+  if (!match) throw new Error('Invalid data URL: missing comma')
+
+  const [, rawMeta, rawBody] = match
+  const metadata = rawMeta.trim()
+  const isBase64 = /; *base64$/i.test(metadata)
+  // Keep an omitted media type empty so signature detection can identify it.
+  const contentType = isBase64 ? metadata.replace(/; *base64$/i, '') : metadata
+  const decodedBody = decodePercentBytes(rawBody)
+
+  if (!isBase64) return { buffer: decodedBody, contentType }
+
+  try {
+    return { buffer: Buffer.from(atob(decodedBody.toString('latin1')), 'latin1'), contentType }
+  } catch {
+    throw new Error('Invalid data URL: malformed base64 payload')
+  }
+}
+
+function decodePercentBytes(value: string): Buffer {
+  const bytes = Buffer.from(value, 'utf8')
+  let length = 0
+  for (let i = 0; i < bytes.length; i += 1) {
+    if (bytes[i] === 0x25 && i + 2 < bytes.length) {
+      const hex = bytes.subarray(i + 1, i + 3).toString('latin1')
+      if (/^[0-9a-f]{2}$/i.test(hex)) {
+        bytes[length++] = Number.parseInt(hex, 16)
+        i += 2
+        continue
+      }
+    }
+    bytes[length++] = bytes[i]
+  }
+  return bytes.subarray(0, length)
+}
+
+/** Apply upload limits and MIME rules to inline bytes. */
+function resolveInlineSource(decoded: DecodedDataUrl, opts: FetchUploadSourceOptions): UploadSource {
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_UPLOAD_BYTES
+  if (decoded.buffer.length > maxBytes) {
+    throw new Error(`Could not fetch ${opts.label}: response is larger than ${maxBytes} bytes`)
+  }
+  if (decoded.buffer.length === 0) throw new Error(`Could not fetch ${opts.label}: empty response body`)
+
+  // Preserve concrete declarations. An inline source has no URL filename to
+  // identify its format, so missing/generic types need a concrete signature.
+  const mediaTypeOmitted = decoded.contentType === ''
+  assertAllowedContentType(decoded.contentType, opts.allowedContentTypes, opts.label, decoded.buffer, mediaTypeOmitted)
+
+  if (classifyDeclaredContentType(decoded.contentType) !== 'declared') {
+    const format = detectInlineFormat(decoded.buffer)
+    if (!format) {
+      throw new Error(`Could not fetch ${opts.label}: cannot determine the inline file format; specify a concrete media type in the data URL`)
+    }
+    assertAllowedContentType(format.contentType, opts.allowedContentTypes, opts.label, decoded.buffer, false)
+    return {
+      buffer: decoded.buffer,
+      contentType: format.contentType,
+      filename: `${opts.fallbackFilename.replace(/\.[^.]+$/, '')}.${format.extension}`,
+    }
+  }
+
+  return {
+    buffer: decoded.buffer,
+    contentType: decoded.contentType,
+    filename: opts.fallbackFilename,
+  }
+}
+
+function detectInlineFormat(buffer: Buffer): { contentType: string; extension: string } | undefined {
+  if (startsWithAscii(buffer, '%PDF-')) return { contentType: 'application/pdf', extension: 'pdf' }
+  if (buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return { contentType: 'image/png', extension: 'png' }
+  }
+  if (buffer.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return { contentType: 'image/jpeg', extension: 'jpg' }
+  if (startsWithAscii(buffer, 'GIF87a') || startsWithAscii(buffer, 'GIF89a')) return { contentType: 'image/gif', extension: 'gif' }
+  if (startsWithAscii(buffer, 'RIFF')) {
+    const format = buffer.subarray(8, 12).toString('ascii')
+    if (format === 'WEBP') return { contentType: 'image/webp', extension: 'webp' }
+    if (format === 'WAVE') return { contentType: 'audio/wav', extension: 'wav' }
+  }
+  if (startsWithAscii(buffer, 'fLaC')) return { contentType: 'audio/flac', extension: 'flac' }
+  // Shared container signatures (ZIP, OLE, Ogg, MP4), ID3 tags and MPEG frame
+  // sync do not establish a concrete format. Require the caller's MIME instead.
+  return undefined
 }
 
 export async function validateRemoteUrl(url: URL, lookupAddresses: LookupAddresses = lookupHostname): Promise<void> {
@@ -233,6 +332,15 @@ function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
 }
 
+type DeclaredContentType = 'declared' | 'typeless' | 'generic'
+
+function classifyDeclaredContentType(contentType: string): DeclaredContentType {
+  const mediaType = contentType.split(';', 1)[0].trim().toLowerCase()
+  if (!mediaType) return 'typeless'
+  if (mediaType === 'application/octet-stream') return 'generic'
+  return 'declared'
+}
+
 function assertAllowedContentType(
   contentType: string,
   allowed: string[] | undefined,
@@ -241,17 +349,24 @@ function assertAllowedContentType(
   usedFallbackContentType: boolean,
 ): void {
   if (!allowed || allowed.length === 0) return
+
   const normalized = contentType.split(';', 1)[0].trim().toLowerCase()
   if (normalized === 'application/octet-stream' && allowed.some((entry) => entry.toLowerCase() === 'application/octet-stream')) return
-  if ((!normalized || normalized === 'application/octet-stream' || usedFallbackContentType) && isAllowedByMagicBytes(buffer, allowed)) return
 
-  const ok = allowed.some((entry) => {
-    const allowedType = entry.toLowerCase()
-    return normalized.startsWith(allowedType)
-  })
-  if (!ok) throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
-  if (usedFallbackContentType) throw new Error(`Could not fetch ${label}: missing content-type did not match allowed file signatures`)
-  if (normalized === 'application/octet-stream') throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
+  // Fallback types must pass signature checks even if they match the allowlist.
+  const kind = usedFallbackContentType ? 'typeless' : classifyDeclaredContentType(normalized)
+  if (kind === 'declared') {
+    if (allowed.some((entry) => normalized.startsWith(entry.toLowerCase()))) return
+    throw new Error(`Could not fetch ${label}: unsupported content-type ${contentType}`)
+  }
+
+  if (!isAllowedByMagicBytes(buffer, allowed)) {
+    throw new Error(
+      kind === 'typeless'
+        ? `Could not fetch ${label}: missing content-type did not match allowed file signatures`
+        : `Could not fetch ${label}: unsupported content-type ${contentType}`,
+    )
+  }
 }
 
 function filenameFromUrl(url: URL, fallback: string): string {
