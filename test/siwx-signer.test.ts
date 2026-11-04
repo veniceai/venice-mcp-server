@@ -71,6 +71,7 @@ describe('runSiwxSigner', () => {
 process.stdout.write('  ' + Buffer.from(JSON.stringify({
   base: e.VENICE_SIWX_BASE_URL, method: e.VENICE_SIWX_REQUEST_METHOD, path: e.VENICE_SIWX_REQUEST_PATH,
   key: e.VENICE_API_KEY ?? null, token: e.VENICE_SIWX_TOKEN ?? null, cmd: e.VENICE_SIWX_SIGNER_COMMAND ?? null,
+  mcpToken: e.VENICE_MCP_AUTH_TOKEN ?? null,
   other: e.SIGNER_FIXTURE ?? null,
 })).toString('base64') + '\\n\\n')
 `,
@@ -82,6 +83,7 @@ process.stdout.write('  ' + Buffer.from(JSON.stringify({
         VENICE_API_KEY: 'vk_must_not_leak',
         VENICE_SIWX_TOKEN: 'siwx_must_not_leak',
         VENICE_SIWX_SIGNER_COMMAND: command,
+        VENICE_MCP_AUTH_TOKEN: 'http_bearer_must_not_leak',
         SIGNER_FIXTURE: 'kept',
       },
     })
@@ -92,6 +94,7 @@ process.stdout.write('  ' + Buffer.from(JSON.stringify({
       key: null,
       token: null,
       cmd: null,
+      mcpToken: null,
       other: 'kept',
     })
   })

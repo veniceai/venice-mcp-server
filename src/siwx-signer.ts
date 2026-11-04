@@ -11,8 +11,8 @@
  *   - It is run through the platform shell, once per request.
  *   - It receives VENICE_SIWX_BASE_URL (the Venice API root this server calls,
  *     e.g. https://api.venice.ai/api), VENICE_SIWX_REQUEST_METHOD and
- *     VENICE_SIWX_REQUEST_PATH. It does not inherit VENICE_API_KEY or
- *     VENICE_SIWX_TOKEN.
+ *     VENICE_SIWX_REQUEST_PATH. It does not inherit VENICE_API_KEY,
+ *     VENICE_SIWX_TOKEN or VENICE_MCP_AUTH_TOKEN.
  *   - It prints the base64 `SIGN-IN-WITH-X` value on stdout and exits 0.
  *     Surrounding whitespace is ignored; anything else must be one line of
  *     printable ASCII.
@@ -43,7 +43,8 @@ export class SiwxSignerError extends Error {
 export const MAX_SIGNER_OUTPUT_BYTES = 64 * 1024
 const MAX_STDERR_CHARS = 300
 const HEADER_VALUE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/
-const WITHHELD_ENV = ['VENICE_API_KEY', 'VENICE_SIWX_TOKEN', 'VENICE_SIWX_SIGNER_COMMAND']
+// Credentials the signer has no use for: the Venice key, the static token, and the HTTP-mode bearer token.
+const WITHHELD_ENV = ['VENICE_API_KEY', 'VENICE_SIWX_TOKEN', 'VENICE_SIWX_SIGNER_COMMAND', 'VENICE_MCP_AUTH_TOKEN']
 
 export function runSiwxSigner(
   command: string,

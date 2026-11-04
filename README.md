@@ -253,7 +253,7 @@ Venice accepts each signed Sign-In-With-X message once, within 5 minutes of its 
 
 Before each wallet-authenticated request, the server runs `VENICE_SIWX_SIGNER_COMMAND` through the shell and sends its stdout as the `SIGN-IN-WITH-X` header. Any program can be the signer (a hardware-wallet bridge, a keychain lookup, a Solana signer) as long as it follows this contract:
 
-- **Input:** the environment carries `VENICE_SIWX_BASE_URL` (the Venice API root the server is calling, e.g. `https://api.venice.ai/api`), `VENICE_SIWX_REQUEST_METHOD` and `VENICE_SIWX_REQUEST_PATH`. A `GET {VENICE_SIWX_BASE_URL}/v1/x402/balance/{wallet}` without auth returns a 402 with a fresh challenge under `extensions["sign-in-with-x"].info`. The signer does not inherit `VENICE_API_KEY` or `VENICE_SIWX_TOKEN`.
+- **Input:** the environment carries `VENICE_SIWX_BASE_URL` (the Venice API root the server is calling, e.g. `https://api.venice.ai/api`), `VENICE_SIWX_REQUEST_METHOD` and `VENICE_SIWX_REQUEST_PATH`. A `GET {VENICE_SIWX_BASE_URL}/v1/x402/balance/{wallet}` without auth returns a 402 with a fresh challenge under `extensions["sign-in-with-x"].info`. The signer does not inherit `VENICE_API_KEY`, `VENICE_SIWX_TOKEN` or `VENICE_MCP_AUTH_TOKEN`.
 - **Output:** the base64 `SIGN-IN-WITH-X` value on stdout, exit code 0. Surrounding whitespace is ignored; the value must be a single line of printable ASCII.
 - **Failure:** a non-zero exit, empty or malformed output, more than 64 KiB of output, or a run longer than `VENICE_SIWX_SIGNER_TIMEOUT_MS` fails the tool call locally with the reason (including the signer's last stderr line), and nothing is sent to Venice.
 
