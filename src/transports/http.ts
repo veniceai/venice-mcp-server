@@ -16,11 +16,18 @@ interface SessionEntry {
   lastSeen: number
 }
 
+const BEARER_SCHEME_PATTERN = /^Bearer\s+(.+)$/i
+
 export function isAuthorizedBearerHeader(header: string | undefined, expectedToken: string | undefined): boolean {
-  if (!expectedToken) return true
-  if (!header?.startsWith('Bearer ')) return false
-  const actual = Buffer.from(header.slice('Bearer '.length))
-  const expected = Buffer.from(expectedToken)
+  const token = expectedToken?.trim()
+  if (!token) return true
+
+  // Accept client variations in scheme casing and whitespace.
+  const match = header === undefined ? null : BEARER_SCHEME_PATTERN.exec(header)
+  if (!match) return false
+
+  const actual = Buffer.from(match[1])
+  const expected = Buffer.from(token)
   return actual.length === expected.length && timingSafeEqual(actual, expected)
 }
 
@@ -67,6 +74,20 @@ export function validateHttpAuthConfig(
 
 export function isValidSessionId(sessionId: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)
+}
+
+/** Warn about a missing token or a listener reachable beyond loopback. */
+export function httpAuthWarning(host: string, authToken: string | undefined): string | undefined {
+  const token = authToken?.trim()
+  if (token) {
+    return isLoopbackHost(host)
+      ? undefined
+      : `bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`
+  }
+
+  return isLoopbackHost(host)
+    ? 'no VENICE_MCP_AUTH_TOKEN set — any local process can call it and spend the server\'s Venice credentials.'
+    : 'no VENICE_MCP_AUTH_TOKEN set — the server is reachable beyond loopback and any caller can spend its Venice credentials.'
 }
 
 async function closeTransport(transport: StreamableHTTPServerTransport): Promise<void> {
@@ -286,9 +307,10 @@ export async function runHttp(opts: {
   const address = listener.address()
   // eslint-disable-next-line no-console
   console.error(`[venice-mcp] listening on http://${host}:${typeof address === 'object' && address ? address.port : port}/mcp`)
-  if (!isLoopbackHost(host)) {
+  const warning = httpAuthWarning(host, authToken)
+  if (warning) {
     // eslint-disable-next-line no-console
-    console.error(`[venice-mcp] WARNING: bound to ${host} — server is reachable beyond loopback. Keep VENICE_MCP_AUTH_TOKEN set or use a trusted authenticated proxy.`)
+    console.error(`[venice-mcp] WARNING: ${warning}`)
   }
   return listener
 }

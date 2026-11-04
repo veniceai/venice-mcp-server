@@ -8,9 +8,10 @@ const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 const inlineOpts = { label: 'image_url', fallbackContentType: 'image/png', fallbackFilename: 'image.png', timeoutMs: 1000 }
 
 describe('HTTP MCP bearer auth', () => {
-  it('allows requests when no auth token is configured', () => {
+  it('allows requests when the auth token is unset or blank', () => {
     assert.equal(isAuthorizedBearerHeader(undefined, undefined), true)
     assert.equal(isAuthorizedBearerHeader(undefined, ''), true)
+    assert.equal(isAuthorizedBearerHeader(undefined, '   '), true)
   })
 
   it('requires an exact bearer token when configured', () => {
@@ -18,6 +19,28 @@ describe('HTTP MCP bearer auth', () => {
     assert.equal(isAuthorizedBearerHeader('Basic secret', 'secret'), false)
     assert.equal(isAuthorizedBearerHeader('Bearer wrong', 'secret'), false)
     assert.equal(isAuthorizedBearerHeader('Bearer secret', 'secret'), true)
+  })
+
+  it('accepts any auth-scheme casing and extra spaces after the scheme', () => {
+    for (const header of ['bearer secret', 'BEARER secret', 'BeArEr secret', 'Bearer  secret']) {
+      assert.equal(isAuthorizedBearerHeader(header, 'secret'), true, header)
+    }
+  })
+
+  it('compares against the trimmed configured token', () => {
+    for (const header of ['Bearer 0123456789abcdef', 'Bearer  0123456789abcdef']) {
+      assert.equal(isAuthorizedBearerHeader(header, ' 0123456789abcdef'), true, header)
+      assert.equal(isAuthorizedBearerHeader(header, '0123456789abcdef \t'), true, header)
+    }
+    assert.equal(isAuthorizedBearerHeader('Bearer 0123456789abcdeX', ' 0123456789abcdef'), false)
+  })
+
+  it('keeps the scheme strict about the exact token', () => {
+    assert.equal(isAuthorizedBearerHeader('bearer  wrong', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer ', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Token secret', 'secret'), false)
+    assert.equal(isAuthorizedBearerHeader('Bearer secret extra', 'secret'), false)
   })
 
   it('requires a strong token when HTTP mode is exposed beyond loopback', () => {
