@@ -22,7 +22,6 @@ describe('HTTP MCP bearer auth', () => {
   })
 
   it('accepts any auth-scheme casing and extra spaces after the scheme', () => {
-    // RFC 7235 makes the scheme case-insensitive and allows 1*SP after it.
     for (const header of ['bearer secret', 'BEARER secret', 'BeArEr secret', 'Bearer  secret']) {
       assert.equal(isAuthorizedBearerHeader(header, 'secret'), true, header)
     }

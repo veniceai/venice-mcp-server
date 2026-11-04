@@ -22,10 +22,7 @@ export function isAuthorizedBearerHeader(header: string | undefined, expectedTok
   const token = expectedToken?.trim()
   if (!token) return true
 
-  // RFC 7235 makes the auth scheme case-insensitive and allows more than one
-  // space (and, for obs-fold, tabs) between the scheme and the token. A strict
-  // startsWith('Bearer ') rejected "bearer", "BEARER" and extra spacing, which
-  // several HTTP clients emit.
+  // Accept client variations in scheme casing and whitespace.
   const match = header === undefined ? null : BEARER_SCHEME_PATTERN.exec(header)
   if (!match) return false
 
@@ -79,14 +76,7 @@ export function isValidSessionId(sessionId: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(sessionId)
 }
 
-/**
- * Startup warning describing how exposed the listener is, or undefined when the
- * posture is fully guarded.
- *
- * A loopback bind with no token is the quiet case worth naming: it cannot fail
- * validation, so it starts silently, yet any local process can call the
- * endpoint and spend the server's Venice credentials.
- */
+/** Warn about a missing token or a listener reachable beyond loopback. */
 export function httpAuthWarning(host: string, authToken: string | undefined): string | undefined {
   const token = authToken?.trim()
   if (token) {
