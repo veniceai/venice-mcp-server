@@ -8,6 +8,15 @@ import { isInitializeRequest, isJSONRPCRequest } from '@modelcontextprotocol/sdk
 import { buildServer, type BuildOptions } from '../server.js'
 import { loadConfig, type Config } from '../config.js'
 import { VeniceClient, VeniceResponseTooLargeError } from '../venice-client.js'
+import {
+  bearerChallenge,
+  createOAuthVerifier,
+  loadOAuthSettings,
+  protectedResourceMetadata,
+  resourceMetadataUrl,
+  type OAuthSettings,
+  type OAuthVerifier,
+} from '../auth/oauth.js'
 
 const DEFAULT_MAX_HTTP_SESSIONS = 100
 const DEFAULT_SESSION_TTL_MS = 30 * 60 * 1000
@@ -19,8 +28,10 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS = 8
  *   operator's `VENICE_API_KEY` / `VENICE_SIWX_TOKEN`. Sessionful.
  * - `user-key`: each request carries the caller's own Venice credentials (`Authorization: Bearer
  *   <Venice API key>` or a `SIGN-IN-WITH-X` proof), and the server never uses its own. Stateless.
+ * - `oauth`: each request carries an OAuth access token from the configured authorization server;
+ *   the token is introspected and mapped to that user's Venice API key. Stateless.
  */
-export type HttpAuthMode = 'token' | 'user-key'
+export type HttpAuthMode = 'token' | 'user-key' | 'oauth'
 
 export interface UpstreamCredentials {
   apiKey?: string
@@ -36,8 +47,8 @@ type ServerFactory = typeof buildServer
 
 export function parseHttpAuthMode(value: string | undefined): HttpAuthMode {
   const mode = (value ?? 'token').trim().toLowerCase()
-  if (mode === 'token' || mode === 'user-key') return mode
-  throw new Error(`Unknown VENICE_MCP_AUTH "${value}". Use "token" or "user-key".`)
+  if (mode === 'token' || mode === 'user-key' || mode === 'oauth') return mode
+  throw new Error(`Unknown VENICE_MCP_AUTH "${value}". Use "token", "user-key" or "oauth".`)
 }
 
 export function isAuthorizedBearerHeader(header: string | undefined, expectedToken: string | undefined): boolean {
@@ -87,7 +98,7 @@ export function validateHttpAuthConfig(
   allowUnauthenticated = process.env.VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP === '1',
   mode: HttpAuthMode = 'token',
 ): void {
-  if (mode === 'user-key') return
+  if (mode !== 'token') return
   if (isLoopbackHost(host)) return
   if (allowUnauthenticated) return
 
@@ -183,6 +194,10 @@ export interface HttpAppOptions {
   /** Active user-key requests, including work continuing after a disconnect. */
   maxConcurrentRequests?: number
   serverFactory?: ServerFactory
+  /** Required in `oauth` mode. */
+  oauth?: OAuthSettings
+  /** Overrides token verification in `oauth` mode (tests). */
+  oauthVerifier?: OAuthVerifier
 }
 
 function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () => void } {
@@ -235,8 +250,8 @@ function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () =
     })
   }
 
-  if (authMode === 'user-key') {
-    const operations = new WeakMap<Response, (operation: Promise<unknown>) => void>()
+  const operations = new WeakMap<Response, (operation: Promise<unknown>) => void>()
+  if (authMode !== 'token') {
     let activeRequests = 0
     app.use('/mcp', (_req, res, next) => {
       if (activeRequests >= maxConcurrentRequests) {
@@ -264,7 +279,75 @@ function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () =
       res.once('close', () => { closed = true; release() })
       next()
     })
+  }
 
+  if (authMode === 'oauth') {
+    const settings = opts.oauth
+    if (!settings) throw new Error('oauth mode requires OAuth settings')
+    const verifier = opts.oauthVerifier ?? createOAuthVerifier(settings)
+    const metadataPath = new URL(resourceMetadataUrl(settings)).pathname
+    const sendMetadata = (_req: Request, res: Response) => {
+      res.json(protectedResourceMetadata(settings))
+    }
+    app.get('/.well-known/oauth-protected-resource', sendMetadata)
+    if (metadataPath !== '/.well-known/oauth-protected-resource') app.get(metadataPath, sendMetadata)
+
+    app.all('/mcp', async (req, res) => {
+      if (req.method !== 'POST') {
+        res.setHeader('Allow', 'POST')
+        res.status(405).json({ error: 'stateless server: send JSON-RPC requests with POST' })
+        return
+      }
+      const authorization = req.header('authorization')
+      const token = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : ''
+      if (!token) {
+        res.setHeader('WWW-Authenticate', bearerChallenge(settings))
+        res.status(401).json({ error: 'unauthorized' })
+        return
+      }
+      let identity
+      try {
+        identity = await verifier.verify(token)
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error('[venice-mcp] token verification failed', (err as Error).message)
+        res.status(503).json({ error: 'authorization service unavailable' })
+        return
+      }
+      if (!identity) {
+        res.setHeader(
+          'WWW-Authenticate',
+          bearerChallenge(settings, { code: 'invalid_token', description: 'The access token is invalid, expired or not for this server' }),
+        )
+        res.status(401).json({ error: 'invalid_token' })
+        return
+      }
+      const verified = identity
+      parseBody(req, res, () => {
+        if (rejectBatch(req, res, 'oauth')) return
+        if (res.destroyed) return
+        const config = { ...baseConfig, apiKey: verified.veniceApiKey, siwxToken: undefined }
+        const client = new VeniceClient(config)
+        void handleStateless(req, res, config, serverFactory, {
+          stateless: true,
+          client,
+          trackOperation: operations.get(res),
+          beforeUpload: uploadKeyValidator(client, config, res),
+          auth: {
+            scopes: settings.requiredScopes,
+            token: verified.token,
+            reauthChallenge: bearerChallenge(settings, {
+              code: 'invalid_token',
+              description: 'Your Venice connection expired or was revoked. Reconnect to continue.',
+            }),
+          },
+        })
+      })
+    })
+    return { app, closeSessions: () => {} }
+  }
+
+  if (authMode === 'user-key') {
     app.all('/mcp', (req, res, next) => {
       if (req.method !== 'POST') {
         res.setHeader('Allow', 'POST')
@@ -278,15 +361,7 @@ function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () =
       }
       next()
     }, parseBody, async (req, res) => {
-      // One admission must not fan out into multiple downloads, even with older MCP versions.
-      if (Array.isArray(req.body)) {
-        res.status(400).json({
-          jsonrpc: '2.0',
-          id: null,
-          error: { code: -32600, message: 'JSON-RPC batches are not supported in user-key mode' },
-        })
-        return
-      }
+      if (rejectBatch(req, res, 'user-key')) return
       if (res.destroyed) return
       const credentials = credentialsFromHeaders((name) => req.header(name))
       const config = { ...baseConfig, apiKey: credentials?.apiKey, siwxToken: credentials?.siwxToken }
@@ -295,28 +370,7 @@ function buildHttpApp(opts: HttpAppOptions): { app: Express; closeSessions: () =
         stateless: true,
         client,
         trackOperation: operations.get(res),
-        beforeUpload: async () => {
-          if (!config.apiKey) {
-            throw new Error(
-              'An API key is required for tools that download upload sources in HTTP user-key mode. ' +
-              'Send Authorization: Bearer <Venice API key>. Wallet proofs cannot be pre-validated without consuming their single-use nonce.',
-            )
-          }
-          const validation = await client.get<{ data?: { accessPermitted?: boolean } }>(
-            '/v1/api_keys/rate_limits', undefined, { auth: 'apiKey', maxBytes: 1024 * 1024 },
-          ).catch((err: unknown) => {
-            if (err instanceof VeniceResponseTooLargeError) {
-              throw new Error('API key validation response exceeds 1 MiB. No source was downloaded or inference submitted.')
-            }
-            throw err
-          })
-          if (validation?.data?.accessPermitted !== true) {
-            throw new Error(
-              'API key access is not permitted; check its balance and permissions. No source was downloaded or inference submitted.',
-            )
-          }
-          if (res.destroyed) throw new Error('MCP request disconnected before the upload started.')
-        },
+        beforeUpload: uploadKeyValidator(client, config, res),
       })
     })
     return { app, closeSessions: () => {} }
@@ -430,6 +484,43 @@ export function createHttpApp(opts: HttpAppOptions = {}): Express {
   return buildHttpApp(opts).app
 }
 
+/** One admission must not fan out into multiple downloads, even with older MCP versions. */
+function rejectBatch(req: Request, res: Response, mode: HttpAuthMode): boolean {
+  if (!Array.isArray(req.body)) return false
+  res.status(400).json({
+    jsonrpc: '2.0',
+    id: null,
+    error: { code: -32600, message: `JSON-RPC batches are not supported in ${mode} mode` },
+  })
+  return true
+}
+
+/** Checks the caller's key with Venice before a tool downloads a caller-supplied source. */
+function uploadKeyValidator(client: VeniceClient, config: Config, res: Response): () => Promise<void> {
+  return async () => {
+    if (!config.apiKey) {
+      throw new Error(
+        'An API key is required for tools that download upload sources in HTTP user-key mode. ' +
+        'Send Authorization: Bearer <Venice API key>. Wallet proofs cannot be pre-validated without consuming their single-use nonce.',
+      )
+    }
+    const validation = await client.get<{ data?: { accessPermitted?: boolean } }>(
+      '/v1/api_keys/rate_limits', undefined, { auth: 'apiKey', maxBytes: 1024 * 1024 },
+    ).catch((err: unknown) => {
+      if (err instanceof VeniceResponseTooLargeError) {
+        throw new Error('API key validation response exceeds 1 MiB. No source was downloaded or inference submitted.')
+      }
+      throw err
+    })
+    if (validation?.data?.accessPermitted !== true) {
+      throw new Error(
+        'API key access is not permitted; check its balance and permissions. No source was downloaded or inference submitted.',
+      )
+    }
+    if (res.destroyed) throw new Error('MCP request disconnected before the upload started.')
+  }
+}
+
 /** One server and transport per request, discarded when the response closes. */
 async function handleStateless(
   req: Request,
@@ -484,6 +575,7 @@ export async function runHttp(opts: {
     sessionTtlMs: parsePositiveInt(env.VENICE_MCP_SESSION_TTL_MS, DEFAULT_SESSION_TTL_MS),
     maxConcurrentRequests: parsePositiveInt(env.VENICE_MCP_MAX_CONCURRENT_REQUESTS, DEFAULT_MAX_CONCURRENT_REQUESTS),
     serverFactory: opts.serverFactory,
+    oauth: authMode === 'oauth' ? loadOAuthSettings(env) : undefined,
   })
 
   const listener = app.listen(port, host)
