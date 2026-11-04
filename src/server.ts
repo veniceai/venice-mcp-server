@@ -30,9 +30,9 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         logging: {},
       },
       instructions: [
-        'Venice MCP exposes uncensored, privacy-respecting AI inference (LLM, image, video, TTS, ASR, music) via Venice.ai.',
+        `Venice MCP exposes ${cfg.enableNsfw ? 'uncensored, ' : ''}privacy-respecting AI inference (LLM, image, video, TTS, ASR, music) via Venice AI.`,
         'Auth: set VENICE_API_KEY, or set VENICE_SIWX_TOKEN to a pre-signed EVM or Solana SIGN-IN-WITH-X payload.',
-        'See https://docs.venice.ai/mcp for full reference.',
+        'See https://docs.venice.ai/guides/integrations/venice-mcp for full reference.',
       ].join(' '),
     }
   )
@@ -73,7 +73,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
   }
 
   // Prompts
-  for (const p of buildPrompts()) {
+  for (const p of buildPrompts(cfg)) {
     srv.registerPrompt(
       p.name,
       { title: p.title, description: p.description, argsSchema: p.argsSchema },
