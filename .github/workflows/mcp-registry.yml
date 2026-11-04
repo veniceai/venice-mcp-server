@@ -1,0 +1,129 @@
+name: Publish to MCP Registry
+
+on:
+  workflow_run:
+    workflows: ["Publish to npm"]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: mcp-registry
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check the release metadata
+    if: github.event.workflow_run.event == 'release' && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      package: ${{ steps.meta.outputs.package }}
+      version: ${{ steps.meta.outputs.version }}
+      mcp_name: ${{ steps.meta.outputs.mcp_name }}
+      listed: ${{ steps.registry.outputs.listed }}
+    steps:
+      - name: Check out the released commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Check that server.json matches package.json
+        id: meta
+        run: |
+          node -e '
+            const pkg = require("./package.json")
+            const server = require("./server.json")
+            const entry = server.packages?.[0]
+            if (server.name !== pkg.mcpName || entry?.identifier !== pkg.name || server.version !== pkg.version || entry?.version !== pkg.version) {
+              console.error("server.json does not match package.json")
+              process.exit(1)
+            }
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, `package=${pkg.name}\nversion=${pkg.version}\nmcp_name=${pkg.mcpName}\n`)
+          '
+
+      # Re-running "Publish to npm" for a published version still reports success.
+      - name: Check whether the registry already lists this version
+        id: registry
+        env:
+          MCP_NAME: ${{ steps.meta.outputs.mcp_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          name="$(node -p 'encodeURIComponent(process.env.MCP_NAME)')"
+          status="$(curl --silent --output /dev/null --write-out '%{http_code}' "https://registry.modelcontextprotocol.io/v0.1/servers/${name}/versions/${VERSION}")"
+          case "$status" in
+            200) echo "listed=true" >> "$GITHUB_OUTPUT"; echo "The registry already lists $MCP_NAME $VERSION." ;;
+            404) echo "listed=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "The registry answered HTTP $status for $MCP_NAME $VERSION" >&2; exit 1 ;;
+          esac
+
+  publish:
+    name: Publish server.json
+    needs: check
+    if: needs.check.outputs.listed == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      MCP_PUBLISHER_VERSION: v1.8.7
+    steps:
+      - name: Check out the released commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      # npm can take a few minutes to serve a new version, and the registry verifies mcpName on npm.
+      - name: Wait until npm serves the release
+        env:
+          PACKAGE: ${{ needs.check.outputs.package }}
+          VERSION: ${{ needs.check.outputs.version }}
+          MCP_NAME: ${{ needs.check.outputs.mcp_name }}
+        run: |
+          for attempt in $(seq 1 40); do
+            if [ "$(npm view "$PACKAGE@$VERSION" mcpName 2>/dev/null)" = "$MCP_NAME" ]; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "npm does not serve $PACKAGE@$VERSION with mcpName $MCP_NAME after 10 minutes" >&2
+          exit 1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Download and verify mcp-publisher
+        run: |
+          set -euo pipefail
+          archive="mcp-publisher_linux_amd64.tar.gz"
+          base_url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}"
+          curl --fail --location --silent --show-error --output "$archive" "$base_url/$archive"
+          curl --fail --location --silent --show-error --output "$archive.sigstore.json" "$base_url/$archive.sigstore.json"
+          cosign verify-blob \
+            --bundle "$archive.sigstore.json" \
+            --certificate-identity "https://github.com/modelcontextprotocol/registry/.github/workflows/release.yml@refs/tags/${MCP_PUBLISHER_VERSION}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$archive"
+          tar xzf "$archive" mcp-publisher
+          rm -f "$archive" "$archive.sigstore.json"
+
+      - name: Authenticate to the MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server.json
+        run: ./mcp-publisher publish
