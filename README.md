@@ -24,7 +24,7 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.3.0"],
+      "args": ["-y", "@veniceai/mcp-server@0.3.1"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
@@ -199,12 +199,14 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 `/mcp` is a credential-backed tool execution endpoint: callers can spend the configured Venice API key or x402 balance. When HTTP mode binds outside loopback, startup fails unless `VENICE_MCP_AUTH_TOKEN` is set, or `VENICE_MCP_ALLOW_UNAUTHENTICATED_HTTP=1` is explicitly set behind a trusted authenticated proxy.
 
 ```bash
-docker run -p 3333:3333 \
-  -e VENICE_API_KEY=<your-venice-api-key> \
-  -e VENICE_MCP_AUTH_TOKEN=<choose-a-long-random-token> \
-  ghcr.io/veniceai/venice-mcp-server:latest
+VENICE_API_KEY='<your-venice-api-key>' \
+VENICE_MCP_AUTH_TOKEN='<choose-a-long-random-token>' \
+VENICE_MCP_HOST=0.0.0.0 \
+npx -y @veniceai/mcp-server@0.3.1 --http
 # server at http://localhost:3333/mcp
 ```
+
+`VENICE_MCP_HOST=0.0.0.0` makes the server reachable beyond loopback; leave it out to stay on loopback. No container image is published yet, so to run it in a container, build one from this repo's `Dockerfile`.
 
 Clients should send `Authorization: Bearer <choose-a-long-random-token>` with HTTP MCP requests. HTTP clients should create new sessions without an `mcp-session-id` header and then reuse the server-issued session ID; unknown or malformed caller-provided session IDs are rejected. For reproducible production installs, pin the npm package version as shown in the examples instead of using an unversioned `latest` install path.
 
@@ -222,38 +224,40 @@ Or run from source — see [Development](#development) below.
 
 Venice supports **EVM SIWE or Solana SIWX wallet authentication** backed by prepaid USDC credit on **Base or Solana mainnet**, in addition to the normal API key flow. This lets you use Venice with no email, phone, or KYC — your wallet is the only identity.
 
-### Two-line config
+### One-off wallet config
 
 ```json
 {
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.3.0"],
+      "args": ["-y", "@veniceai/mcp-server@0.3.1"],
       "env": { "VENICE_SIWX_TOKEN": "<base64 signed SIWX payload>" }
     }
   }
 }
 ```
 
-The MCP server forwards the existing `VENICE_SIWX_TOKEN` env format using Venice's preferred `SIGN-IN-WITH-X` header.
+The MCP server forwards the fixed `VENICE_SIWX_TOKEN` using Venice's preferred `SIGN-IN-WITH-X` header; it does not refresh the token.
+
+> **Known limitation:** Venice accepts each signed SIWX message only once, and only within 5 minutes of signing. The server sends the same `VENICE_SIWX_TOKEN` on every call, so only the first wallet-authenticated request succeeds; later calls return `401` until you sign a new token and restart the server ([#96](https://github.com/veniceai/venice-mcp-server/issues/96)). Use `VENICE_API_KEY` for anything beyond a one-off call.
 
 ### How it works
 
 ```
-ONE-TIME SETUP (per wallet)
-  Sign an EVM SIWE or Solana SIWX message → produces a SIWX token (base64 JSON)
-  Set VENICE_SIWX_TOKEN in this MCP server's env
-
-TOP UP (when balance is low)
+TOP UP (when balance is low, outside this server)
   POST /api/v1/x402/top-up  (no payment header)  →  402 + payment requirements
   Choose a Base or Solana USDC option and sign it in your wallet
   POST /api/v1/x402/top-up with PAYMENT-SIGNATURE: <signed>  →  Venice settles
   the payment and credits your prepaid balance
 
-EVERY INFERENCE CALL
+EACH WALLET-AUTHENTICATED REQUEST (manual renewal)
+  Sign a fresh EVM SIWE or Solana SIWX message → SIWX token (base64 JSON)
+  Set VENICE_SIWX_TOKEN and start or restart this MCP server
+  Make one request within 5 minutes of signing
   MCP server sends SIGN-IN-WITH-X: <SIWX token>
-  Venice → wallet → credit account → debits and runs inference
+  Venice authenticates the wallet; inference debits its prepaid balance
+  Before another authenticated request, repeat with a new token
 ```
 
 This MCP server **never sees your private key**. EVM/Solana SIWX signing and USDC payment signing happen in your wallet — the server forwards only the signed SIWX token. The top-up helper discovers requirements but does not accept or submit payment signatures.
@@ -475,7 +479,7 @@ The most common cause is that `VENICE_API_KEY` isn't being forwarded to the MCP 
   "mcpServers": {
     "venice": {
       "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.3.0"],
+      "args": ["-y", "@veniceai/mcp-server@0.3.1"],
       "env": { "VENICE_API_KEY": "<your-venice-api-key>" }
     }
   }
