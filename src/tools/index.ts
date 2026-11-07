@@ -1500,7 +1500,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       handler: async (args) => {
         try {
           if (args.action === 'list') {
-            const resp = await client.get<ModelCatalogResponse>('/v1/models?type=tts')
+            const resp = await client.get<ModelCatalogResponse>('/v1/models?type=tts', undefined, { auth: 'public' })
             const voices = shapeTtsVoiceCatalog(resp)
             return ok(JSON.stringify(voices, null, 2), voices)
           }
@@ -2019,7 +2019,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         try {
           const requestedType = type ?? 'all'
           const query = new URLSearchParams({ type: requestedType }).toString()
-          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`)
+          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`, undefined, { auth: 'public' })
           const models = resp.data ?? resp.models ?? []
           const ids = models
             .map((m) => (typeof m === 'object' && m !== null ? (m as { id?: unknown }).id : undefined))
@@ -2069,7 +2069,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const path = type
             ? `/v1/models/traits?type=${encodeURIComponent(type)}`
             : '/v1/models/traits'
-          const resp = await client.get<Record<string, unknown>>(path)
+          const resp = await client.get<Record<string, unknown>>(path, undefined, { auth: 'public' })
           return ok(JSON.stringify(resp, null, 2), resp)
         } catch (err) {
           return fail(formatToolError(err))
@@ -2091,7 +2091,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const path = type
             ? `/v1/models/compatibility_mapping?type=${encodeURIComponent(type)}`
             : '/v1/models/compatibility_mapping'
-          const resp = await client.get<Record<string, unknown>>(path)
+          const resp = await client.get<Record<string, unknown>>(path, undefined, { auth: 'public' })
           return ok(JSON.stringify(resp, null, 2), resp)
         } catch (err) {
           return fail(formatToolError(err))
@@ -2111,7 +2111,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       handler: async ({ model_id, type }) => {
         try {
           const query = new URLSearchParams({ type }).toString()
-          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`)
+          const resp = await client.get<ModelCatalogResponse>(`/v1/models?${query}`, undefined, { auth: 'public' })
           const models: unknown[] = resp.data ?? resp.models ?? []
           const model = models
             .filter((candidate): candidate is Record<string, unknown> =>
@@ -2138,7 +2138,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       inputSchema: {},
       handler: async () => {
         try {
-          const resp = await client.get<unknown>('/v1/image/styles')
+          const resp = await client.get<unknown>('/v1/image/styles', undefined, { auth: 'public' })
           return ok(JSON.stringify(resp, null, 2))
         } catch (err) {
           return fail(formatToolError(err))
@@ -2157,7 +2157,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
-          const resp = await client.post<unknown>('/v1/audio/quote', args)
+          const resp = await client.post<unknown>('/v1/audio/quote', args, undefined, { auth: 'public' })
           return ok(JSON.stringify(resp, null, 2))
         } catch (err) {
           return fail(formatToolError(err))
@@ -2175,7 +2175,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
-          const resp = await client.post<unknown>('/v1/video/quote', args)
+          const resp = await client.post<unknown>('/v1/video/quote', args, undefined, { auth: 'public' })
           return ok(JSON.stringify(resp, null, 2))
         } catch (err) {
           return fail(formatToolError(err))

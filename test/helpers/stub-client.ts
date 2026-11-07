@@ -5,7 +5,7 @@ export interface StubCall {
   path: string
   body?: unknown
   headers?: Record<string, string>
-  auth?: 'default' | 'apiKey' | 'siwx' | 'none'
+  auth?: 'default' | 'apiKey' | 'siwx' | 'none' | 'public'
   /** Response size limit the caller passed to the client. */
   maxResponseBytes?: number
   /** Whether this call went through postMultipart (FormData body) instead of JSON. */

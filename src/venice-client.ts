@@ -10,8 +10,12 @@ export interface RequestInitJSON {
   headers?: Record<string, string>
   /** Override request timeout for this call. */
   timeoutMs?: number
-  /** Override default API-key-first auth behavior for endpoint-specific requirements. */
-  auth?: 'default' | 'apiKey' | 'siwx' | 'none'
+  /**
+   * Override default API-key-first auth behavior for endpoint-specific requirements.
+   * `public` is for discovery routes that need no auth: the API key is still sent
+   * when configured, but SIWX is not, so no signer run or single-use token is spent.
+   */
+  auth?: 'default' | 'apiKey' | 'siwx' | 'none' | 'public'
   /** Require and return an upstream SSE response as one unmodified UTF-8 string. */
   responseType?: 'auto' | 'event-stream'
   /** Deprecated alias for `maxBytes`. */
@@ -181,7 +185,7 @@ export class VeniceClient {
       delete headers.Authorization
       delete headers.authorization
       await addSiwx()
-    } else if (auth === 'default' && this.cfg.apiKey && !headers.Authorization) {
+    } else if ((auth === 'default' || auth === 'public') && this.cfg.apiKey && !headers.Authorization) {
       headers.Authorization = `Bearer ${this.cfg.apiKey}`
     } else if (auth === 'default' && this.hasSiwx() && !headers['SIGN-IN-WITH-X']) {
       await addSiwx()

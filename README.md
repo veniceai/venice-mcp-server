@@ -247,17 +247,19 @@ Venice accepts each signed Sign-In-With-X message once, within 5 minutes of its 
 }
 ```
 
-[`examples/siwx-signer.mjs`](examples/siwx-signer.mjs) is a ready-made EVM signer built on `viem`. It reads a private key from `VENICE_SIWX_KEY_FILE`, fetches a fresh challenge from Venice, signs it, and prints the header. The MCP server never opens the key file. Use a dedicated wallet that only holds Venice credit.
+[`examples/siwx-signer.mjs`](examples/siwx-signer.mjs) is a ready-made EVM signer built on `viem`. It reads a private key from `VENICE_SIWX_KEY_FILE`, builds and signs a fresh SIWE message locally (no network call), and prints the header. The MCP server never opens the key file. Use a dedicated wallet that only holds Venice credit.
 
 ### Per-request signing
 
 Before each wallet-authenticated request, the server runs `VENICE_SIWX_SIGNER_COMMAND` through the shell and sends its stdout as the `SIGN-IN-WITH-X` header. Any program can be the signer (a hardware-wallet bridge, a keychain lookup, a Solana signer) as long as it follows this contract:
 
-- **Input:** the environment carries `VENICE_SIWX_BASE_URL` (the Venice API root the server is calling, e.g. `https://api.venice.ai/api`), `VENICE_SIWX_REQUEST_METHOD` and `VENICE_SIWX_REQUEST_PATH`. A `GET {VENICE_SIWX_BASE_URL}/v1/x402/balance/{wallet}` without auth returns a 402 with a fresh challenge under `extensions["sign-in-with-x"].info`. The signer does not inherit `VENICE_API_KEY`, `VENICE_SIWX_TOKEN` or `VENICE_MCP_AUTH_TOKEN`.
+- **What to sign:** an EIP-4361 (SIWE) message for domain `api.venice.ai` with `Chain ID: 8453` (Base), a fresh nonce you pick (16 hex chars is fine; each nonce works once), and an `Issued At` within the last 5 minutes. Solana signers follow the same rules with the Solana SIWX format. The example signer builds this locally. Alternatively, an unauthenticated `GET {VENICE_SIWX_BASE_URL}/v1/x402/balance/{wallet}` returns a 402 with a challenge under `extensions["sign-in-with-x"].info`, but that route is limited to 30 requests a minute per wallet, so fetching it on every request caps the wallet at about 30 calls a minute.
+- **Input:** the environment carries `VENICE_SIWX_BASE_URL` (the Venice API root the server is calling, e.g. `https://api.venice.ai/api`), `VENICE_SIWX_REQUEST_METHOD` and `VENICE_SIWX_REQUEST_PATH`. The signer does not inherit `VENICE_API_KEY`, `VENICE_SIWX_TOKEN` or any `VENICE_MCP_*` variable.
 - **Output:** the base64 `SIGN-IN-WITH-X` value on stdout, exit code 0. Surrounding whitespace is ignored; the value must be a single line of printable ASCII.
-- **Failure:** a non-zero exit, empty or malformed output, more than 64 KiB of output, or a run longer than `VENICE_SIWX_SIGNER_TIMEOUT_MS` fails the tool call locally with the reason (including the signer's last stderr line), and nothing is sent to Venice.
+- **Failure:** a non-zero exit, empty or malformed output, more than 64 KiB of output, or a run longer than `VENICE_SIWX_SIGNER_TIMEOUT_MS` fails the tool call locally, and nothing is sent to Venice. The tool error carries only the reason (for example the exit code); the signer's last stderr line goes to the server's own stderr log, never to the MCP client. On timeout the server kills the signer's whole process group, so commands like `cd ~/signer && node sign.mjs` don't leave processes behind.
+- **Concurrency:** at most 4 signer runs happen at once; further requests wait for a free slot.
 
-The signer runs once per request, so it adds its own startup time and a challenge round trip to every wallet-authenticated call.
+The signer runs once per request, so it adds its own startup time to every wallet-authenticated call. Discovery calls that need no auth (the model catalog, image styles, price quotes and the `venice://` resources) never run it.
 
 ### Single pre-signed token
 

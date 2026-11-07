@@ -41,18 +41,53 @@ export class SiwxSignerError extends Error {
 }
 
 export const MAX_SIGNER_OUTPUT_BYTES = 64 * 1024
+/** Signer runs allowed at once; a burst of requests queues behind them. */
+export const MAX_CONCURRENT_SIGNERS = 4
 const MAX_STDERR_CHARS = 300
 const HEADER_VALUE = /^[\x21-\x7e](?:[\x20-\x7e]*[\x21-\x7e])?$/
-// Credentials the signer has no use for: the Venice key, the static token, and the HTTP-mode bearer token.
-const WITHHELD_ENV = ['VENICE_API_KEY', 'VENICE_SIWX_TOKEN', 'VENICE_SIWX_SIGNER_COMMAND', 'VENICE_MCP_AUTH_TOKEN']
+// Credentials the signer has no use for: the Venice key, the static token, and every
+// server setting (VENICE_MCP_AUTH_TOKEN and any secret added under VENICE_MCP_* later).
+const WITHHELD_ENV = ['VENICE_API_KEY', 'VENICE_SIWX_TOKEN', 'VENICE_SIWX_SIGNER_COMMAND']
+const WITHHELD_ENV_PREFIX = 'VENICE_MCP_'
 
-export function runSiwxSigner(
+let activeSigners = 0
+const waitingSigners: Array<() => void> = []
+
+async function acquireSignerSlot(): Promise<() => void> {
+  if (activeSigners >= MAX_CONCURRENT_SIGNERS) {
+    await new Promise<void>((resolve) => waitingSigners.push(resolve))
+  } else {
+    activeSigners++
+  }
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    const next = waitingSigners.shift()
+    // Hand the slot straight to the next waiter so the count never drops below the queue.
+    if (next) next()
+    else activeSigners--
+  }
+}
+
+export async function runSiwxSigner(
   command: string,
   request: SiwxSignerRequest,
   opts: SiwxSignerOptions,
 ): Promise<string> {
+  const release = await acquireSignerSlot()
+  try {
+    return await runSignerProcess(command, request, opts)
+  } finally {
+    release()
+  }
+}
+
+function runSignerProcess(command: string, request: SiwxSignerRequest, opts: SiwxSignerOptions): Promise<string> {
   const env: NodeJS.ProcessEnv = { ...(opts.env ?? process.env) }
-  for (const name of WITHHELD_ENV) delete env[name]
+  for (const name of Object.keys(env)) {
+    if (WITHHELD_ENV.includes(name) || name.startsWith(WITHHELD_ENV_PREFIX)) delete env[name]
+  }
   env.VENICE_SIWX_BASE_URL = request.baseUrl
   env.VENICE_SIWX_REQUEST_METHOD = request.method
   env.VENICE_SIWX_REQUEST_PATH = request.path
@@ -63,19 +98,40 @@ export function runSiwxSigner(
     const stdout: Buffer[] = []
     let stderr = ''
 
+    // On POSIX the shell leads its own process group, so a timeout can kill
+    // everything it started (`cd dir && node sign.mjs` forks), not just the shell.
+    const ownGroup = process.platform !== 'win32'
     const child = spawn(command, {
       shell: true,
+      detached: ownGroup,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
     })
+    if (ownGroup && child.pid !== undefined) {
+      installExitHook()
+      liveGroups.add(child.pid)
+    }
+
+    const killTree = () => {
+      if (ownGroup && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, 'SIGKILL')
+          return
+        } catch {
+          // Group already gone; fall through to the direct kill.
+        }
+      }
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }
 
     const finish = (err: Error | undefined, value?: string) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (ownGroup && child.pid !== undefined) liveGroups.delete(child.pid)
       if (err) {
-        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+        killTree()
         reject(err)
       } else {
         resolve(value as string)
@@ -104,8 +160,11 @@ export function runSiwxSigner(
       if (settled) return
       if (code !== 0) {
         const how = signal ? `was killed by ${signal}` : `exited with code ${code}`
+        // stderr can hold anything the signer printed; keep it in the server log
+        // instead of the tool result, which reaches remote callers in HTTP mode.
         const detail = stderrTail(stderr)
-        finish(new SiwxSignerError(`${how}${detail ? `: ${detail}` : ''}.`))
+        if (detail) console.error(`[venice-mcp] SIWX signer command ${how}: ${detail}`)
+        finish(new SiwxSignerError(`${how}${detail ? '; its stderr is in the server log' : ''}.`))
         return
       }
       const value = Buffer.concat(stdout).toString('utf8').trim()
@@ -126,8 +185,27 @@ export function runSiwxSigner(
   })
 }
 
+// Signer process groups still running, killed if this server exits mid-run
+// (a detached group would otherwise outlive it).
+const liveGroups = new Set<number>()
+let exitHookInstalled = false
+function installExitHook(): void {
+  if (exitHookInstalled) return
+  exitHookInstalled = true
+  process.once('exit', () => {
+    for (const pid of liveGroups) {
+      try {
+        process.kill(-pid, 'SIGKILL')
+      } catch {
+        // already gone
+      }
+    }
+  })
+}
+
 function stderrTail(stderr: string): string {
   const lines = stderr.trim().split(/\r?\n/).filter((line) => line.trim())
-  const last = lines.at(-1)?.trim() ?? ''
+  // Strip control characters so the log line cannot be split or restyled.
+  const last = (lines.at(-1) ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').trim()
   return last.length > MAX_STDERR_CHARS ? `${last.slice(0, MAX_STDERR_CHARS)}…` : last
 }
