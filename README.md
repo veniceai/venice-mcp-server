@@ -69,7 +69,7 @@ Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint`
 | `venice_video_generate` | Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance (incl. r2v video-to-video), Runway Gen-4, and others. Accepts image, video, audio, reference inputs, and the Seedance consent attestation flow where applicable. |
 | `venice_video_status` | Check status of a queued video job. Returns JSON progress while `PROCESSING`, then either an embedded MP4 or a `download_url` resource link. Pass the queue-time `download_url` for VPS / Grok Imagine Private models. |
 | `venice_video_complete` | Mark a completed video as downloaded. Reports server-side deletion only when Venice confirms success. |
-| `venice_video_quote` | Get a price quote for a video generation BEFORE queuing. |
+| `venice_video_quote` | Get a price quote for a video generation BEFORE queuing. Accepts resolution, aspect ratio, audio, upscale factor, a source `video_url` for video-to-video and upscale models, reference-video duration, and enhancement settings. |
 
 ### 🔊 Audio (TTS / ASR)
 
