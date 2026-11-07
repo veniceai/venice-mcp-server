@@ -31,7 +31,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       },
       instructions: [
         `Venice MCP exposes ${cfg.enableNsfw ? 'uncensored, ' : ''}privacy-respecting AI inference (LLM, image, video, TTS, ASR, music) via Venice AI.`,
-        'Auth: set VENICE_API_KEY, or set VENICE_SIWX_TOKEN to a pre-signed EVM or Solana SIGN-IN-WITH-X payload.',
+        'Auth: set VENICE_API_KEY, or set VENICE_SIWX_SIGNER_COMMAND to a command that prints a freshly signed EVM or Solana SIGN-IN-WITH-X payload for each request (VENICE_SIWX_TOKEN takes one pre-signed payload, which Venice accepts once).',
         'See https://docs.venice.ai/guides/integrations/venice-mcp for full reference.',
       ].join(' '),
     }

@@ -24,7 +24,7 @@ export function buildResources(client: VeniceClient): ResourceDef[] {
       read: async () => {
         try {
           // Without a type, Venice returns only text models.
-          const data = await client.get<unknown>('/v1/models?type=all')
+          const data = await client.get<unknown>('/v1/models?type=all', undefined, { auth: 'public' })
           return {
             uri: 'venice://models',
             mimeType: 'application/json',
@@ -47,7 +47,7 @@ export function buildResources(client: VeniceClient): ResourceDef[] {
       mimeType: 'application/json',
       read: async () => {
         try {
-          const data = await client.get<unknown>('/v1/image/styles')
+          const data = await client.get<unknown>('/v1/image/styles', undefined, { auth: 'public' })
           return {
             uri: 'venice://styles',
             mimeType: 'application/json',
@@ -69,7 +69,7 @@ export function buildResources(client: VeniceClient): ResourceDef[] {
       mimeType: 'application/json',
       read: async () => {
         try {
-          const catalog = await client.get<ModelCatalogResponse>('/v1/models?type=tts')
+          const catalog = await client.get<ModelCatalogResponse>('/v1/models?type=tts', undefined, { auth: 'public' })
           const data = shapeTtsVoiceCatalog(catalog)
           return {
             uri: 'venice://voices',

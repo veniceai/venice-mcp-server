@@ -184,7 +184,9 @@ List, get, and rate-limit logs require an ADMIN `VENICE_API_KEY`. `venice_api_ke
 | `VENICE_MAX_VIDEO_RESPONSE_BYTES` | `26214400` (25 MiB) | Maximum completed MP4 bytes buffered and base64-embedded by `venice_video_status`. |
 | `VENICE_MAX_IMAGE_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum response bytes buffered by `venice_image_generate`, `venice_image_edit`, `venice_image_multi_edit`, `venice_image_upscale`, and `venice_image_remove_bg`. Larger results are discarded with an error. |
 | `VENICE_MAX_AUDIO_RESPONSE_BYTES` | `33554432` (32 MiB) | Maximum audio bytes buffered and base64-embedded by `venice_tts` and `venice_music_status`. An oversized TTS result is discarded with an error; an oversized music result stays queued for a retry. |
-| `VENICE_SIWX_TOKEN` | _(none)_ | **x402** wallet-mode auth token — see [**x402** — pay with a wallet](#x402--pay-with-a-wallet-no-account-required). |
+| `VENICE_SIWX_SIGNER_COMMAND` | _(none)_ | **x402** wallet mode: a command the server runs before each wallet-authenticated request; its stdout is sent as a freshly signed `SIGN-IN-WITH-X`. Takes precedence over `VENICE_SIWX_TOKEN`. See [Per-request signing](#per-request-signing). |
+| `VENICE_SIWX_SIGNER_TIMEOUT_MS` | `15000` | Time limit for one run of the signer command. |
+| `VENICE_SIWX_TOKEN` | _(none)_ | One pre-signed **x402** wallet-mode auth token. Venice accepts it for a single request made within 5 minutes of signing, so use `VENICE_SIWX_SIGNER_COMMAND` for anything longer. |
 | `PORT` | `3333` | HTTP-mode listener. |
 | `VENICE_MCP_HOST` | `127.0.0.1` | HTTP-mode bind address. Set to `0.0.0.0` for LAN/container exposure. |
 | `VENICE_MCP_AUTH_TOKEN` | _(none)_ | Bearer token required by `/mcp` whenever HTTP mode binds outside loopback. Use a long random value. |
@@ -226,7 +228,9 @@ Or run from source — see [Development](#development) below.
 
 Venice supports **EVM SIWE or Solana SIWX wallet authentication** backed by prepaid USDC credit on **Base or Solana mainnet**, in addition to the normal API key flow. This lets you use Venice with no email, phone, or KYC — your wallet is the only identity.
 
-### One-off wallet config
+### Config
+
+Venice accepts each signed Sign-In-With-X message once, within 5 minutes of its `Issued At` time, so the server needs a new signature for every request. Point `VENICE_SIWX_SIGNER_COMMAND` at a signer that holds your wallet key:
 
 ```json
 {
@@ -234,35 +238,52 @@ Venice supports **EVM SIWE or Solana SIWX wallet authentication** backed by prep
     "venice": {
       "command": "npx",
       "args": ["-y", "@veniceai/mcp-server@0.3.1"],
-      "env": { "VENICE_SIWX_TOKEN": "<base64 signed SIWX payload>" }
+      "env": {
+        "VENICE_SIWX_SIGNER_COMMAND": "node /path/to/siwx-signer.mjs",
+        "VENICE_SIWX_KEY_FILE": "/path/to/wallet-key"
+      }
     }
   }
 }
 ```
 
-The MCP server forwards the fixed `VENICE_SIWX_TOKEN` using Venice's preferred `SIGN-IN-WITH-X` header; it does not refresh the token.
+[`examples/siwx-signer.mjs`](examples/siwx-signer.mjs) is a ready-made EVM signer built on `viem`. It reads a private key from `VENICE_SIWX_KEY_FILE`, builds and signs a fresh SIWE message locally (no network call), and prints the header. The MCP server never opens the key file. Use a dedicated wallet that only holds Venice credit.
 
-> **Known limitation:** Venice accepts each signed SIWX message only once, and only within 5 minutes of signing. The server sends the same `VENICE_SIWX_TOKEN` on every call, so only the first wallet-authenticated request succeeds; later calls return `401` until you sign a new token and restart the server ([#96](https://github.com/veniceai/venice-mcp-server/issues/96)). Use `VENICE_API_KEY` for anything beyond a one-off call.
+### Per-request signing
+
+Before each wallet-authenticated request, the server runs `VENICE_SIWX_SIGNER_COMMAND` through the shell and sends its stdout as the `SIGN-IN-WITH-X` header. Any program can be the signer (a hardware-wallet bridge, a keychain lookup, a Solana signer) as long as it follows this contract:
+
+- **What to sign:** an EIP-4361 (SIWE) message for domain `api.venice.ai` with `Chain ID: 8453` (Base), a fresh nonce you pick (16 hex chars is fine; each nonce works once), and an `Issued At` within the last 5 minutes. Solana signers follow the same rules with the Solana SIWX format. The example signer builds this locally. Alternatively, an unauthenticated `GET {VENICE_SIWX_BASE_URL}/v1/x402/balance/{wallet}` returns a 402 with a challenge under `extensions["sign-in-with-x"].info`, but that route is limited to 30 requests a minute per wallet, so fetching it on every request caps the wallet at about 30 calls a minute.
+- **Input:** the environment carries `VENICE_SIWX_BASE_URL` (the Venice API root the server is calling, e.g. `https://api.venice.ai/api`), `VENICE_SIWX_REQUEST_METHOD` and `VENICE_SIWX_REQUEST_PATH`. The signer does not inherit `VENICE_API_KEY`, `VENICE_SIWX_TOKEN` or any `VENICE_MCP_*` variable.
+- **Output:** the base64 `SIGN-IN-WITH-X` value on stdout, exit code 0. Surrounding whitespace is ignored; the value must be a single line of printable ASCII.
+- **Failure:** a non-zero exit, empty or malformed output, more than 64 KiB of output, or a run longer than `VENICE_SIWX_SIGNER_TIMEOUT_MS` fails the tool call locally, and nothing is sent to Venice. The tool error carries only the reason (for example the exit code); the signer's last stderr line goes to the server's own stderr log, never to the MCP client. On timeout the server kills the signer's whole process group, so commands like `cd ~/signer && node sign.mjs` don't leave processes behind.
+- **Concurrency:** at most 4 signer runs happen at once; further requests wait for a free slot.
+
+The signer runs once per request, so it adds its own startup time to every wallet-authenticated call. Discovery calls that need no auth (the model catalog, image styles, price quotes and the `venice://` resources) never run it.
+
+### Single pre-signed token
+
+`VENICE_SIWX_TOKEN` still works for a one-off call: the server forwards it as `SIGN-IN-WITH-X`. Venice rejects it with a 401 once it has been used or 5 minutes after signing, and the tool error says so.
 
 ### How it works
 
 ```
+SETUP (per wallet)
+  Set VENICE_SIWX_SIGNER_COMMAND to a signer that holds the wallet key
+
 TOP UP (when balance is low, outside this server)
   POST /api/v1/x402/top-up  (no payment header)  →  402 + payment requirements
   Choose a Base or Solana USDC option and sign it in your wallet
   POST /api/v1/x402/top-up with PAYMENT-SIGNATURE: <signed>  →  Venice settles
   the payment and credits your prepaid balance
 
-EACH WALLET-AUTHENTICATED REQUEST (manual renewal)
-  Sign a fresh EVM SIWE or Solana SIWX message → SIWX token (base64 JSON)
-  Set VENICE_SIWX_TOKEN and start or restart this MCP server
-  Make one request within 5 minutes of signing
-  MCP server sends SIGN-IN-WITH-X: <SIWX token>
+EACH WALLET-AUTHENTICATED REQUEST
+  MCP server runs the signer, which signs a fresh EVM SIWE or Solana SIWX message
+  MCP server sends SIGN-IN-WITH-X: <signed message (base64 JSON)>
   Venice authenticates the wallet; inference debits its prepaid balance
-  Before another authenticated request, repeat with a new token
 ```
 
-This MCP server **never sees your private key**. EVM/Solana SIWX signing and USDC payment signing happen in your wallet — the server forwards only the signed SIWX token. The top-up helper discovers requirements but does not accept or submit payment signatures.
+This MCP server **never sees your private key**. EVM/Solana SIWX signing happens in your signer command and USDC payment signing happens in your wallet; the server only receives and forwards signed SIWX headers. The top-up helper discovers requirements but does not accept or submit payment signatures.
 
 The helper tools `venice_x402_balance`, `venice_x402_top_up_info`, and `venice_x402_transactions` make balance + top-up flow inspectable from inside the agent.
 
@@ -293,7 +314,7 @@ Some Venice endpoints don't accept both auth modes:
 
 ### Hybrid
 
-Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only used when the key is absent.
+Set both `VENICE_API_KEY` AND `VENICE_SIWX_SIGNER_COMMAND` (or `VENICE_SIWX_TOKEN`) and the API key wins: SIWX is only used when the key is absent, and on the wallet-only `venice_x402_balance` and `venice_x402_transactions` tools. The signer only runs for requests that send SIWX.
 
 ---
 
@@ -440,7 +461,7 @@ Security regression tests exercise HTTP Host/Origin validation, pre-parser authe
 
 `test/e2e/` currently exercises the EVM rail against the **real** Venice API and **real** Base mainnet—not a mock. Venice and the MCP x402 helpers support both Base and Solana, but this harness generates a throwaway EVM wallet and signs SIWE + EIP-3009 payloads with `viem`. The wallet is persisted at `.e2e-wallet.json` (chmod 600, gitignored—**never commit**).
 
-Each harness mode passes its intended credentials explicitly: wallet-mode children clear any inherited API key, and API-key children clear any inherited SIWX token. This keeps the two authentication runs independent even when the parent environment contains both credentials.
+Each harness mode passes its intended credentials explicitly: wallet-mode children clear any inherited API key, and API-key children clear any inherited SIWX token or signer command. This keeps the two authentication runs independent even when the parent environment contains both credentials. The x402 all-tools run signs every request through [`test/e2e/siwx-signer.ts`](test/e2e/siwx-signer.ts), since Venice accepts each signed message only once.
 
 | Phase | npm script | Cost | What it tests |
 |---|---|---|---|
@@ -462,7 +483,7 @@ env VENICE_API_KEY=<your-venice-api-key> npm run test:e2e:all-tools
 No. The simple path is `VENICE_API_KEY` + a normal Venice account. x402 is an *option* for users who want a wallet-only flow.
 
 **Where does the wallet's private key live?**
-Not in this server. You sign the EVM SIWE or Solana SIWX message and any USDC top-up payment in your own wallet. The server only sees signed payloads and never accepts a private key.
+Not in this server. Your `VENICE_SIWX_SIGNER_COMMAND` signs each EVM SIWE or Solana SIWX message, and you sign any USDC top-up payment in your own wallet. The server only sees signed payloads and never accepts a private key.
 
 
 **Minimum top-up?**

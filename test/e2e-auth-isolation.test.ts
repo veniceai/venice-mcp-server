@@ -5,6 +5,7 @@ import { startMockVenice, type MockRoute } from './helpers/mock-venice-server.js
 
 // Synthetic, unsigned fixtures only. Never import the live runners or wallet helper.
 const walletAddress = `0x${'1'.repeat(40)}`
+const SIGNER_FIXTURE_COMMAND = `${JSON.stringify(process.execPath)} -e "process.stdout.write('siwx_signer_fixture')"`
 const inheritedEnv = {
   VENICE_API_KEY: 'vk_inherited_fixture',
   VENICE_SIWX_TOKEN: 'siwx_inherited_fixture',
@@ -129,8 +130,10 @@ describe('E2E auth isolation over spawned MCP stdio', { concurrency: false }, ()
   for (const auth of [
     { mode: 'apikey', apiKey: 'vk_explicit_fixture' },
     { mode: 'x402', siwxToken: 'siwx_explicit_fixture' },
+    { mode: 'x402', siwxSignerCommand: SIGNER_FIXTURE_COMMAND },
   ] satisfies McpAuth[]) {
-    it(`${auth.mode} selection also overrides credentials supplied in the child environment`, async t => {
+    const label = auth.mode === 'x402' && auth.siwxSignerCommand ? 'x402 signer' : auth.mode
+    it(`${label} selection also overrides credentials supplied in the child environment`, async t => {
       const { mcp, upstream } = await startMcp(t, auth, [
         {
           match: 'POST /v1/chat/completions',
@@ -143,6 +146,7 @@ describe('E2E auth isolation over spawned MCP stdio', { concurrency: false }, ()
       ], {
         VENICE_API_KEY: 'vk_environment_override',
         VENICE_SIWX_TOKEN: 'siwx_environment_override',
+        VENICE_SIWX_SIGNER_COMMAND: 'exit 1',
       })
       const result = await mcp.callTool('venice_chat', {
         messages: [{ role: 'user', content: 'local fixture' }],
@@ -152,7 +156,7 @@ describe('E2E auth isolation over spawned MCP stdio', { concurrency: false }, ()
       assert.equal(upstream.calls.length, 2)
       assert.equal(upstream.calls[0].headers.authorization,
         auth.mode === 'apikey' ? `Bearer ${auth.apiKey}` : undefined)
-      const expectedSiwx = auth.mode === 'x402' ? auth.siwxToken : undefined
+      const expectedSiwx = auth.mode === 'x402' ? (auth.siwxToken ?? 'siwx_signer_fixture') : undefined
       assert.equal(upstream.calls[0].headers['sign-in-with-x'], expectedSiwx)
       assert.equal(upstream.calls[1].headers['sign-in-with-x'], expectedSiwx)
       assert.equal(upstream.calls[1].headers.authorization, undefined)
@@ -162,5 +166,6 @@ describe('E2E auth isolation over spawned MCP stdio', { concurrency: false }, ()
   it('requires an explicit credential instead of falling back to the parent', () => {
     assert.throws(() => spawnMcp({ mode: 'apikey', apiKey: '' }), /explicit apikey credential/)
     assert.throws(() => spawnMcp({ mode: 'x402', siwxToken: '' }), /explicit x402 credential/)
+    assert.throws(() => spawnMcp({ mode: 'x402', siwxSignerCommand: '' }), /explicit x402 credential/)
   })
 })

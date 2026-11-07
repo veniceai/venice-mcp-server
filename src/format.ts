@@ -105,8 +105,9 @@ function format402(err: VeniceUpstreamError): string {
     }
     lines.push('')
     lines.push('Option B — x402 wallet (no account)')
-    lines.push('  1. Generate a signed EVM SIWE or Solana SIWX payload with your wallet.')
-    lines.push('  2. Set VENICE_SIWX_TOKEN in this MCP server\'s env.')
+    lines.push('  1. Point VENICE_SIWX_SIGNER_COMMAND at a command that signs a fresh')
+    lines.push('     EVM SIWE or Solana SIWX payload with your wallet for each request.')
+    lines.push('  2. Or set VENICE_SIWX_TOKEN to one pre-signed payload (single use).')
     lines.push('  3. Top up via POST /api/v1/x402/top-up (the venice_x402_balance')
     lines.push('     and venice_x402_top_up_info tools can help).')
     if (body.authOptions.x402Wallet?.docs) {
@@ -209,9 +210,16 @@ function baseUnitsToUsd(amount: string): number | null {
 }
 
 /** Convert any thrown error into a structured MCP-tool error string. */
+const STATIC_SIWX_401_HINT =
+  'VENICE_SIWX_TOKEN covers one request: Venice accepts each signed SIGN-IN-WITH-X message once, within 5 minutes of signing. ' +
+  'Set VENICE_SIWX_SIGNER_COMMAND so the server signs a fresh message for every request.'
+
 export function formatToolError(err: unknown): string {
   if (err instanceof VeniceUpstreamError) {
     if (err.isPaymentRequired) return format402(err)
+    if (err.status === 401 && err.siwxSource === 'token') {
+      return `Venice API error 401: upstream request failed. ${STATIC_SIWX_401_HINT}`
+    }
     return `Venice API error ${err.status}: upstream request failed.`
   }
   if (err instanceof Error) return `Error: ${err.message}`
