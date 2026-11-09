@@ -358,6 +358,13 @@ describe('VeniceClient', () => {
     assert.equal(r.key, 'Bearer vk_abc')
   })
 
+  it('sends no Authorization when VENICE_API_KEY is an unfilled placeholder', async () => {
+    const c = new VeniceClient({ ...loadConfig({ VENICE_API_KEY: '${VENICE_API_KEY}' }), baseUrl: server.url })
+    await c.get('/v1/models')
+    const last = server.calls[server.calls.length - 1]
+    assert.equal(last.headers.authorization, undefined)
+  })
+
   it('forwards preferred SIGN-IN-WITH-X when only SIWX token set', async () => {
     const c = new VeniceClient(makeCfg({ siwxToken: 'siwx_token_xyz' }))
     const r = await c.post<{ ok: boolean; siwx: string }>('/v1/needs-siwx', {})

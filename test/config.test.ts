@@ -31,6 +31,29 @@ describe('loadConfig', () => {
     assert.equal(cfg.siwxToken, 'siwx_xyz')
   })
 
+  it('treats a blank or unfilled placeholder API key as unset', () => {
+    for (const value of [
+      '',
+      '   ',
+      '${VENICE_API_KEY}',
+      ' ${VENICE_API_KEY} ',
+      '${env:VENICE_API_KEY}',
+      '${user_config.venice_api_key}',
+      '{env:VENICE_API_KEY}',
+      '<VENICE_API_KEY>',
+      '<your-venice-api-key>',
+      '$VENICE_API_KEY',
+    ]) {
+      assert.equal(loadConfig({ VENICE_API_KEY: value }).apiKey, undefined, JSON.stringify(value))
+    }
+  })
+
+  it('keeps a real API key exactly as given', () => {
+    for (const value of ['vk_abc', 'VENICE-INFERENCE-KEY-0123', 'a$b{c}<d>', ' vk_padded ']) {
+      assert.equal(loadConfig({ VENICE_API_KEY: value }).apiKey, value)
+    }
+  })
+
   it('respects VENICE_DISABLE_NSFW=1', () => {
     assert.equal(loadConfig({ VENICE_DISABLE_NSFW: '1' }).enableNsfw, false)
     assert.equal(loadConfig({ VENICE_DISABLE_NSFW: '0' }).enableNsfw, true)

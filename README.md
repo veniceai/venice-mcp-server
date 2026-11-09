@@ -487,7 +487,7 @@ The most common cause is that `VENICE_API_KEY` isn't being forwarded to the MCP 
   }
 }
 ```
-If the key is missing or blank, the server falls back to x402 mode and returns a 402 payment challenge.
+If the key is missing, blank or an unfilled placeholder such as `${VENICE_API_KEY}`, the server falls back to x402 mode and returns a 402 payment challenge.
 
 ---
 
