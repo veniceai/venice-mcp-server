@@ -1119,7 +1119,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_generate',
       title: 'Venice Video Queue',
-      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details. Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
+      description: `Queue a video generation. Supports Veo 3.1, Kling, Wan, Seedance, MiniMax, PixVerse, Runway, LTX, Grok Imagine, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-5-reference-to-video-basic" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details. Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
@@ -1128,7 +1128,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         seed: z.number().int().optional(),
         image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
         end_image_url: z.string().url().optional().describe('For models that support end frames or transitions. URL or data URL.'),
-        video_url: z.string().url().optional().describe('For video-to-video models (e.g. seedance-2-0-r2v): input video. URL or data URL. Supported: MP4, MOV, WebM.'),
+        video_url: z.string().url().optional().describe('For video-to-video and upscale models (e.g. wan-2-7-video-to-video, topaz-video-upscale): input video. URL or data URL. Supported: MP4, MOV, WebM.'),
         audio_url: z.string().url().optional().describe('For models that support audio input: background music. URL or data URL. Supported: WAV, MP3. Max 30s, 15MB.'),
         reference_image_urls: z.array(z.string().url()).max(9).optional().describe('For models with reference image support: up to 9 images for character/style consistency. Each a URL or data URL.'),
         reference_video_urls: z.array(z.string().url()).max(3).optional().describe('For Seedance 2.0 R2V and similar: up to 3 reference video clips to inherit subject motion, camera movement, and style. Per-clip 2–15s, MP4/MOV, ≤50MB; aggregate ≤15s. Each a URL or data URL.'),

@@ -3419,6 +3419,13 @@ describe('x402 top-up discovery auth', () => {
 })
 
 describe('video tool schemas', () => {
+  it('venice_video_generate names no model the catalog dropped', () => {
+    const { get } = setup()
+    const tool = get('venice_video_generate')
+    assert.doesNotMatch(tool.description, /Sora|seedance-2-0-r2v/)
+    assert.doesNotMatch(tool.inputSchema.video_url.description ?? '', /seedance-2-0-r2v/)
+  })
+
   it('venice_video_generate requires duration', () => {
     const { get } = setup()
     const schema = z.object(get('venice_video_generate').inputSchema)
