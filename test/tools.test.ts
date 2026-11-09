@@ -3458,6 +3458,26 @@ describe('video tool schemas', () => {
     assert.deepEqual((stub.callsTo('/v1/video/queue')[0].body as { camera_trajectory: unknown }).camera_trajectory, [start, end])
   })
 
+  it('venice_video_generate takes a Seedance 2.5 omni_reference_task_type and forwards it', async () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+    const args = {
+      prompt: 'Extend the clip as the boat drifts out of frame',
+      model: 'seedance-2-5-reference-to-video-basic',
+      duration: '5s',
+      reference_video_urls: ['https://example.com/boat.mp4'],
+    }
+    for (const type of ['auto', 'reference', 'edit', 'extend']) {
+      assert.equal(schema.safeParse({ ...args, omni_reference_task_type: type }).success, true, type)
+    }
+    assert.equal(schema.safeParse({ ...args, omni_reference_task_type: 'stretch' }).success, false)
+
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({ ...args, omni_reference_task_type: 'extend' })
+    assert.equal((stub.callsTo('/v1/video/queue')[0].body as { omni_reference_task_type: string }).omni_reference_task_type, 'extend')
+  })
+
   it('venice_video_generate requires duration', () => {
     const { get } = setup()
     const schema = z.object(get('venice_video_generate').inputSchema)
