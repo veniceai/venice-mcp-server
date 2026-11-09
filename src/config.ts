@@ -74,6 +74,18 @@ function readApiKey(value: string | undefined): string | undefined {
   return trimmed && !UNFILLED_KEY_PLACEHOLDER.test(trimmed) ? value : undefined
 }
 
+/** Startup warning for an unfilled VENICE_API_KEY placeholder, which loadConfig treats as no key. */
+export function apiKeyWarning(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  if (!trimmed || !UNFILLED_KEY_PLACEHOLDER.test(trimmed)) return undefined
+  return (
+    `VENICE_API_KEY is the unfilled placeholder ${trimmed}, so this server is running without an API key ` +
+    'and tools that need one will fail. Set your Venice API key where your MCP client configures this server; ' +
+    'for the Cursor plugin, an admin sets it in the Cursor dashboard under Plugins. ' +
+    'Create a key at https://venice.ai/settings/api.'
+  )
+}
+
 function parsePositiveNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value ?? fallback)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
