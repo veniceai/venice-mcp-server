@@ -708,7 +708,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
   const requireCharacterApiKey = (): ToolResult | undefined =>
     cfg.apiKey
       ? undefined
-      : fail('VENICE_API_KEY is required for character discovery; x402 wallet authentication is not supported.')
+      : fail(
+          'VENICE_API_KEY is required for character discovery; x402 wallet authentication is not supported. ' +
+            'Set it where your MCP client configures this server, with a key from https://venice.ai/settings/api.',
+        )
   const asrResults = new AsrResultStore()
   const queueDownloadUrls = new QueueDownloadUrlStore()
 

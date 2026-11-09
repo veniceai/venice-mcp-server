@@ -440,7 +440,7 @@ describe('VeniceClient', () => {
     const callsBefore = server.calls.length
     await assert.rejects(
       () => c.get('/v1/api-key-only', undefined, { auth: 'apiKey' }),
-      /VENICE_API_KEY is required for this API-key-only endpoint/,
+      /VENICE_API_KEY is required for this API-key-only endpoint\. Set it where your MCP client configures this server, with a key from https:\/\/venice\.ai\/settings\/api\./,
     )
     assert.equal(server.calls.length, callsBefore)
   })
