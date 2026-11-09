@@ -266,6 +266,33 @@ const utcTimestampSchema = z
     'Must be a real calendar date and time.',
   )
 
+// Venice checks the same keyframe rules, but its 400 reason isn't relayed to the caller.
+const cameraTrajectorySchema = z
+  .array(
+    z
+      .object({
+        time: z.number().min(0).max(1),
+        azimuth: z.number(),
+        elevation: z.number().min(-90).max(90),
+        distance: z.number().positive(),
+      })
+      .strict(),
+  )
+  .min(2)
+  .max(12)
+  .superRefine((keyframes, ctx) => {
+    let travel = 0
+    for (let i = 1; i < keyframes.length; i++) {
+      if (keyframes[i].time <= keyframes[i - 1].time) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'time'], message: 'Keyframe times must be strictly increasing.' })
+      }
+      travel += Math.abs(keyframes[i].azimuth - keyframes[i - 1].azimuth)
+    }
+    if (travel > 32 * 360) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Azimuth travel must not exceed 32 full turns.' })
+    }
+  })
+
 function normalizeExpiresAt(value: string | undefined): string | undefined {
   if (!value) return undefined
   const match = value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/)
@@ -1139,6 +1166,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           video_url: z.string().url().optional(),
         })).max(4).optional().describe('For Kling O3 R2V and similar: up to 4 character/object elements. Reference in prompt as @Element1, @Element2, etc.'),
         scene_image_urls: z.array(z.string().url()).max(4).optional().describe('For models with advanced element support: up to 4 scene reference images. Reference in prompt as @Image1, @Image2, etc.'),
+        camera_trajectory: cameraTrajectorySchema.optional().describe('For minimax-h3-max-multi-angle only: 2–12 camera keyframes with strictly increasing time from 0 to 1, azimuth in degrees (signed, at most 32 full turns of travel in total), elevation from -90 to 90 degrees, and distance relative to the starting camera (1 = unchanged). Requires image_url; the output follows its aspect ratio. Omit to let the model choose the camera path.'),
         negative_prompt: z.string().max(4096).optional().describe('Negative prompt (what to avoid). Supported by Seedance and other models.'),
         resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see venice_model_details.'),
         upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple.'),

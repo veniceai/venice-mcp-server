@@ -3426,6 +3426,38 @@ describe('video tool schemas', () => {
     assert.doesNotMatch(tool.inputSchema.video_url.description ?? '', /seedance-2-0-r2v/)
   })
 
+  it('venice_video_generate takes an H3 Max camera_trajectory and forwards it', async () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+    const args = {
+      prompt: 'orbit the statue',
+      model: 'minimax-h3-max-multi-angle',
+      duration: '6s',
+      image_url: 'https://example.com/statue.png',
+    }
+    const start = { time: 0, azimuth: 0, elevation: 0, distance: 1 }
+    const end = { time: 1, azimuth: 90, elevation: 15, distance: 1.2 }
+    assert.equal(schema.safeParse({ ...args, camera_trajectory: [start, end] }).success, true)
+    assert.equal(schema.safeParse({ ...args, camera_trajectory: [start, { ...end, azimuth: 32 * 360 }] }).success, true)
+    for (const bad of [
+      [start],
+      Array(13).fill(start),
+      [start, { ...end, time: 1.5 }],
+      [start, { ...end, time: 0 }],
+      [start, { ...end, elevation: 91 }],
+      [start, { ...end, distance: 0 }],
+      [start, { ...end, azimuth: 32 * 360 + 1 }],
+      [start, { ...end, roll: 5 }],
+    ]) {
+      assert.equal(schema.safeParse({ ...args, camera_trajectory: bad }).success, false, JSON.stringify(bad))
+    }
+
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({ ...args, camera_trajectory: [start, end] })
+    assert.deepEqual((stub.callsTo('/v1/video/queue')[0].body as { camera_trajectory: unknown }).camera_trajectory, [start, end])
+  })
+
   it('venice_video_generate requires duration', () => {
     const { get } = setup()
     const schema = z.object(get('venice_video_generate').inputSchema)
