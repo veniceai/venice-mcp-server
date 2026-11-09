@@ -212,6 +212,12 @@ function baseUnitsToUsd(amount: string): number | null {
 export function formatToolError(err: unknown): string {
   if (err instanceof VeniceUpstreamError) {
     if (err.isPaymentRequired) return format402(err)
+    if (err.status === 401) {
+      return (
+        'Venice API error 401: Venice rejected the credentials. Check that VENICE_API_KEY is a valid key ' +
+        'from https://venice.ai/settings/api, or that VENICE_SIWX_TOKEN is a current wallet sign-in token.'
+      )
+    }
     return `Venice API error ${err.status}: upstream request failed.`
   }
   if (err instanceof Error) return `Error: ${err.message}`
