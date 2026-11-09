@@ -1168,6 +1168,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         scene_image_urls: z.array(z.string().url()).max(4).optional().describe('For models with advanced element support: up to 4 scene reference images. Reference in prompt as @Image1, @Image2, etc.'),
         camera_trajectory: cameraTrajectorySchema.optional().describe('For minimax-h3-max-multi-angle only: 2–12 camera keyframes with strictly increasing time from 0 to 1, azimuth in degrees (signed, at most 32 full turns of travel in total), elevation from -90 to 90 degrees, and distance relative to the starting camera (1 = unchanged). Requires image_url; the output follows its aspect ratio. Omit to let the model choose the camera path.'),
         omni_reference_task_type: z.enum(['auto', 'reference', 'edit', 'extend']).optional().describe('For seedance-2-5-reference-to-video-basic only: what to do with reference_video_urls. "edit" changes the referenced clip and "extend" continues it; both need reference_video_urls and a prompt that asks for the same thing. Omit to let Venice infer it from the prompt.'),
+        video_references: z.array(z.object({
+          video_url: z.string().url(),
+          ref_name: z.string().optional(),
+          audio_url: z.string().url().optional(),
+        }).strict()).optional().describe('For models with per_reference_audio, e.g. wan-2-7-reference-to-video: reference clips, up to the model\'s reference-video limit. Each has an optional ref_name to cite in the prompt and an optional audio_url (WAV or MP3) with that character\'s voice. Each URL may be a data URL.'),
         negative_prompt: z.string().max(4096).optional().describe('Negative prompt (what to avoid). Supported by Seedance and other models.'),
         resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see venice_model_details.'),
         upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple.'),

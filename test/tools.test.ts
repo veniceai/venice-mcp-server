@@ -3478,6 +3478,29 @@ describe('video tool schemas', () => {
     assert.equal((stub.callsTo('/v1/video/queue')[0].body as { omni_reference_task_type: string }).omni_reference_task_type, 'extend')
   })
 
+  it('venice_video_generate takes Wan 2.7 video_references with per-character voices and forwards them', async () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+    const args = {
+      prompt: 'Video1 greets Video2 at the cafe',
+      model: 'wan-2-7-reference-to-video',
+      duration: '5s',
+    }
+    const references = [
+      { video_url: 'https://example.com/ana.mp4', ref_name: 'Video1', audio_url: 'https://example.com/ana.wav' },
+      { video_url: 'https://example.com/ben.mp4' },
+    ]
+    assert.equal(schema.safeParse({ ...args, video_references: references }).success, true)
+    for (const bad of [[{ ref_name: 'Video1' }], [{ video_url: 'not a url' }], [{ ...references[1], voice_id: 'eve' }]]) {
+      assert.equal(schema.safeParse({ ...args, video_references: bad }).success, false, JSON.stringify(bad))
+    }
+
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({ ...args, video_references: references })
+    assert.deepEqual((stub.callsTo('/v1/video/queue')[0].body as { video_references: unknown }).video_references, references)
+  })
+
   it('venice_video_generate requires duration', () => {
     const { get } = setup()
     const schema = z.object(get('venice_video_generate').inputSchema)
