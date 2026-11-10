@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { loadConfig } from '../src/config.js'
+import { apiKeyWarning, loadConfig } from '../src/config.js'
 
 describe('loadConfig', () => {
   it('uses sensible defaults when env is empty', () => {
@@ -29,6 +29,43 @@ describe('loadConfig', () => {
     const cfg = loadConfig({ VENICE_API_KEY: 'vk_abc', VENICE_SIWX_TOKEN: 'siwx_xyz' })
     assert.equal(cfg.apiKey, 'vk_abc')
     assert.equal(cfg.siwxToken, 'siwx_xyz')
+  })
+
+  it('treats a blank or unfilled placeholder API key as unset', () => {
+    for (const value of [
+      '',
+      '   ',
+      '${VENICE_API_KEY}',
+      ' ${VENICE_API_KEY} ',
+      '${env:VENICE_API_KEY}',
+      '${user_config.venice_api_key}',
+      '{env:VENICE_API_KEY}',
+      '<VENICE_API_KEY>',
+      '<your-venice-api-key>',
+      '$VENICE_API_KEY',
+    ]) {
+      assert.equal(loadConfig({ VENICE_API_KEY: value }).apiKey, undefined, JSON.stringify(value))
+    }
+  })
+
+  it('keeps a real API key exactly as given', () => {
+    for (const value of ['vk_abc', 'VENICE-INFERENCE-KEY-0123', 'a$b{c}<d>', ' vk_padded ']) {
+      assert.equal(loadConfig({ VENICE_API_KEY: value }).apiKey, value)
+    }
+  })
+
+  it('warns about an unfilled API key placeholder and says where to set the key', () => {
+    const warning = apiKeyWarning(' ${VENICE_API_KEY} ') ?? ''
+    assert.match(warning, /unfilled placeholder \$\{VENICE_API_KEY\}, so this server is running without an API key/)
+    assert.match(warning, /Cursor dashboard under Plugins/)
+    assert.match(warning, /https:\/\/venice\.ai\/settings\/api/)
+    assert.match(apiKeyWarning('<your-venice-api-key>') ?? '', /unfilled placeholder <your-venice-api-key>/)
+  })
+
+  it('stays quiet about a real, blank or missing API key', () => {
+    for (const value of ['vk_abc', '', '   ', undefined]) {
+      assert.equal(apiKeyWarning(value), undefined, JSON.stringify(value))
+    }
   })
 
   it('respects VENICE_DISABLE_NSFW=1', () => {

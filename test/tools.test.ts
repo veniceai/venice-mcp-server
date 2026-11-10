@@ -1503,7 +1503,10 @@ describe('tool output shaping', () => {
     for (const call of calls) {
       const result = await tools.find((tool) => tool.name === call.name)!.handler(call.args as never)
       assert.equal(result.isError, true, `${call.name} should return a local error`)
-      assert.match((result.content[0] as { text: string }).text, /VENICE_API_KEY is required/)
+      assert.match(
+        (result.content[0] as { text: string }).text,
+        /VENICE_API_KEY is required for character discovery; .* Set it where your MCP client configures this server, with a key from https:\/\/venice\.ai\/settings\/api\./,
+      )
     }
     assert.equal(stub.calls.length, 0)
   })

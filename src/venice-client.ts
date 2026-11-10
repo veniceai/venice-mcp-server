@@ -138,7 +138,10 @@ export class VeniceClient {
         }
       }
       if (!this.cfg.apiKey) {
-        throw new Error('VENICE_API_KEY is required for this API-key-only endpoint.')
+        throw new Error(
+          'VENICE_API_KEY is required for this API-key-only endpoint. Set it where your MCP client configures ' +
+            'this server, with a key from https://venice.ai/settings/api.',
+        )
       }
       headers.Authorization = `Bearer ${this.cfg.apiKey}`
     } else if (auth === 'siwx') {

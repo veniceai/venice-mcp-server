@@ -1103,3 +1103,28 @@ describe('integration — no auth at all (402 surfaces auth options)', () => {
     assert.match(text, /Option B — x402 wallet/)
   })
 })
+
+describe('stdio startup with an unfilled API key placeholder', () => {
+  it('warns on stderr before serving', async () => {
+    const child = spawn('node', [path.join(REPO_ROOT, 'dist/cli.js')], {
+      env: { ...process.env, VENICE_API_KEY: '${VENICE_API_KEY}', VENICE_SIWX_TOKEN: undefined } as unknown as NodeJS.ProcessEnv,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    const stderr = await new Promise<string>((resolve, reject) => {
+      let out = ''
+      const timer = setTimeout(() => {
+        child.kill()
+        reject(new Error(`no placeholder warning on stderr: ${out}`))
+      }, 10_000)
+      child.stderr.on('data', (chunk: Buffer) => {
+        out += chunk.toString('utf8')
+        if (/unfilled placeholder[^\n]*\n/.test(out)) {
+          clearTimeout(timer)
+          child.kill()
+          resolve(out)
+        }
+      })
+    })
+    assert.match(stderr, /\[venice-mcp\] WARNING: VENICE_API_KEY is the unfilled placeholder \$\{VENICE_API_KEY\}/)
+  })
+})

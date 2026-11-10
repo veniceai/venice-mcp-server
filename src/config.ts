@@ -2,7 +2,9 @@
  * Configuration loaded from env vars.
  *
  * Auth modes (mutually exclusive at request time; key beats SIWX when both set):
- *   - VENICE_API_KEY        → forwarded as `Authorization: Bearer`.
+ *   - VENICE_API_KEY        → forwarded as `Authorization: Bearer`. A blank
+ *                              value or an unfilled placeholder such as
+ *                              `${VENICE_API_KEY}` counts as unset.
  *   - VENICE_SIWX_TOKEN     → forwarded as `SIGN-IN-WITH-X` (base64-encoded
  *                              signed EVM SIWE or Solana SIWX payload).
  *                              Pre-generate this in the caller's wallet.
@@ -63,6 +65,27 @@ const DEFAULT_MAX_VIDEO_RESPONSE_BYTES = 25 * 1024 * 1024
 const DEFAULT_MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 const DEFAULT_MAX_AUDIO_RESPONSE_BYTES = 32 * 1024 * 1024
 
+// A client with no key to fill in can pass its own placeholder through as the
+// value: Cursor sends the literal `${VENICE_API_KEY}`, and copied docs send `<...>`.
+const UNFILLED_KEY_PLACEHOLDER = /^(?:\$\{[^}]*\}|\$[A-Za-z_]\w*|\{env:[^}]*\}|<[^<>]*>)$/
+
+function readApiKey(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed && !UNFILLED_KEY_PLACEHOLDER.test(trimmed) ? value : undefined
+}
+
+/** Startup warning for an unfilled VENICE_API_KEY placeholder, which loadConfig treats as no key. */
+export function apiKeyWarning(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  if (!trimmed || !UNFILLED_KEY_PLACEHOLDER.test(trimmed)) return undefined
+  return (
+    `VENICE_API_KEY is the unfilled placeholder ${trimmed}, so this server is running without an API key ` +
+    'and tools that need one will fail. Set your Venice API key where your MCP client configures this server; ' +
+    'for the Cursor plugin, an admin sets it in the Cursor dashboard under Plugins. ' +
+    'Create a key at https://venice.ai/settings/api.'
+  )
+}
+
 function parsePositiveNumber(value: string | undefined, fallback: number): number {
   const parsed = Number(value ?? fallback)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
@@ -77,7 +100,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     // VENICE_TEST_BASE_URL is an internal test-only escape hatch — never documented publicly.
     baseUrl: env.VENICE_TEST_BASE_URL?.trim() || 'https://api.venice.ai/api',
-    apiKey: env.VENICE_API_KEY,
+    apiKey: readApiKey(env.VENICE_API_KEY),
     siwxToken: env.VENICE_SIWX_TOKEN,
     defaultChatModel: env.VENICE_DEFAULT_CHAT_MODEL ?? 'deepseek-v4-flash-0731',
     defaultImageModel: env.VENICE_DEFAULT_IMAGE_MODEL ?? 'flux-2-pro',

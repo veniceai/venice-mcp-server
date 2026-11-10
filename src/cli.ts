@@ -3,10 +3,16 @@
  * Entry-point. Default mode is stdio (for Claude Desktop / Cursor / LM Studio).
  * Pass --http to run as a Streamable-HTTP server (for Smithery / Cloud Run).
  */
+import { apiKeyWarning } from './config.js'
 import { runStdio } from './transports/stdio.js'
 import { runHttp } from './transports/http.js'
 
 async function main(): Promise<void> {
+  const keyWarning = apiKeyWarning(process.env.VENICE_API_KEY)
+  if (keyWarning) {
+    // eslint-disable-next-line no-console
+    console.error(`[venice-mcp] WARNING: ${keyWarning}`)
+  }
   const args = process.argv.slice(2)
   const httpMode = args.includes('--http') || process.env.VENICE_MCP_HTTP === '1'
 

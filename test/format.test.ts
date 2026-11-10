@@ -162,6 +162,19 @@ describe('formatToolError', () => {
     assert.match(out, /unrecognized payment response/)
   })
 
+  it('says a 401 means Venice rejected the credentials, without echoing the body', () => {
+    const err = new VeniceUpstreamError({
+      message: '',
+      status: 401,
+      body: { error: 'Authentication failed' },
+    })
+    const out = formatToolError(err)
+    assert.match(out, /^Venice API error 401: Venice rejected the credentials\./)
+    assert.match(out, /VENICE_API_KEY/)
+    assert.match(out, /VENICE_SIWX_TOKEN/)
+    assert.doesNotMatch(out, /Authentication failed/)
+  })
+
   it('formats non-402 upstream errors without echoing the body', () => {
     const err = new VeniceUpstreamError({
       message: '',
