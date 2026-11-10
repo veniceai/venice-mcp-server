@@ -266,6 +266,33 @@ const utcTimestampSchema = z
     'Must be a real calendar date and time.',
   )
 
+// Venice checks the same keyframe rules, but its 400 reason isn't relayed to the caller.
+const cameraTrajectorySchema = z
+  .array(
+    z
+      .object({
+        time: z.number().min(0).max(1),
+        azimuth: z.number(),
+        elevation: z.number().min(-90).max(90),
+        distance: z.number().positive(),
+      })
+      .strict(),
+  )
+  .min(2)
+  .max(12)
+  .superRefine((keyframes, ctx) => {
+    let travel = 0
+    for (let i = 1; i < keyframes.length; i++) {
+      if (keyframes[i].time <= keyframes[i - 1].time) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [i, 'time'], message: 'Keyframe times must be strictly increasing.' })
+      }
+      travel += Math.abs(keyframes[i].azimuth - keyframes[i - 1].azimuth)
+    }
+    if (travel > 32 * 360) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Azimuth travel must not exceed 32 full turns.' })
+    }
+  })
+
 function normalizeExpiresAt(value: string | undefined): string | undefined {
   if (!value) return undefined
   const match = value.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/)
@@ -1122,7 +1149,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_generate',
       title: 'Venice Video Queue',
-      description: `Queue a video generation. Supports Sora 2, Veo 3.1, Kling, Wan, LTX 2, Seedance, Runway Gen-4, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-0-r2v" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details. Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
+      description: `Queue a video generation. Supports Veo 3.1, Kling, Wan, Seedance, MiniMax, PixVerse, Runway, LTX, Grok Imagine, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-5-reference-to-video-basic" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details. Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
@@ -1131,7 +1158,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         seed: z.number().int().optional(),
         image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
         end_image_url: z.string().url().optional().describe('For models that support end frames or transitions. URL or data URL.'),
-        video_url: z.string().url().optional().describe('For video-to-video models (e.g. seedance-2-0-r2v): input video. URL or data URL. Supported: MP4, MOV, WebM.'),
+        video_url: z.string().url().optional().describe('For video-to-video and upscale models (e.g. wan-2-7-video-to-video, topaz-video-upscale): input video. URL or data URL. Supported: MP4, MOV, WebM.'),
         audio_url: z.string().url().optional().describe('For models that support audio input: background music. URL or data URL. Supported: WAV, MP3. Max 30s, 15MB.'),
         reference_image_urls: z.array(z.string().url()).max(9).optional().describe('For models with reference image support: up to 9 images for character/style consistency. Each a URL or data URL.'),
         reference_video_urls: z.array(z.string().url()).max(3).optional().describe('For Seedance 2.0 R2V and similar: up to 3 reference video clips to inherit subject motion, camera movement, and style. Per-clip 2–15s, MP4/MOV, ≤50MB; aggregate ≤15s. Each a URL or data URL.'),
@@ -1142,6 +1169,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           video_url: z.string().url().optional(),
         })).max(4).optional().describe('For Kling O3 R2V and similar: up to 4 character/object elements. Reference in prompt as @Element1, @Element2, etc.'),
         scene_image_urls: z.array(z.string().url()).max(4).optional().describe('For models with advanced element support: up to 4 scene reference images. Reference in prompt as @Image1, @Image2, etc.'),
+        camera_trajectory: cameraTrajectorySchema.optional().describe('For minimax-h3-max-multi-angle only: 2–12 camera keyframes with strictly increasing time from 0 to 1, azimuth in degrees (signed, at most 32 full turns of travel in total), elevation from -90 to 90 degrees, and distance relative to the starting camera (1 = unchanged). Requires image_url; the output follows its aspect ratio. Omit to let the model choose the camera path.'),
+        omni_reference_task_type: z.enum(['auto', 'reference', 'edit', 'extend']).optional().describe('For seedance-2-5-reference-to-video-basic only: what to do with reference_video_urls. "edit" changes the referenced clip and "extend" continues it; both need reference_video_urls and a prompt that asks for the same thing. Omit to let Venice infer it from the prompt.'),
+        video_references: z.array(z.object({
+          video_url: z.string().url(),
+          ref_name: z.string().optional(),
+          audio_url: z.string().url().optional(),
+        }).strict()).optional().describe('For models with per_reference_audio, e.g. wan-2-7-reference-to-video: reference clips, up to the model\'s reference-video limit. Each has an optional ref_name to cite in the prompt and an optional audio_url (WAV or MP3) with that character\'s voice. Each URL may be a data URL.'),
         negative_prompt: z.string().max(4096).optional().describe('Negative prompt (what to avoid). Supported by Seedance and other models.'),
         resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see venice_model_details.'),
         upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple.'),

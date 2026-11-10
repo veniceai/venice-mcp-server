@@ -3422,6 +3422,88 @@ describe('x402 top-up discovery auth', () => {
 })
 
 describe('video tool schemas', () => {
+  it('venice_video_generate names no model the catalog dropped', () => {
+    const { get } = setup()
+    const tool = get('venice_video_generate')
+    assert.doesNotMatch(tool.description, /Sora|seedance-2-0-r2v/)
+    assert.doesNotMatch(tool.inputSchema.video_url.description ?? '', /seedance-2-0-r2v/)
+  })
+
+  it('venice_video_generate takes an H3 Max camera_trajectory and forwards it', async () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+    const args = {
+      prompt: 'orbit the statue',
+      model: 'minimax-h3-max-multi-angle',
+      duration: '6s',
+      image_url: 'https://example.com/statue.png',
+    }
+    const start = { time: 0, azimuth: 0, elevation: 0, distance: 1 }
+    const end = { time: 1, azimuth: 90, elevation: 15, distance: 1.2 }
+    assert.equal(schema.safeParse({ ...args, camera_trajectory: [start, end] }).success, true)
+    assert.equal(schema.safeParse({ ...args, camera_trajectory: [start, { ...end, azimuth: 32 * 360 }] }).success, true)
+    for (const bad of [
+      [start],
+      Array(13).fill(start),
+      [start, { ...end, time: 1.5 }],
+      [start, { ...end, time: 0 }],
+      [start, { ...end, elevation: 91 }],
+      [start, { ...end, distance: 0 }],
+      [start, { ...end, azimuth: 32 * 360 + 1 }],
+      [start, { ...end, roll: 5 }],
+    ]) {
+      assert.equal(schema.safeParse({ ...args, camera_trajectory: bad }).success, false, JSON.stringify(bad))
+    }
+
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({ ...args, camera_trajectory: [start, end] })
+    assert.deepEqual((stub.callsTo('/v1/video/queue')[0].body as { camera_trajectory: unknown }).camera_trajectory, [start, end])
+  })
+
+  it('venice_video_generate takes a Seedance 2.5 omni_reference_task_type and forwards it', async () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+    const args = {
+      prompt: 'Extend the clip as the boat drifts out of frame',
+      model: 'seedance-2-5-reference-to-video-basic',
+      duration: '5s',
+      reference_video_urls: ['https://example.com/boat.mp4'],
+    }
+    for (const type of ['auto', 'reference', 'edit', 'extend']) {
+      assert.equal(schema.safeParse({ ...args, omni_reference_task_type: type }).success, true, type)
+    }
+    assert.equal(schema.safeParse({ ...args, omni_reference_task_type: 'stretch' }).success, false)
+
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({ ...args, omni_reference_task_type: 'extend' })
+    assert.equal((stub.callsTo('/v1/video/queue')[0].body as { omni_reference_task_type: string }).omni_reference_task_type, 'extend')
+  })
+
+  it('venice_video_generate takes Wan 2.7 video_references with per-character voices and forwards them', async () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+    const args = {
+      prompt: 'Video1 greets Video2 at the cafe',
+      model: 'wan-2-7-reference-to-video',
+      duration: '5s',
+    }
+    const references = [
+      { video_url: 'https://example.com/ana.mp4', ref_name: 'Video1', audio_url: 'https://example.com/ana.wav' },
+      { video_url: 'https://example.com/ben.mp4' },
+    ]
+    assert.equal(schema.safeParse({ ...args, video_references: references }).success, true)
+    for (const bad of [[{ ref_name: 'Video1' }], [{ video_url: 'not a url' }], [{ ...references[1], voice_id: 'eve' }]]) {
+      assert.equal(schema.safeParse({ ...args, video_references: bad }).success, false, JSON.stringify(bad))
+    }
+
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({ ...args, video_references: references })
+    assert.deepEqual((stub.callsTo('/v1/video/queue')[0].body as { video_references: unknown }).video_references, references)
+  })
+
   it('venice_video_generate requires duration', () => {
     const { get } = setup()
     const schema = z.object(get('venice_video_generate').inputSchema)
