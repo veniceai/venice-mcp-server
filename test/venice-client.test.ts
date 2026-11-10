@@ -412,6 +412,12 @@ describe('VeniceClient', () => {
     assert.deepEqual(agents, Array(3).fill(`mcp-claude-code/2.0.14 @veniceai/mcp-server/${cfg.serverVersion}`))
   })
 
+  it('leaves the MCP client out of the User-Agent when VENICE_SEND_CLIENT_INFO=0', async () => {
+    const cfg = { ...makeCfg(), sendClientInfo: false }
+    await new VeniceClient(cfg, () => ({ name: 'claude-code', version: '2.0.14' })).get('/v1/models')
+    assert.equal(server.calls[server.calls.length - 1].headers['user-agent'], `@veniceai/mcp-server/${cfg.serverVersion}`)
+  })
+
   it('reduces any MCP client name to a single User-Agent token', async () => {
     const cfg = makeCfg()
     const base = `@veniceai/mcp-server/${cfg.serverVersion}`

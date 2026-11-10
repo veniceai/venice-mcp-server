@@ -68,6 +68,12 @@ describe('loadConfig', () => {
     }
   })
 
+  it('names the MCP client in the User-Agent unless VENICE_SEND_CLIENT_INFO=0', () => {
+    assert.equal(loadConfig({}).sendClientInfo, true)
+    assert.equal(loadConfig({ VENICE_SEND_CLIENT_INFO: '1' }).sendClientInfo, true)
+    assert.equal(loadConfig({ VENICE_SEND_CLIENT_INFO: '0' }).sendClientInfo, false)
+  })
+
   it('respects VENICE_DISABLE_NSFW=1', () => {
     assert.equal(loadConfig({ VENICE_DISABLE_NSFW: '1' }).enableNsfw, false)
     assert.equal(loadConfig({ VENICE_DISABLE_NSFW: '0' }).enableNsfw, true)

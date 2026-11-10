@@ -52,6 +52,8 @@ export interface Config {
   maxAudioResponseBytes: number
   /** Whether to advertise NSFW capability in tool descriptions, prompt templates and server instructions. */
   enableNsfw: boolean
+  /** Whether requests to Venice name the connected MCP client in the User-Agent. */
+  sendClientInfo: boolean
   /** Server name advertised to MCP clients. */
   serverName: string
   /** Server version advertised. */
@@ -120,6 +122,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       DEFAULT_MAX_AUDIO_RESPONSE_BYTES,
     ),
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
+    sendClientInfo: env.VENICE_SEND_CLIENT_INFO !== '0',
     serverName: '@veniceai/mcp-server',
     serverVersion: PACKAGE_VERSION,
   }

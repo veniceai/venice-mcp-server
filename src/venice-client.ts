@@ -111,7 +111,7 @@ export class VeniceClient {
 
   private userAgent(): string {
     const server = `${this.cfg.serverName}/${this.cfg.serverVersion}`
-    const client = this.mcpClient()
+    const client = this.cfg.sendClientInfo ? this.mcpClient() : undefined
     const name = userAgentToken(client?.name ?? '', 64).replace(/^mcp-/i, '')
     if (!name) return server
     const version = userAgentToken(client?.version ?? '', 32)
