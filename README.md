@@ -38,7 +38,7 @@ That's it. Type a prompt — your agent now has chat, image, video, music, TTS, 
 
 ## What you get
 
-**45 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **3 prompt templates** (uncensored research, NSFW creative writing, image style explorer; `VENICE_DISABLE_NSFW=1` hides the first two). The voices resource is built live from each TTS model's catalog metadata.
+**45 tools** spanning every Venice modality plus billing and API-key operations, **3 resources** (`venice://models`, `venice://styles`, `venice://voices`) and **9 prompt templates**: uncensored research, NSFW creative writing and an image style explorer, plus six creator workflows (create image, create video, create audio, YouTube thumbnail, product photoshoot and explainer video) that walk the agent from a brief to a finished result, quoting paid video and music jobs first. Hosts such as Claude Code show them as slash commands, for example `/mcp__venice__create-video`. `VENICE_DISABLE_NSFW=1` hides the first two. The voices resource is built live from each TTS model's catalog metadata.
 
 Every tool declares explicit `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint` annotations to help hosts decide when to request approval. Video and music status tools are marked destructive because their optional `delete_media_on_completion` argument can delete stored media before returning the result. Hints describe a tool's possible behavior; hosts should still enforce their own approval policy.
 
@@ -304,7 +304,7 @@ Set both `VENICE_API_KEY` AND `VENICE_SIWX_TOKEN` — API key wins. SIWX is only
 │  MCP host            │      Streamable HTTP    │  @veniceai/mcp-server  │
 │  (Claude / Cursor /  ├────────────────────────▶│  - 45 tools            │
 │   ChatGPT / etc.)    │                         │  - 3 resources         │
-└──────────────────────┘                         │  - 3 prompts           │
+└──────────────────────┘                         │  - 9 prompts           │
                                                  │  - header forwarder    │
                                                  └────────────┬───────────┘
                                                               │ HTTPS
