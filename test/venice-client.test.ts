@@ -389,6 +389,16 @@ describe('VeniceClient', () => {
     assert.equal(last.headers['sign-in-with-x'], undefined)
   })
 
+  it('names the server and its version in the User-Agent of JSON, multipart and binary requests', async () => {
+    const cfg = makeCfg()
+    const c = new VeniceClient(cfg)
+    await c.get('/v1/models')
+    await c.postMultipart('/v1/multipart/ok', new FormData())
+    await c.postMixed('/v1/video/completed', {})
+    const agents = server.calls.slice(-3).map((call) => call.headers['user-agent'])
+    assert.deepEqual(agents, Array(3).fill(`@veniceai/mcp-server/${cfg.serverVersion}`))
+  })
+
   it('can force SIWX auth for endpoints that reject API keys', async () => {
     const c = new VeniceClient(makeCfg({ apiKey: 'vk_abc', siwxToken: 'siwx_token_xyz' }))
     await c.get('/v1/models', undefined, { auth: 'siwx' })

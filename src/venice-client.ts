@@ -102,6 +102,10 @@ export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
 export class VeniceClient {
   constructor(private readonly cfg: Config) {}
 
+  private userAgent(): string {
+    return `${this.cfg.serverName}/${this.cfg.serverVersion}`
+  }
+
   async request<T = unknown>(path: string, init: RequestInitJSON = {}): Promise<T> {
     return (await this.requestWithMetadata<T>(path, init)).data
   }
@@ -117,7 +121,7 @@ export class VeniceClient {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       Accept: init.responseType === 'event-stream' ? 'text/event-stream' : 'application/json',
-      'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
+      'User-Agent': this.userAgent(),
       ...(init.headers ?? {}),
     }
     if (init.json !== undefined) headers['Content-Type'] = 'application/json'
@@ -265,7 +269,7 @@ export class VeniceClient {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
+      'User-Agent': this.userAgent(),
     }
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
     else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
@@ -300,7 +304,7 @@ export class VeniceClient {
   ): Promise<VeniceBinaryResponse> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
-      'User-Agent': `${this.cfg.serverName}/${this.cfg.serverVersion}`,
+      'User-Agent': this.userAgent(),
     }
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`
     else if (this.cfg.siwxToken) headers['SIGN-IN-WITH-X'] = this.cfg.siwxToken
