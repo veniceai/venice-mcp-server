@@ -24,7 +24,8 @@ after(async () => {
 
 function setup(overrides: ConstructorParameters<typeof StubClient>[0] = {}, env: Record<string, string> = {}) {
   const mediaDir = join(tmp, `run-${Math.random().toString(36).slice(2)}`)
-  const cfg = localTransportConfig(loadConfig({ VENICE_API_KEY: 'test-key', VENICE_MEDIA_DIR: mediaDir, ...env }))
+  const fullEnv = { VENICE_API_KEY: 'test-key', VENICE_MEDIA_DIR: mediaDir, ...env }
+  const cfg = localTransportConfig(loadConfig(fullEnv), fullEnv)
   const stub = new StubClient(overrides)
   const sleeps: number[] = []
   const tools = buildTools(stub.asClient(), cfg, { sleep: async (ms) => { sleeps.push(ms) } })
@@ -710,6 +711,13 @@ describe('VENICE_TOOLSETS', () => {
 })
 
 describe('library default', () => {
+  it('writes media to VENICE_MEDIA_DIR only through the stdio transport', () => {
+    const env = { VENICE_API_KEY: 'k', VENICE_MEDIA_DIR: join(tmp, 'library-media') }
+    assert.equal(loadConfig(env).mediaDir, undefined)
+    assert.equal(localTransportConfig(loadConfig(env), env).mediaDir, env.VENICE_MEDIA_DIR)
+    assert.equal(localTransportConfig(loadConfig({}), {}).mediaDir, undefined)
+  })
+
   it('rejects local file paths unless the stdio transport enables them', async () => {
     const src = join(tmp, 'default-src.png')
     await writeFile(src, PNG_1x1)

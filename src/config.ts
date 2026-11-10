@@ -59,6 +59,7 @@ export interface Config {
    * this directory and tools return a file:// resource link plus a JSON
    * sidecar instead of inline base64. Intended for NLE / timeline-editor
    * workflows (DaVinci Resolve, Premiere, etc.) that import files from disk.
+   * Only the stdio transport sets it, from VENICE_MEDIA_DIR.
    */
   mediaDir: string | undefined
   /** Maximum bytes read from a local file passed as a media input. */
@@ -167,7 +168,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ),
     enableNsfw: env.VENICE_DISABLE_NSFW !== '1',
     sendClientInfo: env.VENICE_SEND_CLIENT_INFO !== '0',
-    mediaDir: env.VENICE_MEDIA_DIR?.trim() || undefined,
+    mediaDir: undefined,
     maxLocalInputBytes: parsePositiveInteger(env.VENICE_MAX_LOCAL_INPUT_BYTES, DEFAULT_MAX_LOCAL_INPUT_BYTES),
     localFiles: false,
     toolsets: parseToolsets(env.VENICE_TOOLSETS),
@@ -185,6 +186,6 @@ export function remoteTransportConfig(cfg: Config): Config {
 }
 
 /** Config for the stdio transport, whose caller owns the machine and its files. */
-export function localTransportConfig(cfg: Config): Config {
-  return { ...cfg, localFiles: true }
+export function localTransportConfig(cfg: Config, env: NodeJS.ProcessEnv = process.env): Config {
+  return { ...cfg, localFiles: true, mediaDir: env.VENICE_MEDIA_DIR?.trim() || undefined }
 }
