@@ -2,6 +2,9 @@ import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import { buildServer } from '../src/server.js'
 import {
   DEFAULT_MAX_EVENT_STREAM_BYTES,
   VeniceClient,
@@ -387,6 +390,68 @@ describe('VeniceClient', () => {
     const last = server.calls[server.calls.length - 1]
     assert.ok(last.headers.authorization)
     assert.equal(last.headers['sign-in-with-x'], undefined)
+  })
+
+  it('names the server and its version in the User-Agent of JSON, multipart and binary requests', async () => {
+    const cfg = makeCfg()
+    const c = new VeniceClient(cfg)
+    await c.get('/v1/models')
+    await c.postMultipart('/v1/multipart/ok', new FormData())
+    await c.postMixed('/v1/video/completed', {})
+    const agents = server.calls.slice(-3).map((call) => call.headers['user-agent'])
+    assert.deepEqual(agents, Array(3).fill(`@veniceai/mcp-server/${cfg.serverVersion}`))
+  })
+
+  it('adds the MCP client name and version to the User-Agent of JSON, multipart and binary requests', async () => {
+    const cfg = makeCfg()
+    const c = new VeniceClient(cfg, () => ({ name: 'claude-code', version: '2.0.14' }))
+    await c.get('/v1/models')
+    await c.postMultipart('/v1/multipart/ok', new FormData())
+    await c.postMixed('/v1/video/completed', {})
+    const agents = server.calls.slice(-3).map((call) => call.headers['user-agent'])
+    assert.deepEqual(agents, Array(3).fill(`mcp-claude-code/2.0.14 @veniceai/mcp-server/${cfg.serverVersion}`))
+  })
+
+  it('leaves the MCP client out of the User-Agent when VENICE_SEND_CLIENT_INFO=0', async () => {
+    const cfg = { ...makeCfg(), sendClientInfo: false }
+    await new VeniceClient(cfg, () => ({ name: 'claude-code', version: '2.0.14' })).get('/v1/models')
+    assert.equal(server.calls[server.calls.length - 1].headers['user-agent'], `@veniceai/mcp-server/${cfg.serverVersion}`)
+  })
+
+  it('reduces any MCP client name to a single User-Agent token', async () => {
+    const cfg = makeCfg()
+    const base = `@veniceai/mcp-server/${cfg.serverVersion}`
+    for (const [name, version, expected] of [
+      ['Visual Studio Code', '1.96.0 (Universal)', `mcp-Visual-Studio-Code/1.96.0-Universal ${base}`],
+      ['evil\r\nX-Injected: 1', '1', `mcp-evil-X-Injected-1/1 ${base}`],
+      ['Café ☕', '', `mcp-Caf ${base}`],
+      ['(((', '1.0', base],
+      ['x'.repeat(100), '1', `mcp-${'x'.repeat(64)}/1 ${base}`],
+      [`${'a'.repeat(63)} b`, '1', `mcp-${'a'.repeat(63)}/1 ${base}`],
+      ['mcp-inspector', '0.17.2', `mcp-inspector/0.17.2 ${base}`],
+      ['MCP-Inspector', '1', `mcp-Inspector/1 ${base}`],
+    ]) {
+      await new VeniceClient(cfg, () => ({ name, version })).get('/v1/models')
+      assert.equal(server.calls[server.calls.length - 1].headers['user-agent'], expected, JSON.stringify(name))
+    }
+  })
+
+  it('sends the name of the MCP client connected to buildServer', async () => {
+    const cfg = makeCfg()
+    const mcp = buildServer({ config: cfg })
+    const agent = new Client({ name: 'user-agent-test', version: '3.1.4' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await mcp.connect(serverTransport)
+    await agent.connect(clientTransport)
+    try {
+      await agent.callTool({ name: 'venice_list_models', arguments: {} })
+      const last = server.calls[server.calls.length - 1]
+      assert.match(last.path, /^\/v1\/models\?/)
+      assert.equal(last.headers['user-agent'], `mcp-user-agent-test/3.1.4 @veniceai/mcp-server/${cfg.serverVersion}`)
+    } finally {
+      await agent.close()
+      await mcp.close()
+    }
   })
 
   it('can force SIWX auth for endpoints that reject API keys', async () => {

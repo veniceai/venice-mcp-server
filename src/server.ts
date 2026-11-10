@@ -18,7 +18,6 @@ export interface BuildOptions {
 
 export function buildServer(opts: BuildOptions = {}): McpServer {
   const cfg = opts.config ?? loadConfig()
-  const client = opts.client ?? new VeniceClient(cfg)
 
   const server = new McpServer(
     { name: cfg.serverName, version: cfg.serverVersion },
@@ -36,6 +35,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
       ].join(' '),
     }
   )
+  const client = opts.client ?? new VeniceClient(cfg, () => server.server.getClientVersion())
 
   // Tools — cast to any to bypass deep ZodRawShape inference in the SDK.
   // We rely on Zod for runtime validation; TS-side typing is widened.
