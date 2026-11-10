@@ -100,10 +100,24 @@ export const DEFAULT_MAX_EVENT_STREAM_BYTES = 16 * 1024 * 1024
  * on `/x402/top-up`, and this client currently exposes discovery—not settlement.
  */
 export class VeniceClient {
-  constructor(private readonly cfg: Config) {}
+  /**
+   * @param mcpClient The name and version the MCP client sent when it connected. They
+   *   go in the User-Agent so Venice can tell which agent made each request.
+   */
+  constructor(
+    private readonly cfg: Config,
+    private readonly mcpClient: () => { name: string; version: string } | undefined = () => undefined,
+  ) {}
 
   private userAgent(): string {
-    return `${this.cfg.serverName}/${this.cfg.serverVersion}`
+    const server = `${this.cfg.serverName}/${this.cfg.serverVersion}`
+    const client = this.mcpClient()
+    const name = userAgentToken(client?.name ?? '', 64).replace(/^mcp-/i, '')
+    if (!name) return server
+    const version = userAgentToken(client?.version ?? '', 32)
+    // Venice records only the first product of the User-Agent with each request, so the client goes first,
+    // with an mcp- prefix that keeps these requests apart from the client's own API traffic.
+    return `mcp-${name}${version ? `/${version}` : ''} ${server}`
   }
 
   async request<T = unknown>(path: string, init: RequestInitJSON = {}): Promise<T> {
@@ -413,6 +427,11 @@ async function readBoundedResponseBuffer(
     reader.releaseLock()
   }
   return Buffer.concat(chunks, total)
+}
+
+/** Reduce client-supplied text to an HTTP token, so it can't break or add to the header. */
+function userAgentToken(text: string, maxLength: number): string {
+  return text.replace(/[^!#$%&'*+\-.^_`|~0-9A-Za-z]+/g, '-').slice(0, maxLength).replace(/^-+|-+$/g, '')
 }
 
 /** Parse a 2xx JSON body. Empty bodies stay `{}`; anything else unparseable is an error, never a silent `{}`. */

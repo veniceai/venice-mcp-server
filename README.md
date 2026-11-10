@@ -469,7 +469,7 @@ Not in this server. You sign the EVM SIWE or Solana SIWX message and any USDC to
 $5 USD (anti-dust). Minimum balance to call inference is $0.10. Default suggested top-up is $10.
 
 **Privacy guarantees?**
-No email, phone, or KYC is required on the SIWX path. `venice_tee_attestation` and `venice_tee_signature` return hardware evidence for the caller to verify. This server does not encrypt chat.
+No email, phone, or KYC is required on the SIWX path. `venice_tee_attestation` and `venice_tee_signature` return hardware evidence for the caller to verify. This server does not encrypt chat. Its requests to Venice name the MCP client and this server in the User-Agent, for example `mcp-claude-code/2.0.14 @veniceai/mcp-server/0.3.1`, so Venice can see which agents use it.
 
 **DIEM staking?**
 If your wallet is linked to a Venice user with DIEM staked, calls consume from the staking balance instead of USDC credits — no top-up needed.
