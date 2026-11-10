@@ -27,6 +27,7 @@
  *      - x402/balance, x402/transactions
  */
 import { randomUUID } from 'node:crypto'
+import { stat } from 'node:fs/promises'
 import { z } from 'zod'
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import type { VeniceClient } from '../venice-client.js'
@@ -467,6 +468,67 @@ class QueueRequestStore {
   private prune(now = Date.now()): void {
     for (const [queueId, entry] of this.records) {
       if (entry.expiresAt <= now) this.records.delete(queueId)
+    }
+  }
+}
+
+/** The VENICE_MEDIA_DIR path a status result saved, if it saved one. */
+function savedPath(result: ToolResult): string | undefined {
+  const path = (result.structuredContent as { path?: unknown } | undefined)?.path
+  return typeof path === 'string' ? path : undefined
+}
+
+/**
+ * Status results by queue_id, so a job is retrieved and saved to VENICE_MEDIA_DIR
+ * once. Concurrent calls share one retrieve, and later calls get the saved file
+ * while it is still on disk.
+ */
+class SavedJobResults {
+  private readonly entries = new Map<string, { result: Promise<ToolResult>; expiresAt: number }>()
+
+  constructor(private readonly completeTool: string) {}
+
+  async run(queueId: string, deleteRequested: boolean, retrieve: () => Promise<ToolResult>): Promise<ToolResult> {
+    const now = Date.now()
+    for (const [id, entry] of this.entries) {
+      if (entry.expiresAt <= now) this.entries.delete(id)
+    }
+    const earlier = this.entries.get(queueId)
+    if (earlier) {
+      const result = await earlier.result
+      const path = savedPath(result)
+      if (path && await stat(path).then(() => true, () => false)) return this.reused(result, deleteRequested)
+      if (!path && !result.isError) return result
+      if (this.entries.get(queueId) === earlier) this.entries.delete(queueId)
+    }
+    while (this.entries.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
+      const oldest = this.entries.keys().next()
+      if (oldest.done) break
+      this.entries.delete(oldest.value)
+    }
+    const entry = { result: retrieve(), expiresAt: now + QUEUE_DOWNLOAD_URL_TTL_MS }
+    this.entries.set(queueId, entry)
+    const forget = () => {
+      if (this.entries.get(queueId) === entry) this.entries.delete(queueId)
+    }
+    try {
+      const result = await entry.result
+      if (!savedPath(result)) forget()
+      return result
+    } catch (err) {
+      forget()
+      throw err
+    }
+  }
+
+  private reused(result: ToolResult, deleteRequested: boolean): ToolResult {
+    const deleted = (result.structuredContent as { server_media_deleted?: unknown }).server_media_deleted === true
+    const cleanupNote = deleteRequested && !deleted
+      ? ` Server-side media was not deleted; call ${this.completeTool} with the same queue_id and model to delete it.`
+      : ''
+    return {
+      ...result,
+      content: [...result.content, { type: 'text', text: `Already saved by an earlier call, so nothing was downloaded again.${cleanupNote}` }],
     }
   }
 }
@@ -1090,6 +1152,8 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
   const asrResults = new AsrResultStore()
   const queueDownloadUrls = new QueueDownloadUrlStore()
   const queueRequests = new QueueRequestStore()
+  const videoResults = new SavedJobResults('venice_video_complete')
+  const musicResults = new SavedJobResults('venice_music_complete')
   const store = cfg.mediaDir ? new MediaStore(cfg.mediaDir) : undefined
   const sleep = opts.sleep ?? defaultSleep
   const localInput = (label: string) => ({ label, maxBytes: cfg.maxLocalInputBytes, allowLocal: cfg.localFiles })
@@ -1731,7 +1795,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           'Delete server-side media after an embedded MP4 has been buffered, before the tool result returns to the client. For download_url results it runs only once the file is saved to VENICE_MEDIA_DIR; otherwise download first, then call venice_video_complete.',
         ),
       },
-      handler: async (args, ctx) => {
+      handler: (args, ctx) => videoResults.run(args.queue_id, args.delete_media_on_completion === true, async () => {
         try {
           const { download_url: queueDownloadUrl, ...retrieveArgs } = args
           const response = await client.postMixed<{
@@ -1915,7 +1979,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           }
           return fail(formatToolError(err))
         }
-      },
+      }),
     },
 
     {
@@ -2192,7 +2256,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           'Delete server-side media after embedded audio has been buffered, before the tool result returns to the client. For download_url results it runs only once the file is saved to VENICE_MEDIA_DIR; otherwise download first, then call venice_music_complete.',
         ),
       },
-      handler: async (args, ctx) => {
+      handler: (args, ctx) => musicResults.run(args.queue_id, args.delete_media_on_completion === true, async () => {
         try {
           const response = await client.postMixed<{
             status?: 'PROCESSING' | 'COMPLETED'
@@ -2411,7 +2475,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
           }
           return fail(formatToolError(err))
         }
-      },
+      }),
     },
 
     {

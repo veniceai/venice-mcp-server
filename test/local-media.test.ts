@@ -586,6 +586,118 @@ describe('video flow with VENICE_MEDIA_DIR', () => {
     assert.ok(fileLink(r))
   })
 
+  describe('repeat calls for a saved job', () => {
+    const mp4 = () => ({ kind: 'binary', buffer: Buffer.from('done'), contentType: 'video/mp4' })
+    const savedVideos = async (mediaDir: string) => (await readdir(join(mediaDir, 'video'))).filter((f) => f.endsWith('.mp4'))
+    const lastText = (r: ToolResult) => (r.content.at(-1) as { text: string }).text
+
+    it('venice_video_status returns the saved file without retrieving or saving it again', async () => {
+      const { get, stub, mediaDir } = setup({ '/v1/video/retrieve': mp4 })
+      const first = await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)
+      const again = await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)
+      assert.equal(stub.callsTo('/v1/video/retrieve').length, 1)
+      assert.equal(structured<{ path: string }>(again).path, structured<{ path: string }>(first).path)
+      assert.match(lastText(again), /^Already saved by an earlier call, so nothing was downloaded again\.$/)
+      assert.equal((await savedVideos(mediaDir)).length, 1)
+    })
+
+    it('concurrent status and wait calls share one retrieve', async () => {
+      let release!: () => void
+      const ready = new Promise<void>((resolve) => { release = resolve })
+      const { get, stub, mediaDir } = setup({ '/v1/video/retrieve': async () => { await ready; return mp4() } })
+      const calls = [
+        get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never),
+        get('venice_video_wait').handler({ queue_id: 'q', model: 'm' } as never),
+      ]
+      release()
+      const [status, wait] = await Promise.all(calls)
+      assert.equal(stub.callsTo('/v1/video/retrieve').length, 1)
+      assert.equal(structured<{ path: string }>(wait).path, structured<{ path: string }>(status).path)
+      assert.equal((await savedVideos(mediaDir)).length, 1)
+    })
+
+    it('concurrent calls share a PROCESSING result, and the next call retrieves again', async () => {
+      let release!: () => void
+      const ready = new Promise<void>((resolve) => { release = resolve })
+      const { get, stub } = setup({ '/v1/video/retrieve': async () => { await ready; return { status: 'PROCESSING' } } })
+      const calls = [1, 2].map(() => get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never))
+      release()
+      for (const r of await Promise.all(calls)) assert.equal(structured<{ status: string }>(r).status, 'PROCESSING')
+      assert.equal(stub.callsTo('/v1/video/retrieve').length, 1)
+      await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)
+      assert.equal(stub.callsTo('/v1/video/retrieve').length, 2)
+    })
+
+    it('forgets a saved job after 24 hours', async (t) => {
+      t.mock.timers.enable({ apis: ['Date'] })
+      const { get, stub } = setup({ '/v1/video/retrieve': mp4 })
+      await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)
+      t.mock.timers.tick(24 * 60 * 60 * 1000)
+      await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)
+      assert.equal(stub.callsTo('/v1/video/retrieve').length, 2)
+    })
+
+    it('forgets the oldest saved job instead of growing forever', async () => {
+      const { get, stub } = setup({ '/v1/video/retrieve': mp4 })
+      for (let i = 0; i <= 1000; i += 1) {
+        await get('venice_video_status').handler({ queue_id: `q${i}`, model: 'm' } as never)
+      }
+      await get('venice_video_status').handler({ queue_id: 'q0', model: 'm' } as never)
+      await get('venice_video_status').handler({ queue_id: 'q1000', model: 'm' } as never)
+      assert.equal(stub.callsTo('/v1/video/retrieve').length, 1002)
+    })
+
+    it('downloads again when the saved file was removed', async () => {
+      const { get, stub } = setup({ '/v1/video/retrieve': mp4 })
+      const first = await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)
+      await rm(structured<{ path: string }>(first).path)
+      const again = await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)
+      assert.equal(stub.callsTo('/v1/video/retrieve').length, 2)
+      await stat(structured<{ path: string }>(again).path)
+    })
+
+    it('retries a job whose earlier status call failed', async () => {
+      let calls = 0
+      const { get } = setup({
+        '/v1/video/retrieve': () => {
+          calls += 1
+          if (calls === 1) throw new Error('boom')
+          return mp4()
+        },
+      })
+      assert.equal((await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)).isError, true)
+      const again = await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never)
+      assert.equal(calls, 2)
+      assert.ok(fileLink(again))
+    })
+
+    it('points a deletion request after a wait to venice_video_complete instead of deleting', async () => {
+      const { get, stub } = setup({ '/v1/video/retrieve': mp4 })
+      await get('venice_video_wait').handler({ queue_id: 'q', model: 'm' } as never)
+      const r = await get('venice_video_status').handler({ queue_id: 'q', model: 'm', delete_media_on_completion: true } as never)
+      assert.equal(structured<{ server_media_deleted: boolean }>(r).server_media_deleted, false)
+      assert.match(lastText(r), /Server-side media was not deleted; call venice_video_complete with the same queue_id and model/)
+      assert.equal(stub.callsTo('/v1/video/complete').length, 0)
+    })
+
+    it('still returns the saved file after the first call deleted the server-side media', async () => {
+      let deleted = false
+      const { get, stub } = setup({
+        '/v1/video/retrieve': () => {
+          if (deleted) throw new Error('queue_id not found')
+          return mp4()
+        },
+        '/v1/video/complete': () => { deleted = true; return { success: true } },
+      })
+      await get('venice_video_status').handler({ queue_id: 'q', model: 'm', delete_media_on_completion: true } as never)
+      const again = await get('venice_video_status').handler({ queue_id: 'q', model: 'm', delete_media_on_completion: true } as never)
+      assert.equal(again.isError, undefined)
+      assert.equal(structured<{ server_media_deleted: boolean }>(again).server_media_deleted, true)
+      assert.doesNotMatch(lastText(again), /not deleted/)
+      assert.equal(stub.callsTo('/v1/video/complete').length, 1)
+    })
+  })
+
   it('venice_video_wait never asks Venice to delete media, even if a caller passes the old flag', async () => {
     const { get, stub } = setup({
       '/v1/video/retrieve': () => ({ kind: 'binary', buffer: Buffer.from('done'), contentType: 'video/mp4' }),
@@ -693,6 +805,16 @@ describe('music flow with VENICE_MEDIA_DIR', () => {
     const ac = new AbortController()
     await get('venice_music_status').handler({ queue_id: 'q', model: 'm' } as never, { signal: ac.signal })
     assert.equal(stub.callsTo('/v1/audio/retrieve')[0].signal, ac.signal)
+  })
+
+  it('venice_music_status returns the saved file on a repeat call without retrieving it again', async () => {
+    const { get, stub } = setup({
+      '/v1/audio/retrieve': () => ({ kind: 'binary', buffer: Buffer.from('RIFF-wav-bytes'), contentType: 'audio/wav' }),
+    })
+    const first = await get('venice_music_status').handler({ queue_id: 'q', model: 'm' } as never)
+    const again = await get('venice_music_status').handler({ queue_id: 'q', model: 'm' } as never)
+    assert.equal(stub.callsTo('/v1/audio/retrieve').length, 1)
+    assert.equal(structured<{ path: string }>(again).path, structured<{ path: string }>(first).path)
   })
 
   it('venice_music_wait returns the saved file once the job completes', async () => {
