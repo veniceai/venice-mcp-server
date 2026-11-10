@@ -18,6 +18,8 @@ export interface StubCall {
   timeoutMs?: number
   /** Response byte cap requested by the tool, if any. */
   maxBytes?: number
+  /** Caller cancellation signal passed to postMixed. */
+  signal?: AbortSignal
 }
 
 export type StubHandler = (call: StubCall) => unknown | Promise<unknown>
@@ -186,11 +188,11 @@ export class StubClient {
       headers: {},
     }
   }
-  async postMixed<T>(path: string, json: unknown, opts: { maxBytes?: number } = {}): Promise<
+  async postMixed<T>(path: string, json: unknown, opts: { maxBytes?: number; signal?: AbortSignal } = {}): Promise<
     | { kind: 'json'; data: T; status: number; contentType: string; headers: Record<string, string> }
     | { kind: 'binary'; buffer: Buffer; status: number; contentType: string; headers: Record<string, string> }
   > {
-    const call: StubCall = { method: 'POST', path, body: json, binary: true, maxBytes: opts.maxBytes }
+    const call: StubCall = { method: 'POST', path, body: json, binary: true, maxBytes: opts.maxBytes, signal: opts.signal }
     const data = await this.dispatch<T | {
       kind: 'json'
       data: T

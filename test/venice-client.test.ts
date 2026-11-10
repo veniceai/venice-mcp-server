@@ -876,6 +876,38 @@ describe('VeniceClient', () => {
     )
   })
 
+  it('postMixed stops a stalled request when the caller cancels', { timeout: 5_000 }, async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 60_000 }))
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 20)
+    await assert.rejects(
+      () => c.postMixed('/v1/video/stalled-body', {}, { maxBytes: 1024, signal: ac.signal }),
+      (err: unknown) => {
+        assert.equal(err instanceof VeniceUpstreamError, false)
+        assert.equal((err as Error).message, 'Request cancelled by the client.')
+        return true
+      },
+    )
+  })
+
+  it('postMixed does not send a request the caller already cancelled', async () => {
+    const c = new VeniceClient(makeCfg())
+    const ac = new AbortController()
+    ac.abort()
+    await assert.rejects(
+      () => c.postMixed('/v1/video/processing', {}, { signal: ac.signal }),
+      (err: unknown) => (err as Error).message === 'Request cancelled by the client.',
+    )
+  })
+
+  it('postMixed still times out when the caller passes a signal but does not cancel', async () => {
+    const c = new VeniceClient(makeCfg({ timeoutMs: 30 }))
+    await assert.rejects(
+      () => c.postMixed('/v1/video/stalled-body', {}, { maxBytes: 1024, signal: new AbortController().signal }),
+      (err: unknown) => err instanceof VeniceUpstreamError && err.status === 504,
+    )
+  })
+
   it('rejects an SSE response without a terminal data: [DONE] event', async () => {
     const c = new VeniceClient(makeCfg())
     await assert.rejects(

@@ -328,6 +328,7 @@ async function pollUntilDone(
   const elapsed = () => Math.max(Date.now() - start, sleptMs)
   for (;;) {
     const result = await attempt()
+    if (opts.signal?.aborted && result.isError) return { result, outcome: 'cancelled', elapsedMs: elapsed() }
     const status = (result.structuredContent as { status?: string } | undefined)?.status
     if (result.isError || status !== 'PROCESSING') {
       return { result, outcome: 'done', elapsedMs: elapsed() }
@@ -1744,7 +1745,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
             // Buffer and validate the MP4 before cleanup, keeping oversized responses retryable.
             // Requested cleanup then runs before the tool result returns to the client.
             delete_media_on_completion: false,
-          }, { maxBytes: cfg.maxVideoResponseBytes })
+          }, { maxBytes: cfg.maxVideoResponseBytes, signal: ctx?.signal })
           const cleanupAfterSuccess = async (successNote: string) => {
             if (!args.delete_media_on_completion) {
               return { deleted: false, cleanupNote: '' }
@@ -2207,7 +2208,7 @@ export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOp
               // Requested cleanup then runs before the tool result returns to the client.
               delete_media_on_completion: false,
             },
-            { maxBytes: cfg.maxAudioResponseBytes },
+            { maxBytes: cfg.maxAudioResponseBytes, signal: ctx?.signal },
           )
           const cleanupAfterSuccess = async (successNote: string) => {
             if (!args.delete_media_on_completion) {

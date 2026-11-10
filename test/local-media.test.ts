@@ -552,6 +552,40 @@ describe('video flow with VENICE_MEDIA_DIR', () => {
     assert.equal(s.queue_id, 'q')
   })
 
+  it('venice_video_status hands the client cancel signal to the retrieve request', async () => {
+    const { get, stub } = setup({ '/v1/video/retrieve': () => ({ status: 'PROCESSING' }) })
+    const ac = new AbortController()
+    await get('venice_video_status').handler({ queue_id: 'q', model: 'm' } as never, { signal: ac.signal })
+    assert.equal(stub.callsTo('/v1/video/retrieve')[0].signal, ac.signal)
+  })
+
+  it('venice_video_wait reports cancelled when the cancel interrupts a retrieve', async () => {
+    const ac = new AbortController()
+    const { get, sleeps } = setup({
+      '/v1/video/retrieve': () => { ac.abort(); throw new Error('Request cancelled by the client.') },
+    })
+    const r = await get('venice_video_wait').handler({ queue_id: 'q', model: 'm' } as never, { signal: ac.signal })
+    assert.equal(r.isError, undefined)
+    const s = structured<{ status: string; cancelled: boolean; queue_id: string }>(r)
+    assert.equal(s.status, 'PROCESSING')
+    assert.equal(s.cancelled, true)
+    assert.equal(s.queue_id, 'q')
+    assert.deepEqual(sleeps, [])
+  })
+
+  it('venice_video_wait still returns the saved file when the job finishes as the client cancels', async () => {
+    const ac = new AbortController()
+    const { get } = setup({
+      '/v1/video/retrieve': () => {
+        ac.abort()
+        return { kind: 'binary', buffer: Buffer.from('done'), contentType: 'video/mp4' }
+      },
+    })
+    const r = await get('venice_video_wait').handler({ queue_id: 'q', model: 'm' } as never, { signal: ac.signal })
+    assert.equal(structured<{ status: string }>(r).status, 'COMPLETED')
+    assert.ok(fileLink(r))
+  })
+
   it('venice_video_wait never asks Venice to delete media, even if a caller passes the old flag', async () => {
     const { get, stub } = setup({
       '/v1/video/retrieve': () => ({ kind: 'binary', buffer: Buffer.from('done'), contentType: 'video/mp4' }),
@@ -653,6 +687,13 @@ describe('music flow with VENICE_MEDIA_DIR', () => {
       await assert.rejects(readdir(join(mediaDir, 'music')))
     })
   }
+
+  it('venice_music_status hands the client cancel signal to the retrieve request', async () => {
+    const { get, stub } = setup({ '/v1/audio/retrieve': () => ({ status: 'PROCESSING' }) })
+    const ac = new AbortController()
+    await get('venice_music_status').handler({ queue_id: 'q', model: 'm' } as never, { signal: ac.signal })
+    assert.equal(stub.callsTo('/v1/audio/retrieve')[0].signal, ac.signal)
+  })
 
   it('venice_music_wait returns the saved file once the job completes', async () => {
     let calls = 0

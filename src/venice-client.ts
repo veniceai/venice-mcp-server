@@ -50,6 +50,7 @@ const MAX_MIXED_JSON_RESPONSE_BYTES = 1024 * 1024
 const MAX_UPSTREAM_ERROR_RESPONSE_BYTES = 64 * 1024
 // 402 bodies carry the top-up and auth instructions agents need, so they get the larger JSON budget.
 const MAX_PAYMENT_REQUIRED_RESPONSE_BYTES = MAX_MIXED_JSON_RESPONSE_BYTES
+const CANCELLED_MESSAGE = 'Request cancelled by the client.'
 
 export class VeniceJsonResponseTooLargeError extends Error {
   constructor(
@@ -314,7 +315,7 @@ export class VeniceClient {
   async postBinary(
     path: string,
     init: RequestInitJSON | { form: FormData },
-    opts: { timeoutMs?: number; maxBytes?: number; jsonMaxBytes?: number } = {},
+    opts: { timeoutMs?: number; maxBytes?: number; jsonMaxBytes?: number; signal?: AbortSignal } = {},
   ): Promise<VeniceBinaryResponse> {
     const url = `${this.cfg.baseUrl}${path.startsWith('/') ? path : `/${path}`}`
     const headers: Record<string, string> = {
@@ -335,7 +336,10 @@ export class VeniceClient {
     const ac = new AbortController()
     const timeoutMs = opts.timeoutMs ?? this.cfg.timeoutMs
     const timeout = setTimeout(() => ac.abort(), timeoutMs)
+    const cancel = () => ac.abort()
+    opts.signal?.addEventListener('abort', cancel, { once: true })
     try {
+      if (opts.signal?.aborted) throw new Error(CANCELLED_MESSAGE)
       const res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal, redirect: 'manual' })
       if (!res.ok) throw await upstreamError(res, path, errorBodyLimit(res.status))
 
@@ -358,9 +362,11 @@ export class VeniceClient {
         headers: responseHeaders(res),
       }
     } catch (err) {
+      if (opts.signal?.aborted) throw new Error(CANCELLED_MESSAGE)
       throw classifyRequestError(err, ac.signal, timeoutMs)
     } finally {
       clearTimeout(timeout)
+      opts.signal?.removeEventListener('abort', cancel)
     }
   }
 
@@ -371,7 +377,7 @@ export class VeniceClient {
   async postMixed<T = unknown>(
     path: string,
     json: unknown,
-    opts: { timeoutMs?: number; maxBytes?: number } = {},
+    opts: { timeoutMs?: number; maxBytes?: number; signal?: AbortSignal } = {},
   ): Promise<VeniceMixedResponse<T>> {
     const response = await this.postBinary(
       path,
