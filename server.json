@@ -1,0 +1,33 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.veniceai/venice-mcp-server",
+  "title": "Venice AI",
+  "description": "Images, video, music, speech and private chat from Venice AI's models, on one API key.",
+  "websiteUrl": "https://docs.venice.ai/guides/integrations/venice-mcp",
+  "repository": {
+    "url": "https://github.com/veniceai/venice-mcp-server",
+    "source": "github",
+    "id": "1149189319"
+  },
+  "version": "0.3.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@veniceai/mcp-server",
+      "version": "0.3.2",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "VENICE_API_KEY",
+          "description": "Venice API key from venice.ai/settings/api. Use an INFERENCE key with a spend limit.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

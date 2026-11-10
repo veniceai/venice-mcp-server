@@ -7,7 +7,7 @@ VENICE_API_KEY='<your-venice-api-key>' \
 VENICE_MCP_AUTH_TOKEN='<choose-a-long-random-token>' \
 VENICE_MCP_HOST=0.0.0.0 \
 PORT=3333 \
-npx -y @veniceai/mcp-server@0.3.1 --http
+npx -y @veniceai/mcp-server@0.3.2 --http
 ```
 
 Configure Open WebUI's server-side MCP connection with URL `http://localhost:3333/mcp` and header `Authorization: Bearer <choose-a-long-random-token>`. If Open WebUI runs in a container or on another machine, replace `localhost` with an address reachable from that environment and allow its authority below.
