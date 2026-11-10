@@ -432,10 +432,10 @@ describe('integration — JSON-RPC over stdio with mock Venice', () => {
     assert.ok(uris.includes('venice://voices'))
   })
 
-  it('lists 3 prompts', async () => {
+  it('lists 9 prompts', async () => {
     const r = (await rpc.request('prompts/list')) as RpcResult
     const list = (r.result as { prompts: Array<{ name: string }> }).prompts
-    assert.equal(list.length, 3)
+    assert.equal(list.length, 9)
   })
 
   it('venice_chat tool call hits Venice API and returns content', async () => {
