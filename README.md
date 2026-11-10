@@ -33,7 +33,7 @@ See the [API key guide](https://docs.venice.ai/guides/getting-started/generating
 
 ### 3. Restart your MCP host
 
-That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 39 more Venice tools.
+That's it. Type a prompt — your agent now has chat, image, video, music, TTS, ASR, and 41 more Venice tools.
 
 
 ## What you get
