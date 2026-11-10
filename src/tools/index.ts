@@ -27,6 +27,7 @@
  *      - x402/balance, x402/transactions
  */
 import { randomUUID } from 'node:crypto'
+import { stat } from 'node:fs/promises'
 import { z } from 'zod'
 import type { ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import type { VeniceClient } from '../venice-client.js'
@@ -47,6 +48,12 @@ import {
   type AsrUpstreamBody,
 } from '../format.js'
 import { fetchUploadSource } from './remote-fetch.js'
+import { readBoundedBuffer, ResponseTooLargeError } from '../bounded-read.js'
+import { MediaStore, type MediaKind } from '../media/store.js'
+import { readLocalUploadSource, resolveMediaInput, resolveMediaInputs } from '../media/inputs.js'
+import { dataUrlVideoDurationSeconds } from '../media/duration.js'
+import type { Toolset } from '../config.js'
+
 /**
  * Sniff the MIME type of a base64-encoded image from its magic bytes.
  * Falls back to 'image/png' if the format is unrecognised.
@@ -100,14 +107,258 @@ export interface ToolResult {
   structuredContent?: Record<string, unknown>
 }
 
+export interface ToolCallContext {
+  /** Aborted when the MCP client cancels the request or disconnects. */
+  signal?: AbortSignal
+}
+
 export interface ToolDef<S extends z.ZodRawShape = z.ZodRawShape> {
   name: string
   title: string
   description: string
   annotations?: ToolAnnotations
   inputSchema: S
-  handler: (args: z.infer<z.ZodObject<S>>) => Promise<ToolResult>
+  handler: (args: z.infer<z.ZodObject<S>>, ctx?: ToolCallContext) => Promise<ToolResult>
 }
+
+const TOOL_PREFIX_TOOLSET: Array<[prefix: string, toolset: Toolset]> = [
+  ['venice_chat', 'chat'],
+  ['venice_responses', 'chat'],
+  ['venice_embeddings', 'chat'],
+  ['venice_list_characters', 'chat'],
+  ['venice_get_character', 'chat'],
+  ['venice_character_reviews', 'chat'],
+  ['venice_tee_', 'chat'],
+  ['venice_image_styles', 'catalog'],
+  ['venice_image_', 'image'],
+  ['venice_video_quote', 'catalog'],
+  ['venice_video_', 'video'],
+  ['venice_audio_quote', 'catalog'],
+  ['venice_tts', 'audio'],
+  ['venice_asr', 'audio'],
+  ['venice_voice_clone', 'audio'],
+  ['venice_music_', 'music'],
+  ['venice_web_', 'augment'],
+  ['venice_text_parser', 'augment'],
+  ['venice_list_models', 'catalog'],
+  ['venice_model_', 'catalog'],
+  ['venice_crypto_', 'crypto'],
+  ['venice_x402_', 'x402'],
+  ['venice_billing_', 'account'],
+  ['venice_list_api_keys', 'account'],
+  ['venice_get_api_key', 'account'],
+  ['venice_api_key_', 'account'],
+  ['venice_web3_key_', 'account'],
+]
+
+export function toolsetFor(name: string): Toolset {
+  const match = TOOL_PREFIX_TOOLSET.find(([prefix]) => name.startsWith(prefix))
+  if (!match) throw new Error(`No toolset mapping for tool ${name}`)
+  return match[1]
+}
+
+interface MediaResultInput {
+  kind: MediaKind
+  buffer: Buffer
+  mimeType: string
+  label?: string
+  metadata: Record<string, unknown>
+  /** Inline content returned when no media dir is configured. */
+  inline: () => ToolContent
+  /** Small preview attached alongside the file link (images only). */
+  preview?: ToolContent
+  /**
+   * Runs once the bytes are safely on disk (or buffered, when no store is
+   * configured). Used for server-side cleanup that must not precede persistence.
+   */
+  afterSave?: () => Promise<{ deleted: boolean; cleanupNote: string }>
+  extraText?: string
+  structured?: Record<string, unknown>
+}
+
+/**
+ * Either persist the media to VENICE_MEDIA_DIR and return a file link, or
+ * fall back to the tool's inline representation.
+ */
+async function mediaResult(store: MediaStore | undefined, input: MediaResultInput): Promise<ToolResult> {
+  if (!store) {
+    const after = input.afterSave ? await input.afterSave() : undefined
+    const note = `${input.extraText ?? ''}${after?.cleanupNote ?? ''}`.trim()
+    return {
+      content: [
+        input.inline(),
+        ...(note ? [{ type: 'text' as const, text: note }] : []),
+      ],
+      structuredContent: {
+        ...input.structured,
+        mime_type: input.mimeType,
+        byte_length: input.buffer.length,
+        ...(after ? { server_media_deleted: after.deleted } : {}),
+      },
+    }
+  }
+  const saved = await store.save({
+    kind: input.kind,
+    buffer: input.buffer,
+    mimeType: input.mimeType,
+    label: input.label,
+    metadata: input.metadata,
+  })
+  const after = input.afterSave ? await input.afterSave() : undefined
+  const note = `${input.extraText ? ` ${input.extraText}` : ''}${after?.cleanupNote ?? ''}`
+  return {
+    content: [
+      { type: 'resource_link', uri: saved.fileUrl, name: `${input.kind}-file`, mimeType: saved.mimeType },
+      ...(input.preview ? [input.preview] : []),
+      { type: 'text', text: `Saved ${input.kind} to ${saved.path} (${saved.bytes} bytes, ${saved.mimeType}). Metadata: ${saved.sidecarPath}.${note}` },
+    ],
+    structuredContent: {
+      ...input.structured,
+      path: saved.path,
+      file_url: saved.fileUrl,
+      sidecar_path: saved.sidecarPath,
+      mime_type: saved.mimeType,
+      byte_length: saved.bytes,
+      representation: 'local file',
+      ...(after ? { server_media_deleted: after.deleted } : {}),
+    },
+  }
+}
+
+const MAX_DOWNLOAD_REDIRECTS = 3
+
+/** MIME type implied by an untyped body's magic bytes, or undefined if it isn't the expected media kind. */
+function sniffMediaMime(buffer: Buffer, kind: 'video' | 'audio'): string | undefined {
+  const ascii = (start: number, end: number) => buffer.subarray(start, end).toString('ascii')
+  const isoBmff = buffer.length >= 12 && ascii(4, 8) === 'ftyp'
+  if (kind === 'video') return isoBmff ? 'video/mp4' : undefined
+  if (isoBmff) return 'audio/mp4'
+  if (ascii(0, 3) === 'ID3' || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)) return 'audio/mpeg'
+  if (ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WAVE') return 'audio/wav'
+  if (ascii(0, 4) === 'fLaC') return 'audio/flac'
+  if (ascii(0, 4) === 'OggS') return 'audio/ogg'
+  return undefined
+}
+
+/**
+ * Download completed media from a Venice download_url. Throws, before
+ * anything is persisted or cleaned up, unless the body is non-empty media of
+ * the expected kind served from an https Venice host (redirects included).
+ */
+async function downloadVeniceMedia(
+  url: string,
+  opts: { kind: 'video' | 'audio'; statusTool: string; maxBytes: number; timeoutMs: number; signal?: AbortSignal },
+): Promise<{ buffer: Buffer; contentType: string }> {
+  const label = `completed ${opts.kind === 'video' ? 'video' : 'music'}`
+  const notDeleted = `The queued media was not deleted; retry ${opts.statusTool} with the same queue_id.`
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), opts.timeoutMs)
+  const onAbort = () => ac.abort()
+  opts.signal?.addEventListener('abort', onAbort, { once: true })
+  try {
+    const initial = trustedQueueDownloadUrl(url)
+    if (!initial) throw new Error(`Refusing to download ${label} from ${url}: only https venice.ai hosts are allowed. ${notDeleted}`)
+    let current: string = initial
+    for (let redirects = 0; ; redirects += 1) {
+      const res = await fetch(current, { redirect: 'manual', signal: ac.signal })
+      if (res.status >= 300 && res.status < 400) {
+        await res.body?.cancel()
+        const location = res.headers.get('location')
+        const next: string | undefined = location ? trustedQueueDownloadUrl(new URL(location, current).href) : undefined
+        if (!next) {
+          throw new Error(`Refusing to follow ${label} redirect to ${location ?? '(missing Location)'}: only https venice.ai hosts are allowed. ${notDeleted}`)
+        }
+        if (redirects >= MAX_DOWNLOAD_REDIRECTS) throw new Error(`Too many redirects downloading ${label}. ${notDeleted}`)
+        current = next
+        continue
+      }
+      if (!res.ok) throw new Error(`Download of ${label} failed: HTTP ${res.status}. ${notDeleted}`)
+      const buffer = await readBoundedBuffer(res, opts.maxBytes, label)
+      if (buffer.length === 0) throw new Error(`Venice returned an empty ${label} download. ${notDeleted}`)
+      const header = res.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? ''
+      const prefix = `${opts.kind}/`
+      if (header.startsWith(prefix) && header.length > prefix.length) return { buffer, contentType: header }
+      const sniffed = header === '' || header === 'application/octet-stream' || header === 'binary/octet-stream'
+        ? sniffMediaMime(buffer, opts.kind)
+        : undefined
+      if (sniffed) return { buffer, contentType: sniffed }
+      throw new Error(`${label[0].toUpperCase()}${label.slice(1)} download returned unsupported content type ${header || '(missing)'}. ${notDeleted}`)
+    }
+  } catch (err) {
+    if (err instanceof ResponseTooLargeError) throw new VeniceResponseTooLargeError(url, opts.maxBytes)
+    if (ac.signal.aborted && !opts.signal?.aborted) {
+      throw new Error(`Timed out downloading ${label} after ${opts.timeoutMs}ms. ${notDeleted}`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+    opts.signal?.removeEventListener('abort', onAbort)
+  }
+}
+
+const PREVIEW_MAX_BYTES = 256 * 1024
+
+/** Attach a small inline image next to the file link so the host can see the result. */
+function imagePreview(buffer: Buffer, mimeType: string): ToolContent | undefined {
+  if (buffer.length > PREVIEW_MAX_BYTES) return undefined
+  return { type: 'image', data: buffer.toString('base64'), mimeType }
+}
+
+type Sleep = (ms: number, signal?: AbortSignal) => Promise<void>
+
+interface PollOptions {
+  timeoutMs: number
+  initialDelayMs: number
+  maxDelayMs: number
+  sleep: Sleep
+  signal?: AbortSignal
+}
+
+/**
+ * Poll `attempt` until it returns a non-PROCESSING result, the deadline
+ * passes, or the client cancels. Elapsed time counts both request time and
+ * the sleeps we scheduled, so an injected no-op `sleep` still honours the timeout.
+ */
+async function pollUntilDone(
+  attempt: () => Promise<ToolResult>,
+  opts: PollOptions,
+): Promise<{ result: ToolResult; outcome: 'done' | 'timeout' | 'cancelled'; elapsedMs: number }> {
+  const start = Date.now()
+  let sleptMs = 0
+  let delay = opts.initialDelayMs
+  const elapsed = () => Math.max(Date.now() - start, sleptMs)
+  for (;;) {
+    const result = await attempt()
+    if (opts.signal?.aborted && result.isError) return { result, outcome: 'cancelled', elapsedMs: elapsed() }
+    const status = (result.structuredContent as { status?: string } | undefined)?.status
+    if (result.isError || status !== 'PROCESSING') {
+      return { result, outcome: 'done', elapsedMs: elapsed() }
+    }
+    if (opts.signal?.aborted) return { result, outcome: 'cancelled', elapsedMs: elapsed() }
+    if (elapsed() + delay > opts.timeoutMs) {
+      return { result, outcome: 'timeout', elapsedMs: elapsed() }
+    }
+    await opts.sleep(delay, opts.signal)
+    sleptMs += delay
+    if (opts.signal?.aborted) return { result, outcome: 'cancelled', elapsedMs: elapsed() }
+    delay = Math.min(Math.round(delay * 1.5), opts.maxDelayMs)
+  }
+}
+
+const defaultSleep: Sleep = (ms, signal) =>
+  new Promise<void>((resolve) => {
+    if (signal?.aborted) return resolve()
+    const done = () => {
+      clearTimeout(timer)
+      signal?.removeEventListener('abort', done)
+      resolve()
+    }
+    const timer = setTimeout(done, ms)
+    signal?.addEventListener('abort', done, { once: true })
+  })
+
+/** Most MCP clients abandon a tool call after about 60s, so waits default well under that. */
+const DEFAULT_WAIT_SECONDS = 45
 
 const ok = (text: string, structured?: Record<string, unknown>, extraText: string[] = []): ToolResult => ({
   content: [text, ...extraText].map((t) => ({ type: 'text', text: t })),
@@ -176,6 +427,160 @@ class QueueDownloadUrlStore {
       if (entry.expiresAt <= now) this.urls.delete(queueId)
     }
   }
+}
+
+/**
+ * Generation parameters remembered per queue id so the completed file's
+ * sidecar can record what produced it. Same bounds as the download URL cache.
+ */
+interface QueueRequestRecord {
+  tool: string
+  model: string
+  prompt: string
+  params: Record<string, unknown>
+  estimated_cost_usd?: number
+  queued_at: string
+}
+/** Per-server memory of what produced each queued job, so one MCP session never sees another's prompts. */
+class QueueRequestStore {
+  private readonly records = new Map<string, { record: QueueRequestRecord; expiresAt: number }>()
+
+  remember(queueId: string, record: Omit<QueueRequestRecord, 'queued_at'>): void {
+    const now = Date.now()
+    this.prune(now)
+    // Map iteration is insertion-ordered, so the oldest surviving entry is dropped first.
+    while (this.records.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
+      const oldest = this.records.keys().next()
+      if (oldest.done) break
+      this.records.delete(oldest.value)
+    }
+    this.records.set(queueId, {
+      record: { ...record, queued_at: new Date(now).toISOString() },
+      expiresAt: now + QUEUE_DOWNLOAD_URL_TTL_MS,
+    })
+  }
+
+  get(queueId: string): QueueRequestRecord | undefined {
+    this.prune()
+    return this.records.get(queueId)?.record
+  }
+
+  private prune(now = Date.now()): void {
+    for (const [queueId, entry] of this.records) {
+      if (entry.expiresAt <= now) this.records.delete(queueId)
+    }
+  }
+}
+
+/** The VENICE_MEDIA_DIR path a status result saved, if it saved one. */
+function savedPath(result: ToolResult): string | undefined {
+  const path = (result.structuredContent as { path?: unknown } | undefined)?.path
+  return typeof path === 'string' ? path : undefined
+}
+
+/**
+ * Status results by queue_id, so a job is retrieved and saved to VENICE_MEDIA_DIR
+ * once. Concurrent calls share one retrieve, and later calls get the saved file
+ * while it is still on disk.
+ */
+class SavedJobResults {
+  private readonly entries = new Map<string, { result: Promise<ToolResult>; expiresAt: number }>()
+
+  constructor(private readonly completeTool: string) {}
+
+  async run(queueId: string, deleteRequested: boolean, retrieve: () => Promise<ToolResult>): Promise<ToolResult> {
+    const now = Date.now()
+    for (const [id, entry] of this.entries) {
+      if (entry.expiresAt <= now) this.entries.delete(id)
+    }
+    const earlier = this.entries.get(queueId)
+    if (earlier) {
+      const result = await earlier.result
+      const path = savedPath(result)
+      if (path && await stat(path).then(() => true, () => false)) return this.reused(result, deleteRequested)
+      if (!path && !result.isError) return result
+      if (this.entries.get(queueId) === earlier) this.entries.delete(queueId)
+    }
+    while (this.entries.size >= QUEUE_DOWNLOAD_URL_MAX_ENTRIES) {
+      const oldest = this.entries.keys().next()
+      if (oldest.done) break
+      this.entries.delete(oldest.value)
+    }
+    const entry = { result: retrieve(), expiresAt: now + QUEUE_DOWNLOAD_URL_TTL_MS }
+    this.entries.set(queueId, entry)
+    const forget = () => {
+      if (this.entries.get(queueId) === entry) this.entries.delete(queueId)
+    }
+    try {
+      const result = await entry.result
+      if (!savedPath(result)) forget()
+      return result
+    } catch (err) {
+      forget()
+      throw err
+    }
+  }
+
+  private reused(result: ToolResult, deleteRequested: boolean): ToolResult {
+    const deleted = (result.structuredContent as { server_media_deleted?: unknown }).server_media_deleted === true
+    const cleanupNote = deleteRequested && !deleted
+      ? ` Server-side media was not deleted; call ${this.completeTool} with the same queue_id and model to delete it.`
+      : ''
+    return {
+      ...result,
+      content: [...result.content, { type: 'text', text: `Already saved by an earlier call, so nothing was downloaded again.${cleanupNote}` }],
+    }
+  }
+}
+
+/** Replace inline media payloads (data URLs) with placeholders before persisting params to a sidecar. */
+function sanitizeParams(args: Record<string, unknown>): Record<string, unknown> {
+  const clean = (value: unknown): unknown => {
+    if (typeof value === 'string') return value.startsWith('data:') ? `<data url, ${value.length} chars>` : value
+    if (Array.isArray(value)) return value.map(clean)
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .filter(([, v]) => v !== undefined)
+          .map(([k, v]) => [k, clean(v)]),
+      )
+    }
+    return value
+  }
+  return clean(args) as Record<string, unknown>
+}
+
+function quoteValue(resp: unknown): number | undefined {
+  const quote = (resp as { quote?: unknown } | undefined)?.quote
+  return typeof quote === 'number' && Number.isFinite(quote) ? quote : undefined
+}
+
+/** The quote runs before queuing, so a slow quote endpoint must not hold up generation. */
+const QUOTE_TIMEOUT_MS = 5_000
+
+/** Best-effort pre-queue estimate. Quote failures never block generation. */
+async function estimateCost(client: VeniceClient, path: string, body: Record<string, unknown>): Promise<number | undefined> {
+  try {
+    const clean = Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined))
+    return quoteValue(await client.post<unknown>(path, clean, undefined, { timeoutMs: QUOTE_TIMEOUT_MS }))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Total reference-video seconds for a quote, or null when any clip's length is
+ * unknown (remote URLs are not fetched just to quote).
+ */
+function referenceVideoTotalSeconds(urls: string[] | undefined): number | undefined | null {
+  if (!urls?.length) return undefined
+  let total = 0
+  for (const url of urls) {
+    const seconds = dataUrlVideoDurationSeconds(url)
+    if (seconds === undefined) return null
+    total += seconds
+  }
+  return Math.round(total * 100) / 100
 }
 
 /** Caller-supplied queue URLs must be Venice HTTPS hosts. Retrieve URLs come from Venice and are not re-checked here. */
@@ -730,7 +1135,12 @@ const responsesVeniceParametersSchema = z
   .optional()
   .describe('Venice-only options supported by /responses: web search, citations, scraping, system prompt control, characters.')
 
-export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
+export interface BuildToolsOptions {
+  /** Injected for tests; defaults to setTimeout. */
+  sleep?: Sleep
+}
+
+export function buildTools(client: VeniceClient, cfg: Config, opts: BuildToolsOptions = {}): ToolDef[] {
   const nsfwNote = cfg.enableNsfw ? ' Uncensored: NSFW prompts allowed where the model permits.' : ''
   const requireCharacterApiKey = (): ToolResult | undefined =>
     cfg.apiKey
@@ -741,6 +1151,50 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         )
   const asrResults = new AsrResultStore()
   const queueDownloadUrls = new QueueDownloadUrlStore()
+  const queueRequests = new QueueRequestStore()
+  const videoResults = new SavedJobResults('venice_video_complete')
+  const musicResults = new SavedJobResults('venice_music_complete')
+  const store = cfg.mediaDir ? new MediaStore(cfg.mediaDir) : undefined
+  const sleep = opts.sleep ?? defaultSleep
+  const localInput = (label: string) => ({ label, maxBytes: cfg.maxLocalInputBytes, allowLocal: cfg.localFiles })
+  const mediaDirNote = store
+    ? ` Output is saved under ${store.rootDir} and returned as a file:// link with a JSON sidecar; import that path into your editor.`
+    : ''
+  const localPathNote = cfg.localFiles
+    ? ' Local absolute file paths are accepted anywhere a URL is (they are inlined as data: URLs).'
+    : ''
+
+  /**
+   * Poll a status tool for a wait tool. Never requests server-side deletion:
+   * a client that already gave up could not receive media deleted on its behalf.
+   */
+  const waitForCompletion = async (
+    statusTool: 'venice_video_status' | 'venice_music_status',
+    statusArgs: Record<string, unknown>,
+    timeoutSeconds: number | undefined,
+    ctx: ToolCallContext | undefined,
+  ): Promise<ToolResult> => {
+    const status = toolByName(statusTool)
+    const waitTool = statusTool.replace('_status', '_wait')
+    const { result, outcome, elapsedMs } = await pollUntilDone(
+      () => status.handler({ ...statusArgs, delete_media_on_completion: false } as never, ctx),
+      { timeoutMs: (timeoutSeconds ?? DEFAULT_WAIT_SECONDS) * 1000, initialDelayMs: 5_000, maxDelayMs: 30_000, sleep, signal: ctx?.signal },
+    )
+    if (outcome === 'done') return result
+    const waited = Math.round(elapsedMs / 1000)
+    const lead = outcome === 'cancelled' ? `Wait cancelled after ${waited}s.` : `Still PROCESSING after ${waited}s.`
+    return ok(
+      `${lead} The job continues server-side; call ${waitTool} or ${statusTool} again with queue_id=${statusArgs.queue_id}, model=${statusArgs.model}.`,
+      {
+        ...result.structuredContent,
+        status: 'PROCESSING',
+        queue_id: statusArgs.queue_id,
+        model: statusArgs.model,
+        ...(outcome === 'cancelled' ? { cancelled: true } : { timed_out: true }),
+        waited_seconds: waited,
+      },
+    )
+  }
 
   const tools: ToolDef[] = [
     // ========================================================================
@@ -900,7 +1354,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_image_generate',
       title: 'Venice Image Generate',
-      description: `Generate an image. Supports Flux 2 Pro/Max, Lustify SDXL, Anime (WAI), Qwen Image, GPT Image, Nano Banana Pro and others.${nsfwNote}${X402_OK}`,
+      description: `Generate an image. Supports Flux 2 Pro/Max, Lustify SDXL, Anime (WAI), Qwen Image, GPT Image, Nano Banana Pro and others.${nsfwNote}${X402_OK}${mediaDirNote}`,
       inputSchema: {
         prompt: z.string().min(1).max(4000),
         model: z.string().optional().describe(`Defaults to ${cfg.defaultImageModel}.`),
@@ -942,6 +1396,37 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             typeof image === 'string' && image.length > 0
           ) ?? []
           if (images.length > 0) {
+            if (store) {
+              const model = args.model ?? cfg.defaultImageModel
+              const params = sanitizeParams(args)
+              const buffers = images.map((data) => Buffer.from(data, 'base64'))
+              const saved = await Promise.all(buffers.map((buffer, index) => store.save({
+                kind: 'image',
+                buffer,
+                mimeType: detectBase64ImageMime(images[index]),
+                label: args.prompt,
+                metadata: { tool: 'venice_image_generate', model, request_id: resp.id, enhanced_prompt: enhancedPrompt, params },
+              })))
+              const content: ToolContent[] = []
+              saved.forEach((file, index) => {
+                content.push({ type: 'resource_link', uri: file.fileUrl, name: `image-${index + 1}`, mimeType: file.mimeType })
+                const preview = imagePreview(buffers[index], file.mimeType)
+                if (preview) content.push(preview)
+              })
+              const lines = saved.map((file) => `Saved image to ${file.path} (${file.bytes} bytes). Metadata: ${file.sidecarPath}`)
+              if (enhancedPrompt) lines.push(`Enhanced prompt: ${enhancedPrompt}`)
+              content.push({ type: 'text', text: lines.join('\n') })
+              return {
+                content,
+                structuredContent: {
+                  id: resp.id,
+                  count: saved.length,
+                  enhanced_prompt: enhancedPrompt,
+                  representation: 'local file',
+                  files: saved.map((file) => ({ path: file.path, sidecar_path: file.sidecarPath, mime_type: file.mimeType, byte_length: file.bytes })),
+                },
+              }
+            }
             const content: ToolContent[] = images.map((data) => ({
               type: 'image',
               data,
@@ -992,9 +1477,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_image_edit',
       title: 'Venice Image Edit',
-      description: `Edit an image with a prompt. Returns base64 PNG.${X402_OK}`,
+      description: `Edit an image with a prompt.${X402_OK}${localPathNote}${mediaDirNote}`,
       inputSchema: {
-        image_url: z.string().url().describe('URL of the image to edit (will be passed through to the edit endpoint).'),
+        image_url: z.string().min(1).describe('URL, data URL, or local absolute path of the image to edit.'),
         prompt: z.string().min(1).max(32_000),
         model: z.string().optional().describe('Edit model id; defaults to firered-image-edit.'),
         aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "1:1", "16:9", "9:16", "4:5". Supported values vary by model; the API validates.'),
@@ -1005,10 +1490,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
+          const image = await resolveMediaInput(args.image_url, localInput('image_url'))
           const { buffer, contentType, headers } = await client.postBinary('/v1/image/edit', {
             method: 'POST',
             json: {
-              image: args.image_url,
+              image,
               prompt: args.prompt,
               model: args.model,
               aspect_ratio: args.aspect_ratio,
@@ -1019,13 +1505,17 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             },
           }, { maxBytes: cfg.maxImageResponseBytes })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
-          return {
-            content: [
-              { type: 'image', data: buffer.toString('base64'), mimeType: contentType },
-              ...(enhancedPrompt ? [{ type: 'text' as const, text: `Enhanced prompt: ${enhancedPrompt}` }] : []),
-            ],
-            structuredContent: enhancedPrompt ? { enhanced_prompt: enhancedPrompt } : undefined,
-          }
+          return mediaResult(store, {
+            kind: 'image',
+            buffer,
+            mimeType: contentType,
+            label: args.prompt,
+            metadata: { tool: 'venice_image_edit', model: args.model, enhanced_prompt: enhancedPrompt, params: sanitizeParams(args) },
+            inline: () => ({ type: 'image', data: buffer.toString('base64'), mimeType: contentType }),
+            preview: imagePreview(buffer, contentType),
+            extraText: enhancedPrompt ? `Enhanced prompt: ${enhancedPrompt}` : undefined,
+            structured: enhancedPrompt ? { enhanced_prompt: enhancedPrompt } : undefined,
+          })
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
@@ -1036,9 +1526,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_image_multi_edit',
       title: 'Venice Image Multi-Edit',
-      description: `Edit multiple images together with a single prompt (multi-image composition / outpainting). Returns base64 PNG.${X402_OK}`,
+      description: `Edit multiple images together with a single prompt (multi-image composition / outpainting).${X402_OK}${localPathNote}${mediaDirNote}`,
       inputSchema: {
-        image_urls: z.array(z.string().url()).min(1).max(8),
+        image_urls: z.array(z.string().min(1)).min(1).max(8).describe('URLs, data URLs, or local absolute paths.'),
         prompt: z.string().min(1).max(32_000),
         model: z.string().optional(),
         aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "1:1", "16:9", "9:16", "4:5". Supported values vary by model; the API validates.'),
@@ -1051,10 +1541,11 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         try {
           // Multi-edit accepts multipart 'images' files or JSON 'images' array of base64/URL strings.
           // We send JSON with URL strings for simplicity.
+          const images = await resolveMediaInputs(args.image_urls, localInput('image_urls'))
           const { buffer, contentType, headers } = await client.postBinary('/v1/image/multi-edit', {
             method: 'POST',
             json: {
-              images: args.image_urls,
+              images,
               prompt: args.prompt,
               // MultiEditImageRequest names this field modelId and rejects unknown keys.
               ...(args.model !== undefined ? { modelId: args.model } : {}),
@@ -1066,13 +1557,17 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             },
           }, { maxBytes: cfg.maxImageResponseBytes })
           const enhancedPrompt = decodeEnhancedPrompt(headers)
-          return {
-            content: [
-              { type: 'image', data: buffer.toString('base64'), mimeType: contentType },
-              ...(enhancedPrompt ? [{ type: 'text' as const, text: `Enhanced prompt: ${enhancedPrompt}` }] : []),
-            ],
-            structuredContent: enhancedPrompt ? { enhanced_prompt: enhancedPrompt } : undefined,
-          }
+          return mediaResult(store, {
+            kind: 'image',
+            buffer,
+            mimeType: contentType,
+            label: args.prompt,
+            metadata: { tool: 'venice_image_multi_edit', model: args.model, enhanced_prompt: enhancedPrompt, params: sanitizeParams(args) },
+            inline: () => ({ type: 'image', data: buffer.toString('base64'), mimeType: contentType }),
+            preview: imagePreview(buffer, contentType),
+            extraText: enhancedPrompt ? `Enhanced prompt: ${enhancedPrompt}` : undefined,
+            structured: enhancedPrompt ? { enhanced_prompt: enhancedPrompt } : undefined,
+          })
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
@@ -1083,9 +1578,9 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_image_upscale',
       title: 'Venice Image Upscale',
-      description: `Upscale an image (2-4× scale). Endpoint requires base64 image; this tool fetches the URL and uploads it. Returns base64 PNG.${X402_OK}`,
+      description: `Upscale an image (2-4× scale). The image is uploaded as multipart form data.${X402_OK}${localPathNote}${mediaDirNote}`,
       inputSchema: {
-        image_url: z.string().url().describe('Image to upscale: an http(s) URL or an inline base64 data URL. Include a concrete media type in data URLs, e.g. image/jpeg.'),
+        image_url: z.string().min(1).describe('Image to upscale: an http(s) URL, an inline base64 data URL with a concrete media type (e.g. image/jpeg), or, over stdio, a local absolute path.'),
         scale: z.number().min(2).max(4).optional().describe('Upscale factor, 2 to 4. Defaults to 2. Large inputs are scaled down automatically to stay under the 4096x4096 output cap.'),
         creativity: z
           .number()
@@ -1096,13 +1591,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
-          const source = await fetchUploadSource(args.image_url, {
-            label: 'image_url',
-            fallbackContentType: 'image/png',
-            fallbackFilename: 'image.png',
-            timeoutMs: cfg.timeoutMs,
-            allowedContentTypes: ['image/'],
-          })
+          const source =
+            (await readLocalUploadSource(args.image_url, localInput('image_url'))) ??
+            (await fetchUploadSource(args.image_url, {
+              label: 'image_url',
+              fallbackContentType: 'image/png',
+              fallbackFilename: 'image.png',
+              timeoutMs: cfg.timeoutMs,
+              allowedContentTypes: ['image/'],
+            }))
           const form = new FormData()
           form.set('image', new Blob([source.buffer], { type: source.contentType }), source.filename)
           if (args.scale !== undefined) form.set('scale', String(args.scale))
@@ -1110,9 +1607,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const { buffer, contentType } = await client.postBinary('/v1/image/upscale', { form }, {
             maxBytes: cfg.maxImageResponseBytes,
           })
-          return {
-            content: [{ type: 'image', data: buffer.toString('base64'), mimeType: contentType }],
-          }
+          return mediaResult(store, {
+            kind: 'image',
+            buffer,
+            mimeType: contentType,
+            label: `upscale-${source.filename}`,
+            metadata: { tool: 'venice_image_upscale', params: sanitizeParams(args) },
+            inline: () => ({ type: 'image', data: buffer.toString('base64'), mimeType: contentType }),
+            preview: imagePreview(buffer, contentType),
+          })
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
@@ -1123,17 +1626,24 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_image_remove_bg',
       title: 'Venice Image Background Remove',
-      description: `Remove image background; returns a transparent PNG (base64).${X402_OK}`,
-      inputSchema: { image_url: z.string().url() },
+      description: `Remove image background; returns a transparent PNG.${X402_OK}${localPathNote}${mediaDirNote}`,
+      inputSchema: { image_url: z.string().min(1).describe('URL, data URL, or local absolute path.') },
       handler: async (args) => {
         try {
+          const image_url = await resolveMediaInput(args.image_url, localInput('image_url'))
           const { buffer, contentType } = await client.postBinary('/v1/image/background-remove', {
             method: 'POST',
-            json: { image_url: args.image_url },
+            json: { image_url },
           }, { maxBytes: cfg.maxImageResponseBytes })
-          return {
-            content: [{ type: 'image', data: buffer.toString('base64'), mimeType: contentType }],
-          }
+          return mediaResult(store, {
+            kind: 'image',
+            buffer,
+            mimeType: contentType,
+            label: 'background-removed',
+            metadata: { tool: 'venice_image_remove_bg', params: sanitizeParams(args) },
+            inline: () => ({ type: 'image', data: buffer.toString('base64'), mimeType: contentType }),
+            preview: imagePreview(buffer, contentType),
+          })
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) return imageResponseTooLarge(err)
           return fail(formatToolError(err))
@@ -1149,33 +1659,33 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_generate',
       title: 'Venice Video Queue',
-      description: `Queue a video generation. Supports Veo 3.1, Kling, Wan, Seedance, MiniMax, PixVerse, Runway, LTX, Grok Imagine, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-5-reference-to-video-basic" etc.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_video_status. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details. Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
+      description: `Queue a video generation. Supports Veo 3.1, Kling, Wan, Seedance, MiniMax, PixVerse, Runway, LTX, Grok Imagine, and others. Pick a specific id like "veo3.1-fast-text-to-video", "veo3.1-fast-image-to-video", "kling-2.6-pro-text-to-video", "wan-2.6-text-to-video", "seedance-2-5-reference-to-video-basic" etc.${nsfwNote}${X402_OK} Returns { model, queue_id, estimated_cost_usd }; poll with venice_video_status or block with venice_video_wait. NOTE: 'duration' is a model-specific string enum like '4s' / '6s' / '8s'; inspect it with venice_model_details.${localPathNote} Current public Seedance models may reject detectable persons outright. Consent flags are defensive compatibility support, not a policy bypass; set them only after showing a returned policy to the user and receiving explicit confirmation.`,
       inputSchema: {
         prompt: z.string().min(1).max(4096),
         model: z.string().describe('Required. Full model id, e.g. "veo3.1-fast-text-to-video".'),
         duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s". See venice_model_details.'),
         aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see venice_model_details.'),
         seed: z.number().int().optional(),
-        image_url: z.string().url().optional().describe('For image-to-video models: starting frame. URL or data URL.'),
-        end_image_url: z.string().url().optional().describe('For models that support end frames or transitions. URL or data URL.'),
-        video_url: z.string().url().optional().describe('For video-to-video and upscale models (e.g. wan-2-7-video-to-video, topaz-video-upscale): input video. URL or data URL. Supported: MP4, MOV, WebM.'),
-        audio_url: z.string().url().optional().describe('For models that support audio input: background music. URL or data URL. Supported: WAV, MP3. Max 30s, 15MB.'),
-        reference_image_urls: z.array(z.string().url()).max(9).optional().describe('For models with reference image support: up to 9 images for character/style consistency. Each a URL or data URL.'),
-        reference_video_urls: z.array(z.string().url()).max(3).optional().describe('For Seedance 2.0 R2V and similar: up to 3 reference video clips to inherit subject motion, camera movement, and style. Per-clip 2–15s, MP4/MOV, ≤50MB; aggregate ≤15s. Each a URL or data URL.'),
-        reference_audio_urls: z.array(z.string().url()).max(3).optional().describe('For Seedance 2.0 R2V and similar: up to 3 reference audio clips for vocal timbre, narration, or sound effects. Per-clip 2–15s, WAV/MP3; aggregate ≤15s. Must be paired with at least one reference image or video. Each a URL or data URL.'),
+        image_url: z.string().min(1).optional().describe('For image-to-video models: starting frame. URL, data URL, or local absolute path.'),
+        end_image_url: z.string().min(1).optional().describe('For models that support end frames or transitions. URL, data URL, or local path.'),
+        video_url: z.string().min(1).optional().describe('For video-to-video and upscale models (e.g. wan-2-7-video-to-video, topaz-video-upscale): input video. URL, data URL, or local path. Supported: MP4, MOV, WebM.'),
+        audio_url: z.string().min(1).optional().describe('For models that support audio input: background music. URL, data URL, or local path. Supported: WAV, MP3. Max 30s, 15MB.'),
+        reference_image_urls: z.array(z.string().min(1)).max(9).optional().describe('For models with reference image support: up to 9 images for character/style consistency. Each a URL, data URL, or local path.'),
+        reference_video_urls: z.array(z.string().min(1)).max(3).optional().describe('For Seedance 2.0 R2V and similar: up to 3 reference video clips to inherit subject motion, camera movement, and style. Per-clip 2–15s, MP4/MOV, ≤50MB; aggregate ≤15s. Each a URL, data URL, or local path.'),
+        reference_audio_urls: z.array(z.string().min(1)).max(3).optional().describe('For Seedance 2.0 R2V and similar: up to 3 reference audio clips for vocal timbre, narration, or sound effects. Per-clip 2–15s, WAV/MP3; aggregate ≤15s. Must be paired with at least one reference image or video. Each a URL, data URL, or local path.'),
         elements: z.array(z.object({
-          frontal_image_url: z.string().url().optional(),
-          reference_image_urls: z.array(z.string().url()).max(3).optional(),
-          video_url: z.string().url().optional(),
-        })).max(4).optional().describe('For Kling O3 R2V and similar: up to 4 character/object elements. Reference in prompt as @Element1, @Element2, etc.'),
-        scene_image_urls: z.array(z.string().url()).max(4).optional().describe('For models with advanced element support: up to 4 scene reference images. Reference in prompt as @Image1, @Image2, etc.'),
+          frontal_image_url: z.string().min(1).optional(),
+          reference_image_urls: z.array(z.string().min(1)).max(3).optional(),
+          video_url: z.string().min(1).optional(),
+        })).max(4).optional().describe('For Kling O3 R2V and similar: up to 4 character/object elements. Reference in prompt as @Element1, @Element2, etc. URLs, data URLs, or local paths.'),
+        scene_image_urls: z.array(z.string().min(1)).max(4).optional().describe('For models with advanced element support: up to 4 scene reference images. Reference in prompt as @Image1, @Image2, etc. URLs, data URLs, or local paths.'),
         camera_trajectory: cameraTrajectorySchema.optional().describe('For minimax-h3-max-multi-angle only: 2–12 camera keyframes with strictly increasing time from 0 to 1, azimuth in degrees (signed, at most 32 full turns of travel in total), elevation from -90 to 90 degrees, and distance relative to the starting camera (1 = unchanged). Requires image_url; the output follows its aspect ratio. Omit to let the model choose the camera path.'),
         omni_reference_task_type: z.enum(['auto', 'reference', 'edit', 'extend']).optional().describe('For seedance-2-5-reference-to-video-basic only: what to do with reference_video_urls. "edit" changes the referenced clip and "extend" continues it; both need reference_video_urls and a prompt that asks for the same thing. Omit to let Venice infer it from the prompt.'),
         video_references: z.array(z.object({
-          video_url: z.string().url(),
+          video_url: z.string().min(1),
           ref_name: z.string().optional(),
-          audio_url: z.string().url().optional(),
-        }).strict()).optional().describe('For models with per_reference_audio, e.g. wan-2-7-reference-to-video: reference clips, up to the model\'s reference-video limit. Each has an optional ref_name to cite in the prompt and an optional audio_url (WAV or MP3) with that character\'s voice. Each URL may be a data URL.'),
+          audio_url: z.string().min(1).optional(),
+        }).strict()).optional().describe('For models with per_reference_audio, e.g. wan-2-7-reference-to-video: reference clips, up to the model\'s reference-video limit. Each has an optional ref_name to cite in the prompt and an optional audio_url (WAV or MP3) with that character\'s voice. Each URL may also be a data URL or a local path.'),
         negative_prompt: z.string().max(4096).optional().describe('Negative prompt (what to avoid). Supported by Seedance and other models.'),
         resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see venice_model_details.'),
         upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple.'),
@@ -1190,17 +1700,60 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
+          const body = {
+            ...args,
+            image_url: args.image_url && (await resolveMediaInput(args.image_url, localInput('image_url'))),
+            end_image_url: args.end_image_url && (await resolveMediaInput(args.end_image_url, localInput('end_image_url'))),
+            video_url: args.video_url && (await resolveMediaInput(args.video_url, localInput('video_url'))),
+            audio_url: args.audio_url && (await resolveMediaInput(args.audio_url, localInput('audio_url'))),
+            reference_image_urls: await resolveMediaInputs(args.reference_image_urls, localInput('reference_image_urls')),
+            reference_video_urls: await resolveMediaInputs(args.reference_video_urls, localInput('reference_video_urls')),
+            reference_audio_urls: await resolveMediaInputs(args.reference_audio_urls, localInput('reference_audio_urls')),
+            scene_image_urls: await resolveMediaInputs(args.scene_image_urls, localInput('scene_image_urls')),
+            elements: args.elements && (await Promise.all(args.elements.map(async (el: NonNullable<typeof args.elements>[number], i: number) => ({
+              frontal_image_url: el.frontal_image_url && (await resolveMediaInput(el.frontal_image_url, localInput(`elements[${i}].frontal_image_url`))),
+              reference_image_urls: await resolveMediaInputs(el.reference_image_urls, localInput(`elements[${i}].reference_image_urls`)),
+              video_url: el.video_url && (await resolveMediaInput(el.video_url, localInput(`elements[${i}].video_url`))),
+            })))),
+            video_references: args.video_references && (await Promise.all(args.video_references.map(async (ref: NonNullable<typeof args.video_references>[number], i: number) => ({
+              ...ref,
+              video_url: await resolveMediaInput(ref.video_url, localInput(`video_references[${i}].video_url`)),
+              ...(ref.audio_url ? { audio_url: await resolveMediaInput(ref.audio_url, localInput(`video_references[${i}].audio_url`)) } : {}),
+            })))),
+          }
+          // Models that take video_url need it to quote, but quoting an inline clip would upload it twice;
+          // an estimate that ignores reference-video length would under-quote. Skip the quote in both cases.
+          const referenceVideoSeconds = referenceVideoTotalSeconds([
+            ...(body.reference_video_urls ?? []),
+            ...(body.video_references?.map((ref: { video_url: string }) => ref.video_url) ?? []),
+          ])
+          const canQuote = !body.video_url?.startsWith('data:') && referenceVideoSeconds !== null
+          const estimatedCost = canQuote
+            ? await estimateCost(client, '/v1/video/quote', {
+                model: args.model,
+                duration: args.duration,
+                aspect_ratio: args.aspect_ratio,
+                resolution: args.resolution,
+                upscale_factor: args.upscale_factor,
+                audio: args.audio,
+                video_url: body.video_url,
+                reference_image_count: args.reference_image_urls?.length,
+                reference_video_total_duration: referenceVideoSeconds,
+              })
+            : undefined
           const resp = await client.post<{ model?: string; queue_id?: string; download_url?: string }>(
             '/v1/video/queue',
-            args
+            body
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned by Venice.')
           queueDownloadUrls.remember(id, resp.download_url)
+          queueRequests.remember(id, { tool: 'venice_video_generate', model: resp.model ?? args.model, prompt: args.prompt, params: sanitizeParams(args), estimated_cost_usd: estimatedCost })
+          const costNote = estimatedCost !== undefined ? ` Estimated cost: $${estimatedCost.toFixed(4)} USD.` : ''
           return ok(
-            `Queued: queue_id=${id}, model=${resp.model}\n` +
-              'Poll with venice_video_status using queue_id and model. This process remembers download_url; pass it from structuredContent only if another process will poll. Do not invent a download_url.',
-            { queue_id: id, model: resp.model, download_url: resp.download_url }
+            `Queued: queue_id=${id}, model=${resp.model}.${costNote}\n` +
+              'Block until done with venice_video_wait, or poll with venice_video_status using queue_id and model. This process remembers download_url; pass it from structuredContent only if another process will poll. Do not invent a download_url.',
+            { queue_id: id, model: resp.model, download_url: resp.download_url, estimated_cost_usd: estimatedCost }
           )
         } catch (err) {
           const consent = needsConsentDetails(err)
@@ -1231,7 +1784,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_status',
       title: 'Venice Video Retrieve / Status',
-      description: `Check status of a queued video job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 video/mp4 MCP resource or a download_url resource link. For VPS / Grok Imagine Private models, retrieve returns COMPLETED JSON without a URL: this process reuses the queue-time download_url when venice_video_generate ran here, or accepts a Venice-host download_url argument. POST endpoint with body {model, queue_id}.${X402_OK}`,
+      description: `Check status of a queued video job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 video/mp4 MCP resource or a download_url resource link. For VPS / Grok Imagine Private models, retrieve returns COMPLETED JSON without a URL: this process reuses the queue-time download_url when venice_video_generate ran here, or accepts a Venice-host download_url argument. POST endpoint with body {model, queue_id}.${X402_OK}${mediaDirNote}`,
       inputSchema: {
         queue_id: z.string().min(1).describe('Returned by venice_video_generate.'),
         model: z.string().min(1).describe('Same model id used to queue.'),
@@ -1239,10 +1792,10 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           'Queue-time download_url from venice_video_generate. Must be an https Venice host. Needed for VPS / Grok Imagine Private only when this process did not queue the job (retrieve returns COMPLETED without a URL).',
         ),
         delete_media_on_completion: z.boolean().optional().describe(
-          'Delete server-side media after an embedded MP4 has been buffered, before the tool result returns to the client. Ignored for download_url results: download first, then call venice_video_complete.',
+          'Delete server-side media after an embedded MP4 has been buffered, before the tool result returns to the client. For download_url results it runs only once the file is saved to VENICE_MEDIA_DIR; otherwise download first, then call venice_video_complete.',
         ),
       },
-      handler: async (args) => {
+      handler: (args, ctx) => videoResults.run(args.queue_id, args.delete_media_on_completion === true, async () => {
         try {
           const { download_url: queueDownloadUrl, ...retrieveArgs } = args
           const response = await client.postMixed<{
@@ -1256,7 +1809,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
             // Buffer and validate the MP4 before cleanup, keeping oversized responses retryable.
             // Requested cleanup then runs before the tool result returns to the client.
             delete_media_on_completion: false,
-          }, { maxBytes: cfg.maxVideoResponseBytes })
+          }, { maxBytes: cfg.maxVideoResponseBytes, signal: ctx?.signal })
           const cleanupAfterSuccess = async (successNote: string) => {
             if (!args.delete_media_on_completion) {
               return { deleted: false, cleanupNote: '' }
@@ -1285,6 +1838,17 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               }
             }
           }
+          const queued = queueRequests.get(args.queue_id)
+          const videoMetadata = (extra: Record<string, unknown>) => ({
+            tool: 'venice_video_generate',
+            model: queued?.model ?? args.model,
+            queue_id: args.queue_id,
+            prompt: queued?.prompt,
+            params: queued?.params,
+            estimated_cost_usd: queued?.estimated_cost_usd,
+            queued_at: queued?.queued_at,
+            ...extra,
+          })
           if (response.kind === 'binary') {
             if (!response.contentType.toLowerCase().includes('video/mp4')) {
               return fail(`Venice returned unsupported video content type: ${response.contentType}`)
@@ -1294,6 +1858,19 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                 'Venice returned an empty video/mp4 body. The queued media was not deleted; retry venice_video_status with the same queue_id.',
                 { error: 'empty_video_response', retry_safe: true, queue_id: args.queue_id, server_media_deleted: false },
               )
+            }
+            if (store) {
+              return mediaResult(store, {
+                kind: 'video',
+                buffer: response.buffer,
+                mimeType: 'video/mp4',
+                label: queued?.prompt ?? args.queue_id,
+                metadata: videoMetadata({ delivery: 'stream' }),
+                inline: () => ({ type: 'text', text: '' }),
+                afterSave: () => cleanupAfterSuccess('Server-side media was deleted after the MP4 was written to disk.'),
+                extraText: `Completed video (${response.buffer.length} bytes).`,
+                structured: { status: 'COMPLETED', queue_id: args.queue_id, estimated_cost_usd: queued?.estimated_cost_usd },
+              })
             }
             const blob = response.buffer.toString('base64')
             const { deleted, cleanupNote } = await cleanupAfterSuccess(
@@ -1335,6 +1912,26 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                 { status: 'COMPLETED' },
               )
             }
+            if (store) {
+              const downloaded = await downloadVeniceMedia(url, {
+                kind: 'video',
+                statusTool: 'venice_video_status',
+                maxBytes: cfg.maxVideoResponseBytes,
+                timeoutMs: cfg.timeoutMs,
+                signal: ctx?.signal,
+              })
+              return mediaResult(store, {
+                kind: 'video',
+                buffer: downloaded.buffer,
+                mimeType: downloaded.contentType,
+                label: queued?.prompt ?? args.queue_id,
+                metadata: videoMetadata({ delivery: 'download_url', download_url: url }),
+                inline: () => ({ type: 'resource_link', uri: url, name: 'video', mimeType: 'video/mp4' }),
+                afterSave: () => cleanupAfterSuccess('Server-side media was deleted after the download was written to disk.'),
+                extraText: `Downloaded from ${url}.`,
+                structured: { status: 'COMPLETED', queue_id: args.queue_id, url, estimated_cost_usd: queued?.estimated_cost_usd },
+              })
+            }
             // The download URL stops working once the stored object is removed, so
             // cleanup must wait until the caller has fetched the bytes.
             const cleanupNote = args.delete_media_on_completion
@@ -1360,7 +1957,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           const eta = resp.average_execution_time ? `${Math.round(resp.average_execution_time / 1000)}s ETA` : ''
           const dur = resp.execution_duration ? `${Math.round(resp.execution_duration / 1000)}s elapsed` : ''
-          return ok(`Status: ${resp.status ?? 'unknown'} ${dur} ${eta}`.trim(), { status: resp.status })
+          return ok(`Status: ${resp.status ?? 'unknown'} ${dur} ${eta}`.trim(), {
+            status: resp.status,
+            queue_id: args.queue_id,
+            average_execution_time: resp.average_execution_time,
+            execution_duration: resp.execution_duration,
+          })
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) {
             return fail(
@@ -1377,7 +1979,28 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           return fail(formatToolError(err))
         }
+      }),
+    },
+
+    {
+      name: 'venice_video_wait',
+      title: 'Venice Video Wait (poll until done)',
+      description: `Block until a queued video job completes, polling venice_video_status with backoff. Returns the same result as venice_video_status on completion. If timeout_seconds elapses first, returns status PROCESSING with the queue_id so you can call venice_video_wait or venice_video_status again; the job keeps running server-side. Never deletes server-side media; call venice_video_complete once you have the result.${X402_OK}${mediaDirNote}`,
+      inputSchema: {
+        queue_id: z.string().min(1).describe('Returned by venice_video_generate.'),
+        model: z.string().min(1).describe('Same model id used to queue.'),
+        download_url: z.string().url().optional().describe('Queue-time download_url, only needed when another process queued the job.'),
+        timeout_seconds: z.number().int().min(5).max(1800).optional().describe(
+          `Maximum wall-clock wait. Defaults to ${DEFAULT_WAIT_SECONDS}. Most MCP clients abandon a tool call after about 60s; raise this only if yours waits longer.`,
+        ),
       },
+      handler: async (args, ctx) =>
+        waitForCompletion(
+          'venice_video_status',
+          { queue_id: args.queue_id, model: args.model, download_url: args.download_url },
+          args.timeout_seconds,
+          ctx,
+        ),
     },
 
     {
@@ -1415,7 +2038,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_tts',
       title: 'Venice TTS (Speech)',
-      description: `Convert text to speech. Supports cloned voices + emotion tags ([whispers], [sarcastically], etc.). When streaming=true, Venice streams upstream but this MCP tool buffers and returns one complete audio result; it does not emit incremental MCP chunks.${X402_OK}`,
+      description: `Convert text to speech. Supports cloned voices + emotion tags ([whispers], [sarcastically], etc.). When streaming=true, Venice streams upstream but this MCP tool buffers and returns one complete audio result; it does not emit incremental MCP chunks.${X402_OK}${mediaDirNote}`,
       inputSchema: {
         input: z.string().min(1).max(4096).describe('Text to convert to speech (max 4096 chars).'),
         voice: z.string().optional().describe('Voice id; see venice://voices.'),
@@ -1427,13 +2050,19 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       },
       handler: async (args) => {
         try {
+          const model = args.model ?? cfg.defaultTtsModel
           const { buffer, contentType } = await client.postBinary('/v1/audio/speech', {
             method: 'POST',
-            json: { ...args, model: args.model ?? cfg.defaultTtsModel },
+            json: { ...args, model },
           }, { maxBytes: cfg.maxAudioResponseBytes })
-          return {
-            content: [{ type: 'audio', data: buffer.toString('base64'), mimeType: contentType }],
-          }
+          return mediaResult(store, {
+            kind: 'speech',
+            buffer,
+            mimeType: contentType,
+            label: args.input,
+            metadata: { tool: 'venice_tts', model, params: sanitizeParams(args) },
+            inline: () => ({ type: 'audio', data: buffer.toString('base64'), mimeType: contentType }),
+          })
         } catch (err) {
           if (err instanceof VeniceResponseTooLargeError) return audioResponseTooLarge(err)
           return fail(formatToolError(err))
@@ -1568,7 +2197,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_music_generate',
       title: 'Venice Music Queue',
-      description: `Queue music generation. Available models: ace-step-15, elevenlabs-music, minimax-music-v2/v25/v26, stable-audio-25, mmaudio-v2-text-to-audio, elevenlabs-sound-effects-v2.${nsfwNote}${X402_OK} Returns { model, queue_id }; poll with venice_music_status.`,
+      description: `Queue music generation. Discover models with venice_list_models type=music (e.g. ace-step-15, elevenlabs-music, minimax-music-v2/v25/v26, stable-audio-25, mmaudio-v2-text-to-audio, elevenlabs-sound-effects-v2).${nsfwNote}${X402_OK} Returns { model, queue_id, estimated_cost_usd }; poll with venice_music_status or block with venice_music_wait.`,
       inputSchema: {
         prompt: z.string().min(1).max(4000),
         model: z.string().describe('Required. Music model id, e.g. "elevenlabs-music".'),
@@ -1586,6 +2215,13 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       handler: async (args) => {
         try {
           const { instrumental, lyrics, ...queueArgs } = args
+          const durationSeconds =
+            typeof args.duration_seconds === 'string' ? Number(args.duration_seconds) : args.duration_seconds
+          const estimatedCost = await estimateCost(client, '/v1/audio/quote', {
+            model: args.model,
+            duration_seconds: durationSeconds,
+            character_count: args.prompt.length,
+          })
           const resp = await client.post<{ model?: string; queue_id?: string }>(
             '/v1/audio/queue',
             {
@@ -1596,10 +2232,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           )
           const id = resp.queue_id
           if (!id) return fail('No queue_id returned.')
+          queueRequests.remember(id, { tool: 'venice_music_generate', model: resp.model ?? args.model, prompt: args.prompt, params: sanitizeParams(args), estimated_cost_usd: estimatedCost })
+          const costNote = estimatedCost !== undefined ? ` Estimated cost: $${estimatedCost.toFixed(4)} USD.` : ''
           return ok(
-            `Queued: queue_id=${id}, model=${resp.model}\n` +
-              `Poll with venice_music_status({ queue_id: "${id}", model: "${resp.model}" })`,
-            { queue_id: id, model: resp.model }
+            `Queued: queue_id=${id}, model=${resp.model}.${costNote}\n` +
+              `Block until done with venice_music_wait, or poll with venice_music_status({ queue_id: "${id}", model: "${resp.model}" })`,
+            { queue_id: id, model: resp.model, estimated_cost_usd: estimatedCost }
           )
         } catch (err) {
           return fail(formatToolError(err))
@@ -1610,15 +2248,15 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_music_status',
       title: 'Venice Music Retrieve / Status',
-      description: `Check status of a queued music job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 audio MCP resource or a download_url resource link. POST endpoint with body {model, queue_id}.${X402_OK}`,
+      description: `Check status of a queued music job. Returns JSON progress while PROCESSING. Completed jobs are either an embedded base64 audio MCP resource or a download_url resource link. POST endpoint with body {model, queue_id}.${X402_OK}${mediaDirNote}`,
       inputSchema: {
         queue_id: z.string().min(1),
         model: z.string().min(1),
         delete_media_on_completion: z.boolean().optional().describe(
-          'Delete server-side media after embedded audio has been buffered, before the tool result returns to the client. Ignored for download_url results: download first, then call venice_music_complete.',
+          'Delete server-side media after embedded audio has been buffered, before the tool result returns to the client. For download_url results it runs only once the file is saved to VENICE_MEDIA_DIR; otherwise download first, then call venice_music_complete.',
         ),
       },
-      handler: async (args) => {
+      handler: (args, ctx) => musicResults.run(args.queue_id, args.delete_media_on_completion === true, async () => {
         try {
           const response = await client.postMixed<{
             status?: 'PROCESSING' | 'COMPLETED'
@@ -1634,7 +2272,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               // Requested cleanup then runs before the tool result returns to the client.
               delete_media_on_completion: false,
             },
-            { maxBytes: cfg.maxAudioResponseBytes },
+            { maxBytes: cfg.maxAudioResponseBytes, signal: ctx?.signal },
           )
           const cleanupAfterSuccess = async (successNote: string) => {
             if (!args.delete_media_on_completion) {
@@ -1663,6 +2301,17 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
               }
             }
           }
+          const queued = queueRequests.get(args.queue_id)
+          const musicMetadata = (extra: Record<string, unknown>) => ({
+            tool: 'venice_music_generate',
+            model: queued?.model ?? args.model,
+            queue_id: args.queue_id,
+            prompt: queued?.prompt,
+            params: queued?.params,
+            estimated_cost_usd: queued?.estimated_cost_usd,
+            queued_at: queued?.queued_at,
+            ...extra,
+          })
           if (response.kind === 'binary') {
             const mimeType = response.contentType.split(';', 1)[0].trim().toLowerCase()
             if (!mimeType.startsWith('audio/') || mimeType.length === 'audio/'.length) {
@@ -1683,6 +2332,30 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
                 `Venice returned an empty ${mimeType} body. The queued media was not deleted; retry venice_music_status with the same queue_id.`,
                 { error: 'empty_audio_response', retry_safe: true, queue_id: args.queue_id, server_media_deleted: false },
               )
+            }
+            if (store) {
+              const durationHeader = Number(response.headers['x-venice-audio-duration'])
+              const durationSeconds = Number.isFinite(durationHeader) && durationHeader > 0 ? durationHeader : undefined
+              return mediaResult(store, {
+                kind: 'music',
+                buffer: response.buffer,
+                mimeType,
+                label: queued?.prompt ?? args.queue_id,
+                metadata: musicMetadata({
+                  delivery: 'stream',
+                  audio_format: response.headers['x-venice-audio-format'],
+                  duration_seconds: durationSeconds,
+                }),
+                inline: () => ({ type: 'text', text: '' }),
+                afterSave: () => cleanupAfterSuccess('Server-side media was deleted after the audio was written to disk.'),
+                extraText: `Completed music (${response.buffer.length} bytes).`,
+                structured: {
+                  status: 'COMPLETED',
+                  queue_id: args.queue_id,
+                  estimated_cost_usd: queued?.estimated_cost_usd,
+                  duration_seconds: durationSeconds,
+                },
+              })
             }
             const blob = response.buffer.toString('base64')
             const { deleted, cleanupNote } = await cleanupAfterSuccess(
@@ -1715,6 +2388,26 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const resp = response.data
           const url = resp.download_url ?? resp.url
           if (resp.status === 'COMPLETED' && url) {
+            if (store) {
+              const downloaded = await downloadVeniceMedia(url, {
+                kind: 'audio',
+                statusTool: 'venice_music_status',
+                maxBytes: cfg.maxAudioResponseBytes,
+                timeoutMs: cfg.timeoutMs,
+                signal: ctx?.signal,
+              })
+              return mediaResult(store, {
+                kind: 'music',
+                buffer: downloaded.buffer,
+                mimeType: downloaded.contentType,
+                label: queued?.prompt ?? args.queue_id,
+                metadata: musicMetadata({ delivery: 'download_url', download_url: url }),
+                inline: () => ({ type: 'resource_link', uri: url, name: 'music', mimeType: downloaded.contentType }),
+                afterSave: () => cleanupAfterSuccess('Server-side media was deleted after the download was written to disk.'),
+                extraText: `Downloaded from ${url}.`,
+                structured: { status: 'COMPLETED', queue_id: args.queue_id, url, estimated_cost_usd: queued?.estimated_cost_usd },
+              })
+            }
             // The download URL stops working once the stored object is removed, so
             // cleanup must wait until the caller has fetched the bytes.
             const cleanupNote = args.delete_media_on_completion
@@ -1749,6 +2442,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           const dur = resp.execution_duration ? `${Math.round(resp.execution_duration / 1000)}s elapsed` : ''
           return ok(`Status: ${resp.status ?? 'unknown'} ${dur} ${eta}`.trim(), {
             status: resp.status,
+            queue_id: args.queue_id,
             average_execution_time: resp.average_execution_time,
             execution_duration: resp.execution_duration,
           })
@@ -1781,7 +2475,22 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
           }
           return fail(formatToolError(err))
         }
+      }),
+    },
+
+    {
+      name: 'venice_music_wait',
+      title: 'Venice Music Wait (poll until done)',
+      description: `Block until a queued music job completes, polling venice_music_status with backoff. Returns the same result as venice_music_status on completion. If timeout_seconds elapses first, returns status PROCESSING with the queue_id so you can call again; the job keeps running server-side. Never deletes server-side media; call venice_music_complete once you have the result.${X402_OK}${mediaDirNote}`,
+      inputSchema: {
+        queue_id: z.string().min(1),
+        model: z.string().min(1),
+        timeout_seconds: z.number().int().min(5).max(1800).optional().describe(
+          `Maximum wall-clock wait. Defaults to ${DEFAULT_WAIT_SECONDS}. Most MCP clients abandon a tool call after about 60s; raise this only if yours waits longer.`,
+        ),
       },
+      handler: async (args, ctx) =>
+        waitForCompletion('venice_music_status', { queue_id: args.queue_id, model: args.model }, args.timeout_seconds, ctx),
     },
 
     {
@@ -2678,5 +3387,12 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     },
   ]
 
-  return tools
+  function toolByName(name: string): ToolDef {
+    const tool = tools.find((t) => t.name === name)
+    if (!tool) throw new Error(`tool not registered: ${name}`)
+    return tool
+  }
+
+  if (!cfg.toolsets) return tools
+  return tools.filter((t) => cfg.toolsets!.has(toolsetFor(t.name)))
 }

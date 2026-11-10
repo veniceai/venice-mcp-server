@@ -21,7 +21,7 @@ function setup(config = cfg) {
 }
 
 describe('tools registry', () => {
-  it('registers exactly the documented default set (45 tools)', () => {
+  it('registers exactly the documented default set (47 tools)', () => {
     const { tools } = setup()
     const names = tools.map((t) => t.name).sort()
     const expected = [
@@ -55,6 +55,7 @@ describe('tools registry', () => {
       'venice_music_complete',
       'venice_music_generate',
       'venice_music_status',
+      'venice_music_wait',
       'venice_responses',
       'venice_tee_attestation',
       'venice_tee_signature',
@@ -64,6 +65,7 @@ describe('tools registry', () => {
       'venice_video_generate',
       'venice_video_quote',
       'venice_video_status',
+      'venice_video_wait',
       'venice_voice_clone',
       'venice_web_scrape',
       'venice_web_search',
@@ -72,7 +74,7 @@ describe('tools registry', () => {
       'venice_x402_transactions',
     ].sort()
     assert.deepEqual(names, expected)
-    assert.equal(tools.length, 45)
+    assert.equal(tools.length, 47)
   })
 
   it('every tool has a non-empty title and description', () => {
@@ -96,12 +98,14 @@ describe('tools registry', () => {
       'venice_image_remove_bg',
       'venice_video_generate',
       'venice_video_status',
+      'venice_video_wait',
       'venice_video_complete',
       'venice_tts',
       'venice_asr',
       'venice_voice_clone',
       'venice_music_generate',
       'venice_music_status',
+      'venice_music_wait',
       'venice_music_complete',
       'venice_web_search',
       'venice_web_scrape',
@@ -3494,7 +3498,7 @@ describe('video tool schemas', () => {
       { video_url: 'https://example.com/ben.mp4' },
     ]
     assert.equal(schema.safeParse({ ...args, video_references: references }).success, true)
-    for (const bad of [[{ ref_name: 'Video1' }], [{ video_url: 'not a url' }], [{ ...references[1], voice_id: 'eve' }]]) {
+    for (const bad of [[{ ref_name: 'Video1' }], [{ video_url: '' }], [{ ...references[1], voice_id: 'eve' }]]) {
       assert.equal(schema.safeParse({ ...args, video_references: bad }).success, false, JSON.stringify(bad))
     }
 
@@ -3573,9 +3577,9 @@ describe('tool annotations', () => {
     assert.equal(TOOL_ANNOTATIONS.venice_image_generate.destructiveHint, false)
   })
 
-  it('registered status tools advertise optional deletion without claiming unregistered wait behavior', () => {
-    const { get, tools } = setup()
-    for (const name of ['venice_video_status', 'venice_music_status']) {
+  it('status and wait tools advertise optional deletion', () => {
+    const { get } = setup()
+    for (const name of ['venice_video_status', 'venice_music_status', 'venice_video_wait', 'venice_music_wait']) {
       const schema = z.object(get(name).inputSchema)
       assert.equal(schema.safeParse({ queue_id: 'q', model: 'm', delete_media_on_completion: true }).success, true)
       assert.deepEqual(TOOL_ANNOTATIONS[name], {
@@ -3584,10 +3588,6 @@ describe('tool annotations', () => {
         idempotentHint: true,
         openWorldHint: false,
       }, name)
-    }
-    for (const name of ['venice_video_wait', 'venice_music_wait']) {
-      assert.equal(tools.some((tool) => tool.name === name), false, name)
-      assert.equal(Object.hasOwn(TOOL_ANNOTATIONS, name), false, name)
     }
   })
 
