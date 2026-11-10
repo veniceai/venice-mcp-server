@@ -137,21 +137,18 @@ Tools return a `file://` resource link plus `structuredContent.path`, and the si
 
 Editors do not host MCP servers themselves; pair this server with your editor's MCP server inside one host (Claude Code, Claude Desktop, Codex, Cursor). DaVinci Resolve Studio 21.1+ ships a native MCP server (`File > Setup AI Assistants…`) whose `run_script` tool can call `MediaPool.ImportMedia([path])` and `AppendToTimeline`; community servers such as [samuelgursky/davinci-resolve-mcp](https://github.com/samuelgursky/davinci-resolve-mcp) expose named import tools. For editors without an MCP server, point `VENICE_MEDIA_DIR` at a watch folder or drag the files in.
 
+Set the `env` of the server entry from [step 2](#2-add-this-to-your-mcp-host-config) to:
+
 ```json
 {
-  "mcpServers": {
-    "venice": {
-      "command": "npx",
-      "args": ["-y", "@veniceai/mcp-server@0.3.0"],
-      "env": {
-        "VENICE_API_KEY": "<your-venice-api-key>",
-        "VENICE_MEDIA_DIR": "~/Movies/Venice",
-        "VENICE_TOOLSETS": "media"
-      }
-    }
-  }
+  "VENICE_API_KEY": "<your-venice-api-key>",
+  "VENICE_MEDIA_DIR": "~/Movies/Venice",
+  "VENICE_TOOLSETS": "media"
 }
 ```
+
+<!-- Remove this note in the release that ships VENICE_MEDIA_DIR. -->
+`VENICE_MEDIA_DIR`, `VENICE_TOOLSETS`, the wait tools, and local file inputs take effect in the next release; the version published on npm doesn't have them yet.
 
 Example prompt once both servers are connected: *"Generate a 4 s 16:9 establishing shot of a rainy Tokyo street with `veo3.1-fast-text-to-video`, wait for it, then import the file into the Media Pool and append it at the playhead."*
 
