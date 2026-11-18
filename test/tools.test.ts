@@ -3504,6 +3504,51 @@ describe('video tool schemas', () => {
     assert.deepEqual((stub.callsTo('/v1/video/queue')[0].body as { video_references: unknown }).video_references, references)
   })
 
+  it('venice_video_generate accepts the reference-list and prompt sizes QueueVideoRequest allows', async () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_video_generate').inputSchema)
+    const base = {
+      prompt: 'a sunset',
+      model: 'seedance-2-0-reference-to-video',
+      duration: '5s',
+    }
+    const images = Array.from({ length: 30 }, (_, i) => `https://example.com/img-${i}.png`)
+    const videos = Array.from({ length: 10 }, (_, i) => `https://example.com/clip-${i}.mp4`)
+    const audios = Array.from({ length: 10 }, (_, i) => `https://example.com/audio-${i}.mp3`)
+    const references = Array.from({ length: 5 }, (_, i) => ({ video_url: `https://example.com/ref-${i}.mp4` }))
+    const accepted = schema.safeParse({
+      ...base,
+      prompt: 'p'.repeat(32_000),
+      negative_prompt: 'n'.repeat(32_000),
+      reference_image_urls: images,
+      reference_video_urls: videos,
+      reference_audio_urls: audios,
+      video_references: references,
+    })
+    assert.equal(accepted.success, true)
+
+    assert.equal(schema.safeParse({ ...base, prompt: 'p'.repeat(32_001) }).success, false)
+    assert.equal(schema.safeParse({ ...base, negative_prompt: 'n'.repeat(32_001) }).success, false)
+    assert.equal(schema.safeParse({ ...base, reference_image_urls: [...images, 'https://example.com/extra.png'] }).success, false)
+    assert.equal(schema.safeParse({ ...base, reference_video_urls: [...videos, 'https://example.com/extra.mp4'] }).success, false)
+    assert.equal(schema.safeParse({ ...base, reference_audio_urls: [...audios, 'https://example.com/extra.mp3'] }).success, false)
+    assert.equal(schema.safeParse({
+      ...base,
+      video_references: [...references, { video_url: 'https://example.com/extra.mp4' }],
+    }).success, false)
+
+    // The handler forwards the list as given; it does not trim it below the schema cap.
+    const fourClips = videos.slice(0, 4)
+    assert.equal(schema.safeParse({ ...base, reference_video_urls: fourClips }).success, true)
+    const stub = new StubClient()
+    const tools = buildTools(stub.asClient(), cfg)
+    await tools.find((t) => t.name === 'venice_video_generate')!.handler({ ...base, reference_video_urls: fourClips })
+    assert.deepEqual(
+      (stub.callsTo('/v1/video/queue')[0].body as { reference_video_urls: string[] }).reference_video_urls,
+      fourClips,
+    )
+  })
+
   it('venice_video_generate requires duration', () => {
     const { get } = setup()
     const schema = z.object(get('venice_video_generate').inputSchema)
