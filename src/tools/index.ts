@@ -1038,7 +1038,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
       title: 'Venice Image Multi-Edit',
       description: `Edit multiple images together with a single prompt (multi-image composition / outpainting). Returns base64 PNG.${X402_OK}`,
       inputSchema: {
-        image_urls: z.array(z.string().url()).min(1).max(8),
+        image_urls: z.array(z.string().url()).min(1).max(16).describe('Images to combine, base image first; each a URL or data URL. Up to 16, but each model has its own limit: constraints.maxInputImages in venice_model_details (3 when absent, 1 if combineImages is false). Some models bill each input image beyond pricing.inputImages.included.'),
         prompt: z.string().min(1).max(32_000),
         model: z.string().optional(),
         aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "1:1", "16:9", "9:16", "4:5". Supported values vary by model; the API validates.'),
