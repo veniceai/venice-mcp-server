@@ -54,7 +54,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
         inputSchema: t.inputSchema,
         annotations: TOOL_ANNOTATIONS[t.name],
       },
-      async (args: unknown) => t.handler(args as never)
+      async (args: unknown, extra: { signal?: AbortSignal } | undefined) => t.handler(args as never, { signal: extra?.signal })
     )
   }
 

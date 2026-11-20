@@ -44,6 +44,7 @@ export const TOOL_ANNOTATIONS: Readonly<Record<string, ToolHints>> = {
   venice_video_quote: READ,
   venice_video_generate: OPEN_GENERATE,
   venice_video_status: STATUS,
+  venice_video_wait: STATUS,
   venice_video_complete: CLEANUP,
 
   // audio / music
@@ -53,6 +54,7 @@ export const TOOL_ANNOTATIONS: Readonly<Record<string, ToolHints>> = {
   venice_audio_quote: READ,
   venice_music_generate: GENERATE,
   venice_music_status: STATUS,
+  venice_music_wait: STATUS,
   venice_music_complete: CLEANUP,
 
   // augment

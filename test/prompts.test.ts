@@ -7,8 +7,6 @@ import { loadConfig } from '../src/config.js'
 import { StubClient } from './helpers/stub-client.js'
 
 const CREATOR_PROMPTS = ['create-image', 'create-video', 'create-audio', 'youtube-thumbnail', 'product-photoshoot', 'explainer-video']
-// The prompts poll the status tools when a server doesn't list these.
-const OPTIONAL_TOOLS = new Set(['venice_video_wait', 'venice_music_wait'])
 
 const creatorPrompts = (): PromptDef[] =>
   buildPrompts({ enableNsfw: false }).filter((prompt) => CREATOR_PROMPTS.includes(prompt.name))
@@ -53,7 +51,7 @@ describe('creator workflow prompts', () => {
     for (const prompt of creatorPrompts()) {
       for (const args of [withRequired(prompt), withEvery(prompt)]) {
         for (const name of render(prompt, args).match(/\bvenice_[a-z_]+/g) ?? []) {
-          assert.ok(tools.has(name) || OPTIONAL_TOOLS.has(name), `${prompt.name} names ${name}`)
+          assert.ok(tools.has(name), `${prompt.name} names ${name}`)
         }
       }
     }
