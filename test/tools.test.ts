@@ -226,6 +226,15 @@ describe('tools registry', () => {
     }
     assert.equal(schema.safeParse({ query: 'q', search_provider: 'bing' }).success, false)
   })
+
+  it('venice_image_multi_edit takes up to 16 images and leaves each model limit to Venice', () => {
+    const { get } = setup()
+    const schema = z.object(get('venice_image_multi_edit').inputSchema)
+    const urls = (count: number) => Array.from({ length: count }, (_, i) => `https://x/${i}.png`)
+    assert.equal(schema.safeParse({ image_urls: urls(16), prompt: 'merge' }).success, true)
+    assert.equal(schema.safeParse({ image_urls: urls(17), prompt: 'merge' }).success, false)
+    assert.equal(schema.safeParse({ image_urls: [], prompt: 'merge' }).success, false)
+  })
 })
 
 // ----------------------------------------------------------------------------
