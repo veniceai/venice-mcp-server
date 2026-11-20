@@ -2205,10 +2205,20 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_quote',
       title: 'Venice Video Cost Quote',
-      description: `Get a price quote for a video generation BEFORE queuing.${NO_AUTH}`,
+      description: `Get a USD price quote for a video BEFORE queuing. Pass the duration, resolution, aspect_ratio, audio, and upscale_factor you will queue; resolution and audio change the price. video_url is required for video-to-video, extend, motion-control, and upscale models so Venice can read the file. reference_video_total_duration is quote-only (aggregate reference-video seconds) and must not be sent to venice_video_generate. reference_image_count is quote-only (number of reference images for R2V models billed per image) and must not be sent to venice_video_generate. enhancement_model, target_fps, and slowdown_factor price enhancement jobs. Venice checks which fields a model accepts. Most quotes need no authentication, but upscale quotes require an API key (wallet-only setups get a 403).`,
       inputSchema: {
         model: z.string().min(1).describe('Video model id, e.g. "veo3.1-fast-text-to-video".'),
-        duration: z.string().describe('Duration as model-specific string enum, e.g. "4s", "6s", "8s".'),
+        duration: z.string().describe('Duration as a model-specific string, e.g. "4s", "6s", "8s", or "Auto" when the source clip sets the length.'),
+        aspect_ratio: z.string().optional().describe('Output aspect ratio, e.g. "16:9", "9:16", "1:1", "4:5", "9:21". Model-specific; see venice_model_details.'),
+        resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Required for duration-resolution-rate pricing. Model-specific; see venice_model_details.'),
+        upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple. Same values as venice_video_generate.'),
+        audio: z.boolean().optional().describe('Enable or disable audio generation for models that support it. Defaults to true upstream when omitted.'),
+        video_url: z.string().url().optional().describe('For video-to-video, extend, motion-control, and upscale models: input video. URL or data URL. Required so Venice can price from the file. Supported: MP4, MOV, WebM.'),
+        reference_video_total_duration: z.number().finite().min(0).optional().describe('Quote-only. Aggregate seconds of reference videos for R2V pricing (0 or more). Do not send this field to venice_video_generate.'),
+        reference_image_count: z.number().int().min(0).optional().describe('Quote-only. How many reference images you will send, for R2V models billed per input image. Do not send this field to venice_video_generate.'),
+        enhancement_model: z.string().min(1).optional().describe('For enhancement models only. Provider-side enhancement model name from the model constraints.'),
+        target_fps: z.number().int().min(16).max(120).optional().describe('For enhancement models only. Target FPS for frame interpolation (16–120). Omit to keep the source frame rate.'),
+        slowdown_factor: z.union([z.literal(1), z.literal(2), z.literal(4), z.literal(8)]).optional().describe('For enhancement models only. Slow-motion factor; multiplies billed duration.'),
       },
       handler: async (args) => {
         try {
