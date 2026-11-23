@@ -3563,6 +3563,7 @@ describe('video tool schemas', () => {
       aspect_ratio: '16:9',
       upscale_factor: 2,
       audio: true,
+      hdr: true,
       reference_video_total_duration: 12.5,
       enhancement_model: 'Proteus',
       target_fps: 60,
@@ -3588,6 +3589,7 @@ describe('video tool schemas', () => {
       resolution: '4k',
       upscale_factor: 4,
       audio: false,
+      hdr: true,
       video_url: 'data:video/mp4;base64,AAAA',
     }
 
@@ -3629,6 +3631,7 @@ describe('video tool schemas', () => {
       resolution: '4k',
       aspect_ratio: '16:9',
       audio: false,
+      hdr: true,
       reference_video_total_duration: 5,
     })
 
@@ -3639,6 +3642,54 @@ describe('video tool schemas', () => {
     assert.equal(stub.calls[0].path, '/v1/video/quote')
     assert.deepEqual(stub.calls[0].body, args)
     assert.match((result.content[0] as { text: string }).text, /"quote": 0\.5/)
+  })
+
+  it('keeps optional hdr on video quote and generate and leaves it off when omitted', async () => {
+    const { get, stub } = setup()
+    const quote = z.object(get('venice_video_quote').inputSchema)
+    const generate = z.object(get('venice_video_generate').inputSchema)
+    const sdr = {
+      model: 'kling-v4-text-to-video',
+      duration: '5s',
+      resolution: '1080p',
+    }
+    const hdrQuote = { ...sdr, hdr: true }
+
+    assert.deepEqual(quote.parse(hdrQuote), hdrQuote)
+    assert.deepEqual(quote.parse({ ...sdr, hdr: false }), { ...sdr, hdr: false })
+    assert.deepEqual(quote.parse(sdr), sdr)
+    assert.equal('hdr' in quote.parse(sdr), false)
+    assert.equal(quote.safeParse({ ...sdr, hdr: 'true' }).success, false)
+    assert.equal(quote.safeParse({ ...sdr, hdr: null }).success, false)
+    assert.match(get('venice_video_quote').description, /\bhdr\b/)
+    assert.match(get('venice_video_quote').inputSchema.hdr.description ?? '', /400/)
+    assert.match(get('venice_video_generate').inputSchema.hdr.description ?? '', /400/)
+    assert.doesNotMatch(get('venice_video_quote').inputSchema.hdr.description ?? '', /default/i)
+    assert.doesNotMatch(get('venice_video_generate').inputSchema.hdr.description ?? '', /default/i)
+
+    const quoted = await get('venice_video_quote').handler(quote.parse(hdrQuote))
+    assert.equal(quoted.isError, undefined)
+    assert.equal(stub.callsTo('/v1/video/quote').length, 1)
+    assert.deepEqual(stub.callsTo('/v1/video/quote')[0].body, hdrQuote)
+
+    await get('venice_video_quote').handler(quote.parse(sdr))
+    assert.deepEqual(stub.callsTo('/v1/video/quote')[1].body, sdr)
+    assert.equal('hdr' in (stub.callsTo('/v1/video/quote')[1].body as object), false)
+
+    const generateBase = { prompt: 'sunrise over the bay', ...sdr }
+    const hdrGenerate = { ...generateBase, hdr: true }
+    assert.deepEqual(generate.parse(hdrGenerate), hdrGenerate)
+    assert.deepEqual(generate.parse({ ...generateBase, hdr: false }), { ...generateBase, hdr: false })
+    assert.deepEqual(generate.parse(generateBase), generateBase)
+    assert.equal(generate.safeParse({ ...generateBase, hdr: 1 }).success, false)
+
+    const queued = await get('venice_video_generate').handler(generate.parse(hdrGenerate))
+    assert.equal(queued.isError, undefined)
+    assert.deepEqual(stub.callsTo('/v1/video/queue')[0].body, hdrGenerate)
+
+    await get('venice_video_generate').handler(generate.parse(generateBase))
+    assert.deepEqual(stub.callsTo('/v1/video/queue')[1].body, generateBase)
+    assert.equal('hdr' in (stub.callsTo('/v1/video/queue')[1].body as object), false)
   })
 })
 describe('tool annotations', () => {

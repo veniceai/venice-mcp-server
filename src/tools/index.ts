@@ -1180,6 +1180,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Model-specific; see venice_model_details.'),
         upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple.'),
         audio: z.boolean().optional().describe('Enable or disable audio generation for models that support it. Defaults to true.'),
+        hdr: z.boolean().optional().describe('When true, generate HDR. Kling v4 supports it at resolutions listed in constraints.hdrResolutions (1080p and 4k); the surcharge is per output second. Omit this field otherwise: Venice returns HTTP 400 when the model does not support HDR.'),
         consents: z.object({
           seedance: z.object({
             confirmed_terms_and_privacy: z.literal(true).describe('Set true only after the user confirms the returned policy text and Venice terms/privacy.'),
@@ -2205,7 +2206,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
     {
       name: 'venice_video_quote',
       title: 'Venice Video Cost Quote',
-      description: `Get a USD price quote for a video BEFORE queuing. Pass the duration, resolution, aspect_ratio, audio, and upscale_factor you will queue; resolution and audio change the price. video_url is required for video-to-video, extend, motion-control, and upscale models so Venice can read the file. reference_video_total_duration is quote-only (aggregate reference-video seconds) and must not be sent to venice_video_generate. reference_image_count is quote-only (number of reference images for R2V models billed per image) and must not be sent to venice_video_generate. enhancement_model, target_fps, and slowdown_factor price enhancement jobs. Venice checks which fields a model accepts. Most quotes need no authentication, but upscale quotes require an API key (wallet-only setups get a 403).`,
+      description: `Get a USD price quote for a video BEFORE queuing. Pass the duration, resolution, aspect_ratio, audio, hdr, and upscale_factor you will queue; resolution, audio, and hdr change the price. video_url is required for video-to-video, extend, motion-control, and upscale models so Venice can read the file. reference_video_total_duration is quote-only (aggregate reference-video seconds) and must not be sent to venice_video_generate. reference_image_count is quote-only (number of reference images for R2V models billed per image) and must not be sent to venice_video_generate. enhancement_model, target_fps, and slowdown_factor price enhancement jobs. Venice checks which fields a model accepts. Most quotes need no authentication, but upscale quotes require an API key (wallet-only setups get a 403).`,
       inputSchema: {
         model: z.string().min(1).describe('Video model id, e.g. "veo3.1-fast-text-to-video".'),
         duration: z.string().describe('Duration as a model-specific string, e.g. "4s", "6s", "8s", or "Auto" when the source clip sets the length.'),
@@ -2213,6 +2214,7 @@ export function buildTools(client: VeniceClient, cfg: Config): ToolDef[] {
         resolution: z.string().optional().describe('Output resolution, e.g. "720p", "1080p", "4k". Required for duration-resolution-rate pricing. Model-specific; see venice_model_details.'),
         upscale_factor: z.number().int().optional().describe('For upscale models only: 1 = quality enhance, 2 = double resolution, 4 = quadruple. Same values as venice_video_generate.'),
         audio: z.boolean().optional().describe('Enable or disable audio generation for models that support it. Defaults to true upstream when omitted.'),
+        hdr: z.boolean().optional().describe('When true, quote HDR. Kling v4 supports it at resolutions listed in constraints.hdrResolutions (1080p and 4k); the surcharge is per output second. Omit this field otherwise: Venice returns HTTP 400 when the model does not support HDR.'),
         video_url: z.string().url().optional().describe('For video-to-video, extend, motion-control, and upscale models: input video. URL or data URL. Required so Venice can price from the file. Supported: MP4, MOV, WebM.'),
         reference_video_total_duration: z.number().finite().min(0).optional().describe('Quote-only. Aggregate seconds of reference videos for R2V pricing (0 or more). Do not send this field to venice_video_generate.'),
         reference_image_count: z.number().int().min(0).optional().describe('Quote-only. How many reference images you will send, for R2V models billed per input image. Do not send this field to venice_video_generate.'),
